@@ -28,6 +28,7 @@ pub mod commit;
 pub mod damage;
 pub mod descriptor;
 pub mod error;
+pub mod exit;
 pub mod image;
 pub mod job;
 pub mod manifest;

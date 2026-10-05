@@ -412,6 +412,7 @@ dependencies = [
  "mochi-core",
  "mochi-format",
  "proptest",
+ "serde_json",
  "tempfile",
 ]
 

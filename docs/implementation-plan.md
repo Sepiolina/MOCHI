@@ -164,6 +164,15 @@ Each phase ends with a working, tested artifact. "Fault-matrix rows" refers to t
 - `list`, `get`, restore to directory with traversal rejection, collision and unsupported-name reporting, case-insensitive-filesystem detection, sparse-file handling, attribute restoration per O6 with exceptions reported.
 - **Exit:** fault-matrix row *path traversal or naming collision*. Benchmarks per §27: footer lookup, catalog open, replay, selected-file read — each reported separately, with dataset, hardware, and cache state.
 
+- **Status (C6 started 2026-10-05).** Opening with replay and snapshot selection by commit already exist (C5, B.2: `open_head`, `open_at_footer` with offsets from `commit_history`). New `mochi_core::read`:
+  - `list(head, under)`: path, kind, logical length, and content hash, from the catalog alone.
+  - `read_file` / `read_file_in`: streams one file to a writer as a job (progress, cancellation). Every chunk is hash-verified as stored and decoded bytes; holes are written as zeros and hashed. The whole logical stream must match the file-content hash, and extents are re-checked where their offsets are used.
+  - **Output reaches the writer before the final comparison** (streaming), so it is unverified until `Ok`. The restore engine must write to a temporary file and publish only on `Ok`.
+  - Tests: `c6_read.rs` (8), against the scripted history's independent model and the test kit's separate reassembly. They cover every commit's snapshot, an absent path or a directory refused with nothing written, a damaged chunk, cancellation, sparse files, and a file whose intact chunks do not match its content hash.
+  - Mutations (9): 6 killed. A shorter zero block is an equivalent mutant. Dropping the extent re-check or the length check survives because the catalog already refuses invalid extents at insertion and at open (defense in depth, unreachable through the public API).
+  - **Decision [delegated]:** a path absent from the snapshot is `INVALID_ARGUMENT` (exit 3), not a new code; a dedicated not-found code is for R7 if automation needs one.
+  - **Next:** restore to a directory, which brings traversal rejection, collisions, unsupported names, case-insensitivity detection, and O6 attributes. Attributes need the snapshot manifest's per-version attributes exposed (B.2 checklist question 6).
+
 ### C7 — Verification, health, and reports
 - Levels: structural, referential, stored integrity, content integrity, restoration (§20.1). Inventory, search, and disaster-recovery levels return `UNSUPPORTED` in 1.0 unless implemented.
 - Report schema v1 per §20.5; health dimensions (§20.3); status values (§20.4); exit codes 0–4 with documented precedence (§23.2).

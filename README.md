@@ -126,7 +126,12 @@ library level. Still open: the CLI flags for
 truncation and limits (T29, with C14), native
 Windows durability evidence (T33, gate G6), and the GC hold test (C9).
 
-The next phase after the batch is **C6: read path and extraction**. D0 (desktop shell) and D2 (create and add) can start. Until later phases land,
+**C6 (read path) has started:** `mochi_core::read` lists any commit's
+snapshot and streams a file out of it, verifying every chunk and the whole
+file's content hash. Restore to a directory is next. The CLI does not
+expose reading yet (C14).
+
+The phase after the batch is **C6: read path and extraction**. D0 (desktop shell) and D2 (create and add) can start. Until later phases land,
 `mochi verify` and friends exit `3` with `NOT_IMPLEMENTED`, and post-1.0 commands
 (`inventory`, `split`, `join`, `mount`) exit `4` with `UNSUPPORTED_FEATURE`, as
 spec §23.2 requires.

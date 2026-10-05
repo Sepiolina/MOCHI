@@ -35,6 +35,7 @@ pub mod manifest;
 pub mod object;
 pub mod publish;
 pub mod quarantine;
+pub mod read;
 pub mod recovery;
 pub mod report;
 pub mod segment;

@@ -13,178 +13,25 @@ use std::collections::BTreeMap;
 use mochi_core::catalog::namespace::FileVersionId;
 use mochi_core::catalog::Catalog;
 use mochi_core::commit::{CommitLink, Metadata};
-use mochi_core::manifest::{Attributes, Mtime, PosixAttributes};
+use mochi_core::manifest::Attributes;
 use mochi_core::publish::{
     commit_history, open_at_footer, open_head, read_snapshot, ArchiveWriter, CheckpointPolicy,
     HistoryEntry, OpenedHead, ReadOptions, TailPolicy, Transaction,
 };
-use mochi_core::storage::{ReadStorage, StorageError};
 use mochi_core::ErrorCode;
 use mochi_format::cbor::Value;
 use mochi_format::footer::FOOTER_FRAME_LEN;
 use mochi_testkit::archive::{path, read_state, test_options, Content, Job, State};
 use mochi_testkit::forge::{self, empty_delta, link, rule_base, txid, Forge};
+use mochi_testkit::replay::{
+    append, attrs, checkpoint_with_incomplete_snapshot, flip, history, is_cp, open_append_err,
+    snapshot_attrs, within, write, Step, Tracing,
+};
 use mochi_testkit::{deterministic_bytes, SeqIds, SimStorage};
 use proptest::prelude::*;
 
 fn opts() -> ReadOptions {
     ReadOptions::default()
-}
-
-// ---- a scripted history with per-file attributes ---------------------------------
-
-/// Attributes that differ per file and per step, so a version credited with
-/// another version's attributes is caught.
-fn attrs(mode: u32, t: i64) -> Attributes {
-    Attributes {
-        posix: Some(PosixAttributes {
-            mode,
-            uid: 1000 + mode,
-            gid: 2000,
-        }),
-        windows: None,
-        mtime: Some(Mtime {
-            secs: 1_700_000_000 + t,
-            nanos: (t as u32) * 7,
-        }),
-    }
-}
-
-/// One commit and the model after it: contents, and promised attributes by
-/// path. The model is plain maps built from the transactions, not from any
-/// reconstruction path under test (amendment 4).
-#[derive(Clone)]
-struct Step {
-    tx: Transaction,
-    after: State,
-    attrs: BTreeMap<Vec<u8>, Attributes>,
-}
-
-#[derive(Default)]
-struct Model {
-    state: State,
-    attrs: BTreeMap<Vec<u8>, Attributes>,
-    steps: Vec<Step>,
-    tx: Transaction,
-}
-
-impl Model {
-    fn file(&mut self, p: &str, bytes: Vec<u8>, a: Attributes) {
-        self.tx.put_file(path(p), bytes.clone(), a);
-        self.state.insert(p.into(), Content::File(bytes));
-        self.attrs.insert(p.into(), a);
-    }
-    fn dir(&mut self, p: &str, a: Attributes) {
-        self.tx.put_dir(path(p), a);
-        self.state.insert(p.into(), Content::Dir);
-        self.attrs.insert(p.into(), a);
-    }
-    fn delete(&mut self, p: &str) {
-        self.tx.delete(path(p));
-        self.state.remove(p.as_bytes());
-        self.attrs.remove(p.as_bytes());
-    }
-    /// A rename keeps the version, so it keeps its attributes.
-    fn rename(&mut self, from: &str, to: &str) {
-        self.tx.rename(path(from), path(to));
-        let c = self.state.remove(from.as_bytes()).unwrap();
-        let a = self.attrs.remove(from.as_bytes()).unwrap();
-        self.state.insert(to.into(), c);
-        self.attrs.insert(to.into(), a);
-    }
-    fn end(&mut self, t: i64) {
-        let mut tx = std::mem::take(&mut self.tx);
-        tx.at(Mtime {
-            secs: 1_700_000_000 + t,
-            nanos: 0,
-        });
-        self.steps.push(Step {
-            tx,
-            after: self.state.clone(),
-            attrs: self.attrs.clone(),
-        });
-    }
-}
-
-/// Seven commits: multi-chunk files, empty file, replacement, renames
-/// (attributes follow the version), deletes, nested directories.
-fn history() -> Vec<Step> {
-    let mut m = Model::default();
-    m.dir("d", attrs(0o750, 0));
-    m.file("d/a", deterministic_bytes(1, 200), attrs(0o640, 1));
-    m.file("b", deterministic_bytes(2, 70), attrs(0o600, 2));
-    m.file("c", Vec::new(), attrs(0o444, 3));
-    m.end(0);
-    m.file("d/a", deterministic_bytes(3, 130), attrs(0o641, 11));
-    m.file("e", deterministic_bytes(4, 10), attrs(0o700, 12));
-    m.end(10);
-    m.rename("b", "d/b");
-    m.delete("c");
-    m.end(20);
-    m.dir("f", attrs(0o711, 31));
-    m.file("f/g", deterministic_bytes(5, 300), attrs(0o604, 32));
-    m.end(30);
-    m.delete("e");
-    m.file("f/g", deterministic_bytes(6, 90), attrs(0o606, 41));
-    m.end(40);
-    m.rename("d/a", "f/a");
-    m.end(50);
-    m.file("h", deterministic_bytes(7, 65), attrs(0o655, 61));
-    m.delete("d/b");
-    m.end(60);
-    m.steps
-}
-
-/// Write `steps` into fresh storage under `policy`, in one session.
-fn write(policy: CheckpointPolicy, steps: &[Step]) -> SimStorage {
-    let s = SimStorage::new();
-    let mut w = ArchiveWriter::create(s.clone(), Box::new(SeqIds::new(7)), test_options()).unwrap();
-    w.set_checkpoint_policy(policy).unwrap();
-    let job = Job::new();
-    for st in steps {
-        w.commit(st.tx.clone(), &job.ctx()).unwrap();
-    }
-    w.close().unwrap();
-    s
-}
-
-/// Append `steps` in a new session (fresh ID seed, so IDs never repeat).
-fn append(s: &SimStorage, seed: u64, policy: CheckpointPolicy, steps: &[Step]) {
-    let (mut w, _) = ArchiveWriter::open_append(
-        s.clone(),
-        Box::new(SeqIds::new(seed)),
-        test_options(),
-        TailPolicy::Refuse,
-    )
-    .unwrap();
-    w.set_checkpoint_policy(policy).unwrap();
-    let job = Job::new();
-    for st in steps {
-        w.commit(st.tx.clone(), &job.ctx()).unwrap();
-    }
-    w.close().unwrap();
-}
-
-fn is_cp(e: &HistoryEntry) -> bool {
-    e.commit.metadata.is_checkpoint()
-}
-
-/// Path → promised attributes, from the snapshot manifest of checkpoint `h`.
-fn snapshot_attrs(src: &dyn ReadStorage, h: &OpenedHead) -> BTreeMap<Vec<u8>, Attributes> {
-    let snap = read_snapshot(src, h, &opts()).unwrap();
-    let by_version: BTreeMap<FileVersionId, Attributes> = snap
-        .file_versions
-        .iter()
-        .map(|v| (v.version.id, v.attributes))
-        .collect();
-    snap.entries
-        .iter()
-        .map(|(p, v)| (p.as_stored().to_vec(), by_version[v]))
-        .collect()
-}
-
-fn flip(bytes: &mut [u8], at: u64) {
-    bytes[at as usize] ^= 0x40;
 }
 
 fn code_at(s: &SimStorage, e: &HistoryEntry) -> Result<OpenedHead, ErrorCode> {
@@ -751,27 +598,6 @@ fn t12_no_fallback_past_a_damaged_delta() {
 
 // ---- T11 "No search": trace assertion --------------------------------------------
 
-/// Records every read.
-struct Tracing<'a> {
-    inner: &'a SimStorage,
-    reads: RefCell<Vec<(u64, u64)>>,
-}
-
-impl ReadStorage for Tracing<'_> {
-    fn size(&self) -> Result<u64, StorageError> {
-        self.inner.size()
-    }
-    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, StorageError> {
-        let n = self.inner.read_at(offset, buf)?;
-        self.reads.borrow_mut().push((offset, n as u64));
-        Ok(n)
-    }
-}
-
-fn within(r: (u64, u64), allowed: &[(u64, u64)]) -> bool {
-    allowed.iter().any(|&(lo, hi)| r.0 >= lo && r.0 + r.1 <= hi)
-}
-
 /// T11 "No search" (amendment 3): opening head *h* reads only the
 /// descriptor; the segment's footers and commit records; delta manifests
 /// *b*+1 … *h*; and *b*'s image. Not the base's own delta manifest (its
@@ -919,84 +745,6 @@ fn a_damaged_base_snapshot_blocks_append_on_a_delta_head_only() {
 }
 
 // ---- checklist Q24: incomplete attributes (deliberately malformed input) ---------
-
-/// cp0 d1 (Never), then a checkpoint cp2 whose snapshot manifest omits one
-/// reachable file version (its entry, version, and the chunks only it
-/// uses). The edited snapshot is structurally valid and bound to commit 2;
-/// it just disagrees with the image, which the real writer never produces.
-fn checkpoint_with_incomplete_snapshot() -> (Forge, HistoryEntry, Vec<u8>) {
-    use mochi_core::catalog::extent::ExtentSource;
-    let s = write(CheckpointPolicy::Never, &history()[..2]);
-    append(
-        &s,
-        4001,
-        CheckpointPolicy::EveryCommit,
-        &[Step {
-            tx: Transaction::new(),
-            after: history()[1].after.clone(),
-            attrs: history()[1].attrs.clone(),
-        }],
-    );
-    let real = commit_history(&s, &opts()).unwrap().pop().unwrap();
-    assert!(is_cp(&real));
-    let opened = open_at_footer(&s, real.footer_offset, &opts()).unwrap();
-    let mut snap = read_snapshot(&s, &opened, &opts()).unwrap();
-
-    // Drop the file at "d/a" from the snapshot only.
-    let pos = snap
-        .entries
-        .iter()
-        .position(|(p, _)| p.as_stored() == b"d/a")
-        .unwrap();
-    let (_, vid) = snap.entries.remove(pos);
-    let vpos = snap
-        .file_versions
-        .iter()
-        .position(|v| v.version.id == vid)
-        .unwrap();
-    let dropped = snap.file_versions.remove(vpos);
-    let still_used = |id: &_| {
-        snap.file_versions.iter().any(|v| {
-            v.extents
-                .iter()
-                .any(|e| matches!(e.source, ExtentSource::Chunk { chunk, .. } if chunk == *id))
-        })
-    };
-    let gone: Vec<_> = dropped
-        .extents
-        .iter()
-        .filter_map(|e| match e.source {
-            ExtentSource::Chunk { chunk, .. } if !still_used(&chunk) => Some(chunk),
-            _ => None,
-        })
-        .collect();
-    snap.chunks.retain(|c| !gone.contains(&c.record.id));
-
-    let mut f = Forge::new(s.contents());
-    f.bytes.truncate(real.commit_offset as usize);
-    let snap_ref = f.append_manifest(&snap);
-    let mut rec = real.commit.clone();
-    let Metadata::Checkpoint { image, .. } = rec.metadata else {
-        unreachable!()
-    };
-    rec.metadata = Metadata::Checkpoint {
-        image,
-        snapshot: snap_ref,
-    };
-    let cp2 = f.append_commit(&rec);
-    (f, cp2, b"d/a".to_vec())
-}
-
-fn open_append_err(s: &SimStorage) -> mochi_core::MochiError {
-    ArchiveWriter::open_append(
-        s.clone(),
-        Box::new(SeqIds::new(4100)),
-        test_options(),
-        TailPolicy::Refuse,
-    )
-    .map(|_| ())
-    .expect_err("append must be refused")
-}
 
 /// Q24 on a checkpoint head: reads are unaffected (the snapshot is not read
 /// to open, D10.9); append is refused at open, with nothing published.

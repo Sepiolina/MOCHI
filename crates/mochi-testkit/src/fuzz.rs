@@ -335,6 +335,7 @@ pub fn exercise_archive_open(data: &[u8]) -> ArchiveOpenOutcome {
     // T16: baseline recovery runs on anything with a locatable head, whether
     // or not the head opens, and must never return a state for another commit.
     baseline_recovery_is_sound(&storage, &opts);
+    damage_assessment_is_sound(&storage, &opts);
     let Ok(head) = mochi_core::publish::open_head(&storage, &opts) else {
         return ArchiveOpenOutcome::Refused;
     };
@@ -451,6 +452,34 @@ fn baseline_recovery_is_sound(
         assert_eq!(b.head_seq, loc.footer.fields.commit_sequence);
         assert_eq!(b.catalog.head_commit().unwrap(), Some(b.head_seq));
         assert!(b.segment.base_seq <= b.head_seq);
+    }
+}
+
+/// D10.9: the damage assessment of any history whose commit chain walks
+/// holds its own self-check. An error is acceptable (untrusted input) unless
+/// it is the assessment reporting an internal inconsistency.
+fn damage_assessment_is_sound(
+    storage: &crate::SimStorage,
+    opts: &mochi_core::publish::ReadOptions,
+) {
+    use mochi_core::job::{CancellationToken, JobContext, NullProgress};
+    if mochi_core::publish::commit_history(storage, opts).is_err() {
+        return;
+    }
+    let cancel = CancellationToken::new();
+    let ctx = JobContext {
+        progress: &NullProgress,
+        cancel: &cancel,
+    };
+    match mochi_core::damage::assess_damage(storage, opts, &ctx) {
+        Ok(r) => {
+            assert_eq!(r.commits.len() as u64, r.head_seq + 1);
+            assert_eq!(r.objects.len(), r.ranges.len());
+        }
+        Err(e) => assert!(
+            !e.message.starts_with("internal:"),
+            "the assessment found itself inconsistent: {e}"
+        ),
     }
 }
 

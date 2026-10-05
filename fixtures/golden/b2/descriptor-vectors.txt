@@ -20,3 +20,4 @@ reject-descriptor-declared-limits-missing-key rejects DESCRIPTOR_INVALID
 reject-descriptor-noncanonical-cbor rejects DESCRIPTOR_INVALID
 reject-descriptor-wrong-frame-kind rejects DESCRIPTOR_INVALID
 reject-descriptor-trailing-frame rejects DESCRIPTOR_INVALID
+reject-descriptor-payload-not-consumed rejects DESCRIPTOR_INVALID

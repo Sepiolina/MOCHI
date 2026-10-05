@@ -25,6 +25,7 @@ reject-commit-short-transaction-id rejects RECORD_INVALID
 reject-commit-noncanonical-cbor rejects RECORD_INVALID
 reject-commit-wrong-frame-kind rejects MALFORMED_FRAME
 reject-commit-trailing-frame rejects MALFORMED_FRAME
+reject-commit-payload-not-consumed rejects RECORD_INVALID
 # T11/T12 archive vectors (docs/t11-t12-acceptance.md). Frozen; checked by behaviour.
 # <name>.mochi opens   |   <name>.mochi rejects <core error code> (open_head)
 valid-archive-delta-segment.mochi opens
@@ -43,3 +44,10 @@ reject-archive-link-missing.mochi rejects RECORD_INVALID
 reject-archive-duplicate-version.mochi rejects RECORD_INVALID
 reject-archive-unknown-feature.mochi rejects UNSUPPORTED_FEATURE
 reject-archive-parent-offset-no-footer.mochi rejects FOOTER_INVALID
+reject-archive-segment-descriptor-differs-head-valid.mochi rejects DESCRIPTOR_INVALID
+reject-archive-manifest-archive-id.mochi rejects ENVELOPE_INVALID
+reject-archive-manifest-transaction-id.mochi rejects ENVELOPE_INVALID
+reject-archive-manifest-sequence.mochi rejects ENVELOPE_INVALID
+reject-archive-manifest-hash.mochi rejects STORED_INTEGRITY_FAILED
+reject-archive-descriptor-hash.mochi rejects DESCRIPTOR_INVALID
+reject-archive-descriptor-archive-id.mochi rejects DESCRIPTOR_INVALID

@@ -349,3 +349,36 @@ fn fuzz_smoke_over_mutated_inputs() {
     }
     seeds.clear();
 }
+
+/// G1 (T30): the D11 binding vectors fail on the rule they name, not on an
+/// earlier one. Each frozen file's refusal message names its fault.
+#[test]
+fn binding_vectors_fail_on_their_own_rule() {
+    for (name, fragment) in [
+        (
+            "reject-archive-segment-descriptor-differs-head-valid",
+            "commit 2 references a different archive descriptor",
+        ),
+        ("reject-archive-manifest-archive-id", "ArchiveIdMismatch"),
+        (
+            "reject-archive-manifest-transaction-id",
+            "TransactionIdMismatch",
+        ),
+        ("reject-archive-manifest-sequence", "SequenceMismatch"),
+        ("reject-archive-manifest-hash", "delta manifest at offset"),
+        (
+            "reject-archive-descriptor-hash",
+            "archive descriptor at offset 0: stored-object hash mismatch",
+        ),
+        (
+            "reject-archive-descriptor-archive-id",
+            "names a different archive",
+        ),
+    ] {
+        let s = SimStorage::from_bytes(std::fs::read(dir().join(format!("{name}.mochi"))).unwrap());
+        let e = open_head(&s, &ReadOptions::default())
+            .map(|_| ())
+            .unwrap_err();
+        assert!(e.message.contains(fragment), "{name}: {e}");
+    }
+}

@@ -22,7 +22,7 @@ Rules (AGENTS.md):
   envelope and one reject per D11 obligation, each with its own fault.
   Reader expectations are in `vectors.txt`. Payloads are minimal SQLite
   headers (signature and `user_version` only).
-* 18 archive descriptor v0 frames (`*-descriptor-*`): two valid (minimal; with
+* 19 archive descriptor v0 frames (`*-descriptor-*`): two valid (minimal; with
   declared limits) and a reject for every CDDL rule, with the D12
   classification (`DESCRIPTOR_INVALID` for damage, `UNSUPPORTED_FEATURE` for
   refusals) in `descriptor-vectors.txt`.
@@ -36,16 +36,17 @@ was added. Regenerate with `cargo test -p mochi-testkit --test b2_golden --
 
 Commit record **schema 1** (`docs/schemas/commit-record-v1.cddl`; plan T8).
 
-`c5/*.bin`: 25 commit records, each one complete stored frame. Valid: a root
+`c5/*.bin`: 26 commit records, each one complete stored frame. Valid: a root
 checkpoint, a child checkpoint linked by commit ID, and a delta on base (the
-child, by the base rule). 22 rejects with exactly one defect each: ID
+child, by the base rule). 23 rejects with exactly one defect each: ID
 mismatch; unknown key; missing delta-manifest key; missing descriptor key;
 future schema; **legacy schema 0**; unknown metadata form; checkpoint without
 a snapshot reference; delta carrying a snapshot reference; commit 0 as a
 delta; base not before the commit; root with a parent; orphan; parent
 sequence gap; descriptor off offset 0; unknown required feature; features not
 increasing (`ENVELOPE_INVALID`, the shared D11 rule); short transaction ID;
-non-canonical CBOR; wrong frame kind; trailing frame. Body edits recompute the
+non-canonical CBOR; wrong frame kind; trailing frame; payload not fully
+consumed. Body edits recompute the
 stored ID so each reject exercises its own rule. `vectors.txt` lists each
 valid vector's commit ID and each reject's error code.
 
@@ -99,21 +100,39 @@ and `write_c5_golden_files` does not touch them. Checked by behaviour, on
 the frozen file and on a fresh build. Deliberately not included: the
 unknown-operation case (not in the acceptance list).
 
+**G1 additions (2026-10-05, T30).** Seven more `reject-archive-*.mochi`,
+appended to `vectors.txt` so earlier lines are unchanged. They give the D11
+obligations that bind a CBOR record to its commit an archive-level vector:
+`manifest-archive-id`, `manifest-transaction-id`, `manifest-sequence`
+(`ENVELOPE_INVALID`), `manifest-hash` (`STORED_INTEGRITY_FAILED`),
+`descriptor-hash` and `descriptor-archive-id` (`DESCRIPTOR_INVALID`). The
+seventh is `segment-descriptor-differs-head-valid` (D10.6). The frozen
+`reject-archive-segment-descriptor-differs.mochi` never reached that rule:
+the forge copied the intermediate commit's wrong descriptor reference into
+the head, so the head fails on its own reference. It stays frozen and is
+still a valid reject (D12, own reference); the new vector has a head that
+references the real descriptor. `binding_vectors_fail_on_their_own_rule`
+pins each refusal's message. Also added: one `*-payload-not-consumed`
+reject per CBOR record type (`c5/reject-commit-…`, `c4/reject-manifest-…`,
+`b2/reject-descriptor-…`): a byte after the CBOR item inside the frame,
+D11 "Payload length".
+
 ## C4 vectors
 
 Recovery manifest **schema 1** (`docs/schemas/recovery-manifest-v1.cddl`;
 plan T9).
 
-`c4/*.bin`: 25 recovery manifests, each one complete stored frame. Valid:
+`c4/*.bin`: 26 recovery manifests, each one complete stored frame. Valid:
 delta(0); delta(1) linked to delta(0) by hash; and the snapshot S(1), with no
-parent and the same sequence and transaction ID as delta(1). 22 rejects:
+parent and the same sequence and transaction ID as delta(1). 23 rejects:
 unknown key; missing entries key; missing or short transaction ID; future
 schema; **legacy schema 0**; unknown required feature; features not
 increasing (`ENVELOPE_INVALID`); symlink kind; Windows bits; mode bits;
 unsorted versions; traversal path; orphan delta; root delta with a parent;
 parent sequence gap; delta with entries; snapshot with a parent; snapshot with
 operations; snapshot not self-contained; non-canonical CBOR; wrong frame
-kind; trailing frame. `vectors.txt` lists each valid vector's stored-object
+kind; trailing frame; payload not fully consumed. `vectors.txt` lists each
+valid vector's stored-object
 hash and each reject's error code. Records are hand-made, so nothing depends
 on libzstd. `reject-manifest-legacy-v0.bin` is byte-identical to the schema-0
 `valid-manifest-root-delta.bin` it replaces.

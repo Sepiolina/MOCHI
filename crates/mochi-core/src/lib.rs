@@ -33,6 +33,7 @@ pub mod job;
 pub mod manifest;
 pub mod object;
 pub mod publish;
+pub mod quarantine;
 pub mod recovery;
 pub mod report;
 pub mod segment;

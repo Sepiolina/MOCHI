@@ -203,6 +203,10 @@ pub trait StorageDir {
     /// The file type this directory opens.
     type File: Storage;
 
+    /// Open the existing file `name` for reading and appending, unlocked
+    /// (the archive itself, when appending through its directory).
+    fn open(&mut self, name: &str) -> Result<Self::File, StorageError>;
+
     /// Create `name`, which must not exist (`StorageError::Exists`
     /// otherwise), open it for reading and appending, and take its exclusive
     /// lock. A temporary file created this way stays locked for as long as

@@ -423,6 +423,10 @@ fn exists_as(name: &str) -> impl Fn(io::Error) -> StorageError + '_ {
 impl StorageDir for OsDir {
     type File = OsStorage;
 
+    fn open(&mut self, name: &str) -> Result<OsStorage, StorageError> {
+        OsStorage::open_existing(self.entry(name)?)
+    }
+
     fn create_exclusive(&mut self, name: &str) -> Result<OsStorage, StorageError> {
         let path = self.entry(name)?;
         let file = OpenOptions::new()

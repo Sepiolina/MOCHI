@@ -103,7 +103,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use mochi_format::cbor::{self, CborLimits, Value};
 use mochi_format::codec::{EncodeParams, Protection};
-use mochi_format::digest::{file_content_hash, stored_object_hash, CommitId, StoredObjectHash};
+use mochi_format::digest::{
+    file_content_hash, stored_object_hash, CommitId, StoredObjectHash, TailQuarantineHash,
+};
 use mochi_format::envelope::RecordIdentity;
 use mochi_format::error::FormatError;
 use mochi_format::footer::{encode_footer_frame, validate_footer, validate_footer_at_eof};
@@ -127,9 +129,11 @@ use crate::manifest::{
     Attributes, ChunkEntry, FileVersionEntry, Manifest, ManifestKind, Mtime, ParentLink,
 };
 use crate::object::{build_object, ArchiveId, IdSource};
+use crate::quarantine::SidecarMetadata;
 use crate::recovery::{
     catalog_from_snapshot, recover_from_manifests, ManifestRecovery, RecoveryScope,
 };
+use crate::report::{Finding, Severity};
 use crate::segment::{check_delta_parent_link, walk_segment, SegmentInfo};
 use crate::state::AuthoritativeState;
 use crate::storage::{
@@ -1660,15 +1664,56 @@ pub fn recover_with_trusted_head(
 
 // ---- writing ---------------------------------------------------------------------
 
-/// What to do with an uncommitted tail when opening for append (§12.2).
+/// What [`ArchiveWriter::open_append`] does with an eligible tail (§12.2,
+/// D14). It has no access to the archive's directory, so it cannot write a
+/// quarantine sidecar; truncating through it is the `--no-quarantine`
+/// waiver, recorded as such. [`ArchiveWriter::open_append_in`] quarantines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TailPolicy {
     /// Refuse with [`ErrorCode::UncommittedTail`].
     Refuse,
-    /// Truncate a tail that is *eligible* (D14; [`TailState::Uncommitted`])
-    /// and return an audit record. An unresolved tail is still refused
-    /// ([`ErrorCode::TailUnresolved`]). Eligibility is not proof.
-    TruncateUncommitted,
+    /// Truncate an *eligible* tail (D14; [`TailState::Uncommitted`])
+    /// **without** a quarantine copy, recording [`Waiver::NoQuarantine`].
+    /// An unresolved tail is still refused ([`ErrorCode::TailUnresolved`]).
+    /// Eligibility is not proof.
+    TruncateWithoutQuarantine,
+}
+
+/// The D14 waivers, each explicit and recorded (plan T25).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TruncationWaivers {
+    /// `--no-quarantine`: truncate without a sidecar copy.
+    pub no_quarantine: bool,
+    /// `--accept-unconfirmed-durability`: truncate although the sidecar's
+    /// directory flush was not confirmed (always the case on Windows before
+    /// G6). The sidecar is still written, verified, and synced.
+    pub accept_unconfirmed_durability: bool,
+}
+
+/// What [`ArchiveWriter::open_append_in`] does with an eligible tail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TailRepair {
+    Refuse,
+    /// Quarantine (unless waived), then truncate.
+    Truncate(TruncationWaivers),
+}
+
+/// A waiver that was used, for the report (D14 "Every waiver is recorded as
+/// a report finding").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Waiver {
+    NoQuarantine,
+    AcceptUnconfirmedDurability { why: String },
+}
+
+/// Where a truncated tail was quarantined.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuarantineRecord {
+    /// The sidecar's file name, in the archive's directory.
+    pub sidecar: String,
+    pub tail_hash: TailQuarantineHash,
+    /// The sidecar's directory flush.
+    pub directory: DirectoryDurability,
 }
 
 /// Audit record of an explicit tail truncation (§12.2: "an auditable
@@ -1682,6 +1727,59 @@ pub struct TailTruncation {
     pub incomplete_final_frame: bool,
     pub head_seq: u64,
     pub head_commit_id: CommitId,
+    /// The verified, synced sidecar holding the removed bytes; `None` only
+    /// under [`Waiver::NoQuarantine`].
+    pub quarantine: Option<QuarantineRecord>,
+    /// Waivers this truncation used.
+    pub waivers: Vec<Waiver>,
+}
+
+impl TailTruncation {
+    /// Report findings (D14): the truncation itself, and one per waiver.
+    pub fn findings(&self) -> Vec<Finding> {
+        let mut out = vec![Finding {
+            code: ErrorCode::UncommittedTail,
+            severity: Severity::Info,
+            message: Some(format!(
+                "removed {} bytes after commit {} (an eligible tail, D14; eligibility is not \
+                 proof){}",
+                self.removed_len,
+                self.head_seq,
+                match &self.quarantine {
+                    Some(q) => format!("; quarantined to {}", q.sidecar),
+                    None => String::new(),
+                }
+            )),
+            expected: None,
+            observed: None,
+            affected: None,
+        }];
+        for w in &self.waivers {
+            let (code, message) = match w {
+                Waiver::NoQuarantine => (
+                    ErrorCode::UncommittedTail,
+                    "waiver --no-quarantine: the removed bytes were not copied anywhere"
+                        .to_string(),
+                ),
+                Waiver::AcceptUnconfirmedDurability { why } => (
+                    ErrorCode::DurabilityUnconfirmed,
+                    format!(
+                        "waiver --accept-unconfirmed-durability: the sidecar's directory entry \
+                         is not confirmed durable ({why})"
+                    ),
+                ),
+            };
+            out.push(Finding {
+                code,
+                severity: Severity::Warning,
+                message: Some(message),
+                expected: None,
+                observed: None,
+                affected: None,
+            });
+        }
+        out
+    }
 }
 
 /// Entries in a writer's audit log.
@@ -1979,6 +2077,97 @@ fn check_append_profile(descriptor: &Descriptor, asked: Option<Profile>) -> Resu
     Ok(())
 }
 
+/// Writes the sidecar for a tail (D14): see [`ArchiveWriter::open_append_in`].
+type Quarantiner<'a> =
+    &'a mut dyn FnMut(&dyn ReadStorage, &SidecarMetadata) -> Result<QuarantineRecord>;
+
+/// What `open_locked` does with an eligible tail.
+enum TailAction<'a> {
+    Refuse,
+    Truncate {
+        quarantine: Option<Quarantiner<'a>>,
+        waivers: TruncationWaivers,
+    },
+}
+
+/// D14 quarantine: exclusive sidecar, exact copy, sync, re-read and hash
+/// compare, directory flush. On any failure the partial sidecar is removed
+/// (so a retry is not refused by its own leftover) and nothing is truncated.
+fn quarantine_tail<D: StorageDir>(
+    dir: &mut D,
+    name: &str,
+    src: &dyn ReadStorage,
+    meta: &SidecarMetadata,
+    waivers: TruncationWaivers,
+) -> Result<QuarantineRecord> {
+    use crate::quarantine::{for_each_chunk, read_sidecar, sidecar_name};
+    let failed = |what: &str, e: &dyn std::fmt::Display| {
+        MochiError::new(
+            ErrorCode::QuarantineFailed,
+            format!("quarantine failed ({what}: {e}); nothing was truncated"),
+        )
+    };
+    let sidecar = sidecar_name(name, meta.tail_offset, &meta.tail_hash);
+    let mut f = dir.create_exclusive(&sidecar).map_err(|e| match e {
+        StorageError::Exists { .. } => MochiError::new(
+            ErrorCode::QuarantineFailed,
+            format!(
+                "the quarantine sidecar {sidecar:?} already exists and is never replaced \
+                 (D14); nothing was truncated. Inspect or move it, then retry."
+            ),
+        ),
+        other => failed("creating the sidecar", &other),
+    })?;
+    let written = (|| -> Result<()> {
+        let header = meta.header()?;
+        f.append(&header)?;
+        for_each_chunk(src, meta.tail_offset, meta.tail_len, |c| {
+            f.append(c)?;
+            Ok(())
+        })?;
+        f.sync_data()?;
+        let (back, _) = read_sidecar(&f)?;
+        if back != *meta {
+            return Err(MochiError::new(
+                ErrorCode::QuarantineFailed,
+                "the sidecar read back differs from what was written",
+            ));
+        }
+        Ok(())
+    })();
+    if let Err(e) = written {
+        let _ = dir.discard(f, &sidecar);
+        return Err(failed("writing and verifying the sidecar", &e));
+    }
+    let _ = f.unlock();
+    drop(f);
+    let directory = match dir.sync_directory() {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = dir.remove_if_unlocked(&sidecar);
+            return Err(failed("flushing the directory", &e));
+        }
+    };
+    if let DirectoryDurability::Unconfirmed(why) = &directory {
+        if !waivers.accept_unconfirmed_durability {
+            let _ = dir.remove_if_unlocked(&sidecar);
+            return Err(MochiError::new(
+                ErrorCode::DurabilityUnconfirmed,
+                format!(
+                    "the quarantine sidecar's directory entry is not confirmed durable ({why}); \
+                     nothing was truncated. Pass --accept-unconfirmed-durability to proceed \
+                     (the sidecar is still written, verified, and synced)."
+                ),
+            ));
+        }
+    }
+    Ok(QuarantineRecord {
+        sidecar,
+        tail_hash: meta.tail_hash,
+        directory,
+    })
+}
+
 /// The temporary name a D13 creation of `name` writes to.
 pub fn temporary_name(name: &str, tag: &[u8; 32]) -> String {
     let hex: String = tag[..8].iter().map(|b| format!("{b:02x}")).collect();
@@ -2152,10 +2341,77 @@ impl<S: Storage> ArchiveWriter<S> {
 
     /// Open an existing archive for appending (§12.2 steps 1–2).
     pub fn open_append(
-        mut storage: S,
+        storage: S,
         ids: Box<dyn IdSource>,
         opts: WriterOptions,
         tail: TailPolicy,
+    ) -> Result<(Self, Option<TailTruncation>)> {
+        let action = match tail {
+            TailPolicy::Refuse => TailAction::Refuse,
+            TailPolicy::TruncateWithoutQuarantine => TailAction::Truncate {
+                quarantine: None,
+                waivers: TruncationWaivers {
+                    no_quarantine: true,
+                    accept_unconfirmed_durability: false,
+                },
+            },
+        };
+        Self::open_with(storage, ids, opts, action)
+    }
+
+    /// Open the archive `name` in `dir` for appending. With
+    /// [`TailRepair::Truncate`], an eligible tail is first quarantined
+    /// (Annex B.2 D14, plan T24): copied exactly into the no-clobber sidecar
+    /// `<name>.tail-<offset>-<16 hex>.mochiq`, synced, re-read and checked
+    /// against the tail's hash, and the directory flushed; only then is the
+    /// tail truncated. Any quarantine failure is `QUARANTINE_FAILED` and
+    /// truncates nothing; an existing sidecar is refused, never replaced. A
+    /// directory flush that is not confirmed is `DURABILITY_UNCONFIRMED`
+    /// (and truncates nothing) unless `accept_unconfirmed_durability` is
+    /// set. Every waiver used is in the returned record
+    /// ([`TailTruncation::findings`]).
+    pub fn open_append_in<D: StorageDir<File = S>>(
+        dir: &mut D,
+        name: &str,
+        ids: Box<dyn IdSource>,
+        opts: WriterOptions,
+        tail: TailRepair,
+    ) -> Result<(Self, Option<TailTruncation>)> {
+        check_file_name(name)?;
+        let storage = dir.open(name)?;
+        match tail {
+            TailRepair::Refuse => Self::open_with(storage, ids, opts, TailAction::Refuse),
+            TailRepair::Truncate(waivers) if waivers.no_quarantine => Self::open_with(
+                storage,
+                ids,
+                opts,
+                TailAction::Truncate {
+                    quarantine: None,
+                    waivers,
+                },
+            ),
+            TailRepair::Truncate(waivers) => {
+                let mut q = |src: &dyn ReadStorage, meta: &SidecarMetadata| {
+                    quarantine_tail(dir, name, src, meta, waivers)
+                };
+                Self::open_with(
+                    storage,
+                    ids,
+                    opts,
+                    TailAction::Truncate {
+                        quarantine: Some(&mut q),
+                        waivers,
+                    },
+                )
+            }
+        }
+    }
+
+    fn open_with(
+        mut storage: S,
+        ids: Box<dyn IdSource>,
+        opts: WriterOptions,
+        tail: TailAction<'_>,
     ) -> Result<(Self, Option<TailTruncation>)> {
         lock(&mut storage)?;
         match Self::open_locked(&mut storage, &opts, tail) {
@@ -2209,7 +2465,7 @@ impl<S: Storage> ArchiveWriter<S> {
     fn open_locked(
         storage: &mut S,
         opts: &WriterOptions,
-        tail: TailPolicy,
+        tail: TailAction<'_>,
     ) -> Result<OpenedForAppend> {
         let mut location = locate_head(storage, &opts.read.limits)?;
         // D12, before anything is written (a tail truncation included):
@@ -2236,7 +2492,7 @@ impl<S: Storage> ArchiveWriter<S> {
                     ),
                 ));
             }
-            (TailState::Uncommitted { len, .. }, TailPolicy::Refuse) => {
+            (TailState::Uncommitted { len, .. }, TailAction::Refuse) => {
                 return Err(MochiError::new(
                     ErrorCode::UncommittedTail,
                     format!(
@@ -2252,8 +2508,54 @@ impl<S: Storage> ArchiveWriter<S> {
                     frames,
                     incomplete_final_frame,
                 },
-                TailPolicy::TruncateUncommitted,
+                TailAction::Truncate {
+                    quarantine,
+                    waivers,
+                },
             ) => {
+                // D14: the tail is copied, verified, and synced (unless the
+                // waiver says otherwise) *before* a byte is removed.
+                let tail_hash =
+                    crate::quarantine::hash_range(&*storage, location.committed_len, *len)?;
+                let meta = SidecarMetadata {
+                    archive_id: head_commit.archive_id,
+                    head_commit_id: head_id,
+                    head_seq: head_commit.seq,
+                    tail_offset: location.committed_len,
+                    tail_len: *len,
+                    tail_hash,
+                    frame_magics: frames.iter().filter_map(|k| k.magic()).collect(),
+                    incomplete_final_frame: *incomplete_final_frame,
+                    tool: format!("{} {}", crate::TOOL_NAME, crate::TOOL_VERSION),
+                    time: crate::timestamp::Timestamp::now()
+                        .map_err(|e| {
+                            MochiError::new(
+                                ErrorCode::QuarantineFailed,
+                                format!("no valid time for the sidecar: {}", e.message),
+                            )
+                        })?
+                        .to_string(),
+                };
+                let mut used = Vec::new();
+                let record = match (quarantine, waivers.no_quarantine) {
+                    (Some(q), false) => {
+                        let r = q(&*storage, &meta)?;
+                        if let DirectoryDurability::Unconfirmed(why) = &r.directory {
+                            used.push(Waiver::AcceptUnconfirmedDurability { why: why.clone() });
+                        }
+                        Some(r)
+                    }
+                    (_, true) => {
+                        used.push(Waiver::NoQuarantine);
+                        None
+                    }
+                    (None, false) => {
+                        return Err(MochiError::new(
+                            ErrorCode::InvalidArgument,
+                            "internal: truncation without a quarantine and without the waiver",
+                        ))
+                    }
+                };
                 let t = TailTruncation {
                     committed_len: location.committed_len,
                     removed_len: *len,
@@ -2261,6 +2563,8 @@ impl<S: Storage> ArchiveWriter<S> {
                     incomplete_final_frame: *incomplete_final_frame,
                     head_seq: head_commit.seq,
                     head_commit_id: head_id,
+                    quarantine: record,
+                    waivers: used,
                 };
                 storage.truncate(location.committed_len)?;
                 storage.sync_data()?;

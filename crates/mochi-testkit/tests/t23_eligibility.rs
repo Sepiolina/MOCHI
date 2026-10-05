@@ -52,7 +52,7 @@ fn assert_not_eligible(bytes: &[u8], reason: &str) {
         s.clone(),
         Box::new(SeqIds::new(99)),
         test_options(),
-        TailPolicy::TruncateUncommitted,
+        TailPolicy::TruncateWithoutQuarantine,
     )
     .map(|_| ())
     .unwrap_err();
@@ -117,7 +117,7 @@ fn t23_a_descriptor_frame_in_the_tail_is_not_eligible() {
         s.clone(),
         Box::new(SeqIds::new(99)),
         test_options(),
-        TailPolicy::TruncateUncommitted,
+        TailPolicy::TruncateWithoutQuarantine,
     )
     .map(|_| ())
     .unwrap_err();

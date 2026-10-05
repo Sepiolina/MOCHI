@@ -189,7 +189,7 @@ fn t18_append_refusal_precedes_tail_truncation() {
         control.clone(),
         Box::new(SeqIds::new(9000)),
         test_options(),
-        TailPolicy::TruncateUncommitted,
+        TailPolicy::TruncateWithoutQuarantine,
     )
     .unwrap();
     assert_eq!(t.unwrap().removed_len, tail);
@@ -197,7 +197,7 @@ fn t18_append_refusal_precedes_tail_truncation() {
 
     damage(&mut bytes, h[0].commit.descriptor);
     let d = SimStorage::from_bytes(bytes.clone());
-    let e = append_err(&d, test_options(), TailPolicy::TruncateUncommitted);
+    let e = append_err(&d, test_options(), TailPolicy::TruncateWithoutQuarantine);
     assert_eq!(e.code, ErrorCode::DescriptorInvalid);
     assert_eq!(d.contents(), bytes, "the tail was not truncated");
 }
@@ -405,7 +405,7 @@ fn tar_archive() -> (SimStorage, Vec<Step>) {
 fn t18_enabling_encryption_in_place_is_refused() {
     let (s, h, steps) = fixture();
     let before = s.contents();
-    for tail in [TailPolicy::Refuse, TailPolicy::TruncateUncommitted] {
+    for tail in [TailPolicy::Refuse, TailPolicy::TruncateWithoutQuarantine] {
         let e = append_err(&s, with_profile(Some(ENCRYPT)), tail);
         assert_eq!(e.code, ErrorCode::ProfileChangeUnsupported, "{e}");
         assert!(e.message.contains("Encrypted"), "{e}");
@@ -430,7 +430,7 @@ fn t18_enabling_encryption_in_place_is_refused() {
     let e = append_err(
         &t,
         with_profile(Some(ENCRYPT)),
-        TailPolicy::TruncateUncommitted,
+        TailPolicy::TruncateWithoutQuarantine,
     );
     assert_eq!(e.code, ErrorCode::ProfileChangeUnsupported);
     assert_eq!(t.contents(), bytes);
@@ -500,7 +500,7 @@ fn t18_tar_archive_profile_change_and_unsupported_append() {
         (None, ErrorCode::UnsupportedFeature),
         (Some(core), ErrorCode::ProfileChangeUnsupported),
     ] {
-        let e = append_err(&t, with_profile(p), TailPolicy::TruncateUncommitted);
+        let e = append_err(&t, with_profile(p), TailPolicy::TruncateWithoutQuarantine);
         assert_eq!(e.code, code, "{p:?}");
         assert_eq!(t.contents(), bytes, "{p:?}: the tail was not truncated");
     }

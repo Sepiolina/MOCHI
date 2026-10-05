@@ -55,6 +55,11 @@ pub const DIGEST_LEN: usize = 32;
 pub const FOOTER_DOMAIN: &[u8] = b"MOCHI2-FOOTER\0";
 /// The file-content hash has no separator (O20): plain BLAKE3, `b3sum`-equal.
 pub const FILE_CONTENT_DOMAIN: &[u8] = b"";
+/// The tail-quarantine sidecar's tail hash (Annex B.2.2, `tail-quarantine-v0`
+/// key 6): plain BLAKE3 by the spec's own definition, so `b3sum` over the
+/// removed bytes checks it. Not part of the archive format; a separate,
+/// labelled scope, and never compared with any archive digest.
+pub const TAIL_QUARANTINE_DOMAIN: &[u8] = b"";
 /// Draft (R3).
 pub const CHUNK_CONTENT_DOMAIN: &[u8] = b"MOCHI2-CHUNK-CONTENT\0";
 /// Draft (R3).
@@ -113,6 +118,9 @@ scopes! {
     CommitIdScope => COMMIT_ID_DOMAIN, "commit-id";
     /// The §8.4 footer construction.
     Footer => FOOTER_DOMAIN, "footer";
+    /// Bytes removed by a tail truncation, as recorded in the quarantine
+    /// sidecar (D14). Unseparated by the spec's definition.
+    TailQuarantine => TAIL_QUARANTINE_DOMAIN, "tail-quarantine";
 }
 
 /// A BLAKE3-256 digest in scope `S`.
@@ -333,6 +341,43 @@ impl FileContentHasher {
     }
 
     pub fn finalize(&self) -> FileContentHash {
+        self.inner.finalize()
+    }
+}
+
+/// A truncated tail's hash for its quarantine sidecar (D14; plain BLAKE3).
+pub type TailQuarantineHash = Digest<TailQuarantine>;
+
+/// The hash of `tail`, as the quarantine sidecar records it (key 6).
+pub fn tail_quarantine_hash(tail: &[u8]) -> TailQuarantineHash {
+    let mut h = TailQuarantineHasher::new();
+    h.update(tail);
+    h.finalize()
+}
+
+/// Streaming [`tail_quarantine_hash`], for tails too large to buffer.
+pub struct TailQuarantineHasher {
+    inner: Scoped<TailQuarantine>,
+}
+
+impl Default for TailQuarantineHasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TailQuarantineHasher {
+    pub fn new() -> Self {
+        TailQuarantineHasher {
+            inner: Scoped::new(),
+        }
+    }
+
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.inner.update(bytes);
+    }
+
+    pub fn finalize(&self) -> TailQuarantineHash {
         self.inner.finalize()
     }
 }
@@ -579,5 +624,16 @@ mod tests {
         assert_eq!(d.to_hex(), "ab".repeat(32));
         assert!(format!("{d:?}").starts_with("chunk-content:abab"));
         assert_eq!(ChunkContentHash::scope_name(), "chunk-content");
+    }
+
+    /// The sidecar's tail hash is plain BLAKE3 (`b3sum`-equal), as the
+    /// tail-quarantine schema defines key 6.
+    #[test]
+    fn tail_quarantine_hash_is_plain_blake3() {
+        let tail = b"bytes after the last valid commit";
+        assert_eq!(
+            tail_quarantine_hash(tail).as_bytes(),
+            blake3::hash(tail).as_bytes()
+        );
     }
 }

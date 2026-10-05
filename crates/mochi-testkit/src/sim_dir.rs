@@ -206,6 +206,20 @@ impl SimDir {
 impl StorageDir for SimDir {
     type File = SimStorage;
 
+    fn open(&mut self, name: &str) -> Result<SimStorage, StorageError> {
+        check_file_name(name)?;
+        let d = self.inner();
+        if d.halted {
+            return Err(halted_error());
+        }
+        d.entries.get(name).map(SimStorage::handle).ok_or_else(|| {
+            StorageError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{name:?} does not exist"),
+            ))
+        })
+    }
+
     fn create_exclusive(&mut self, name: &str) -> Result<SimStorage, StorageError> {
         check_file_name(name)?;
         let mut d = self.inner();

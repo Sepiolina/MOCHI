@@ -51,6 +51,7 @@ fn options() -> WriterOptions {
         chunk_size: None,
         zstd_level: None,
         record_time: false,
+        profile: None,
     }
 }
 

@@ -65,6 +65,7 @@ pub fn test_options() -> WriterOptions {
         chunk_size: Some(64),
         zstd_level: Some(3),
         record_time: false,
+        profile: None,
     }
 }
 

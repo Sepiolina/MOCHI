@@ -118,7 +118,7 @@ use crate::catalog::namespace::{EntryKind, FileVersionId, NamespaceOp, Snapshot}
 use crate::catalog::path::ArchivePath;
 use crate::catalog::{Catalog, CatalogLimits, Commit, FileVersion, SegmentApplier};
 use crate::commit::{uuid_v4, CommitLink, CommitParent, CommitRecord, Metadata, ObjectRef};
-use crate::descriptor::Descriptor;
+use crate::descriptor::{Descriptor, Profile};
 use crate::error::{ErrorCode, MochiError, Result};
 use crate::image::{decode_image_record, encode_image_record};
 use crate::job::JobContext;
@@ -165,6 +165,12 @@ pub struct WriterOptions {
     /// Record the system time in each commit (informational, §12.1).
     /// Ignored when a transaction carries an explicit time.
     pub record_time: bool,
+    /// The profile asked for (spec §7, D4, D12). `None` means the default
+    /// profile when creating and the archive's own when appending. Appending
+    /// with a different profile is `PROFILE_CHANGE_UNSUPPORTED`: a profile is
+    /// fixed at creation (D12). Creating with one this build cannot write is
+    /// `UNSUPPORTED_FEATURE`.
+    pub profile: Option<Profile>,
 }
 
 /// Which commits the writer makes checkpoints (Annex B.2 D10).
@@ -684,7 +690,7 @@ pub fn open_at_footer(
 /// D12: a descriptor that cannot be loaded, hash-verified, or decoded, or
 /// that names another archive, is `DESCRIPTOR_INVALID`. Refusals
 /// (`UNSUPPORTED_FEATURE`), reader limits, and I/O keep their codes.
-fn read_descriptor(
+pub(crate) fn read_descriptor(
     src: &dyn ReadStorage,
     commit: &CommitRecord,
     limit: u64,
@@ -1783,6 +1789,66 @@ impl<S: Storage> std::fmt::Debug for ArchiveWriter<S> {
     }
 }
 
+/// The profiles this build can write a new archive in: the default (Core)
+/// profile only, until the TAR-compatible and Encrypted writers exist.
+fn check_create_profile(asked: Profile) -> Result<()> {
+    if asked.encrypted {
+        return Err(MochiError::new(
+            ErrorCode::UnsupportedFeature,
+            "this build cannot write the Encrypted profile (spec §7.3)",
+        ));
+    }
+    if asked.tar_compatible {
+        return Err(MochiError::new(
+            ErrorCode::UnsupportedFeature,
+            "this build cannot write the TAR-compatible profile (spec §7.2, D4)",
+        ));
+    }
+    Ok(())
+}
+
+/// D12: a profile is fixed at creation, so an append that asks for a
+/// different one is refused, whatever this build can write; then an archive
+/// whose profile this build cannot write is refused too.
+fn check_append_profile(descriptor: &Descriptor, asked: Option<Profile>) -> Result<()> {
+    let have = descriptor.profile();
+    if let Some(asked) = asked {
+        let mut changes = Vec::new();
+        if asked.encrypted != have.encrypted {
+            changes.push(if asked.encrypted {
+                "enabling the Encrypted profile"
+            } else {
+                "removing the Encrypted profile"
+            });
+        }
+        if asked.tar_compatible != have.tar_compatible {
+            changes.push(if asked.tar_compatible {
+                "enabling the TAR-compatible profile"
+            } else {
+                "removing the TAR-compatible profile"
+            });
+        }
+        if !changes.is_empty() {
+            return Err(MochiError::new(
+                ErrorCode::ProfileChangeUnsupported,
+                format!(
+                    "{} in place is not supported: an archive's profile is fixed at creation \
+                     (spec D12). Write a new archive with the profile you want.",
+                    changes.join(" and ")
+                ),
+            ));
+        }
+    }
+    if have.tar_compatible {
+        return Err(MochiError::new(
+            ErrorCode::UnsupportedFeature,
+            "this archive was created with the TAR-compatible profile (spec D4), which this \
+             build cannot write; appending would break that constraint",
+        ));
+    }
+    Ok(())
+}
+
 fn lock(storage: &mut dyn Storage) -> Result<()> {
     storage.try_lock_exclusive().map_err(|e| match e {
         StorageError::LockHeld => MochiError::new(
@@ -1805,6 +1871,7 @@ impl<S: Storage> ArchiveWriter<S> {
                     "create needs empty storage; use open_append for an existing archive",
                 ));
             }
+            check_create_profile(opts.profile.unwrap_or_default())?;
             let params = WriterParams {
                 chunk_size: opts.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE),
                 zstd_level: opts.zstd_level.unwrap_or(EncodeParams::default().level),
@@ -1902,6 +1969,18 @@ impl<S: Storage> ArchiveWriter<S> {
         tail: TailPolicy,
     ) -> Result<OpenedForAppend> {
         let mut location = locate_head(storage, &opts.read.limits)?;
+        // D12, before anything is written (a tail truncation included):
+        // append needs a valid descriptor bound to the head, and refuses a
+        // profile change and a profile this build cannot write. open_at
+        // checks the descriptor again on the same head.
+        let (head_commit, head_id) = read_commit(storage, &location.footer, &opts.read)?;
+        let descriptor = read_descriptor(
+            storage,
+            &head_commit,
+            location.footer.fields.commit_offset,
+            &opts.read,
+        )?;
+        check_append_profile(&descriptor, opts.profile)?;
         let mut truncation = None;
         match (&location.tail, tail) {
             (TailState::Clean, _) => {}
@@ -1931,7 +2010,6 @@ impl<S: Storage> ArchiveWriter<S> {
                 },
                 TailPolicy::TruncateUncommitted,
             ) => {
-                let (head_commit, head_id) = read_commit(storage, &location.footer, &opts.read)?;
                 let t = TailTruncation {
                     committed_len: location.committed_len,
                     removed_len: *len,
@@ -1954,13 +2032,6 @@ impl<S: Storage> ArchiveWriter<S> {
             }
         }
         let Opened { head, attributes } = open_at(storage, location, &opts.read, OpenMode::Append)?;
-        if head.descriptor.tar_compatible {
-            return Err(MochiError::new(
-                ErrorCode::UnsupportedFeature,
-                "this archive was created with the TAR-compatible profile (spec D4), which this \
-                 build cannot write; appending would break that constraint",
-            ));
-        }
         // The next snapshot must carry every reachable version's promised
         // attributes, which only snapshot manifests (and the deltas after
         // them) hold until C6 moves them into the catalog. open_at refused

@@ -305,8 +305,19 @@ fn t11_descriptor_differing_within_the_segment_is_descriptor_invalid() {
     rec.descriptor.stored_hash = mochi_format::digest::StoredObjectHash::from_bytes([0x11; 32]);
     let c2 = f.append_commit(&rec);
     let m3 = f.append_manifest(&empty_delta(&c2, txid(8)));
-    f.append_delta(&c2, rule_base(&h[1]), m3, txid(8));
-    assert_eq!(open_err(&f).code, ErrorCode::DescriptorInvalid);
+    // `delta_record` copies c2's (wrong) reference; the head must carry the
+    // real one, or it fails on its own descriptor and the segment rule is
+    // never reached (T18 review: this test previously did exactly that).
+    let mut head = forge::delta_record(&c2, rule_base(&h[1]), m3, txid(8));
+    head.descriptor = h[1].commit.descriptor;
+    f.append_commit(&head);
+    let e = open_err(&f);
+    assert_eq!(e.code, ErrorCode::DescriptorInvalid);
+    assert!(
+        e.message
+            .contains("commit 2 references a different archive descriptor"),
+        "the segment rule refused it: {e}"
+    );
 }
 
 /// T11 / decision 17: a wrong base hint on an otherwise valid delta opens

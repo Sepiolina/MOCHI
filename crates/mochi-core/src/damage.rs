@@ -3,17 +3,29 @@
 //! recoverability, and the affected sequence ranges.
 //!
 //! Read-only: it takes a [`ReadStorage`], writes nothing, and is a job
-//! (progress per commit, cancellation). It checks *objects*: each commit's
-//! delta manifest, each checkpoint's snapshot manifest and catalog image,
-//! through the same code the read path uses ([`read_bound_manifest`],
-//! [`check_image`], [`catalog_from_snapshot`]), so the report predicts what
+//! (progress per commit, cancellation). It checks *objects*: the archive
+//! descriptor each commit references (once per distinct reference), each
+//! commit's delta manifest, and each checkpoint's snapshot manifest and
+//! catalog image, through the same code the read path uses
+//! ([`read_descriptor`], [`read_bound_manifest`], [`check_image`],
+//! [`catalog_from_snapshot`]), so the report predicts what
 //! `open_at_footer` does. It does not replay deltas: a delta that is
 //! hash-valid but fails to apply is found by opening, not here. Damage to
 //! commit records or footers is out of scope (review decision Q36):
 //! `commit_history` fails first, and the recovery ladder (C8) handles it.
 //!
-//! # The rules (D10.9, review decisions Q31 to Q33)
+//! # The rules (D10.9, D12, review decisions Q31 to Q33)
 //!
+//! * A descriptor that is missing, damaged, or mismatched (D12,
+//!   `DESCRIPTOR_INVALID`) refuses interpretation of every commit that
+//!   references it, and, through the one-descriptor-per-segment rule
+//!   (D10.6), of every later commit of a segment that contains such a
+//!   commit. Those commits are unreadable (`FAIL`); there is no fallback.
+//!   One object is reported per run of consecutive commits it makes
+//!   unreadable, so an archive whose only descriptor is damaged has one
+//!   finding covering 0 … head. A descriptor this build refuses
+//!   (`UNSUPPORTED_FEATURE`) is not damage: the assessment itself is
+//!   refused, never reported as `PASS`.
 //! * A failed delta manifest *j* breaks every replay segment that contains it:
 //!   the commits *j* … `end(j)` of *j*'s segment, where *j* is a delta commit.
 //!   A checkpoint's own delta manifest is in no replay segment, so stored
@@ -35,15 +47,18 @@
 //! D10.6 rule); a commit record that names another base is an invalid record
 //! that opening refuses, which this report does not model.
 
+use std::collections::btree_map::{BTreeMap, Entry};
+
 use serde::Serialize;
 
 use crate::catalog::Catalog;
 use crate::error::{ErrorCode, MochiError, Result};
 use crate::job::JobContext;
 use crate::manifest::{Manifest, ManifestKind};
+use crate::object::ArchiveId;
 use crate::publish::{
     check_image, checkpoint_snapshot_ref, commit_history, compare_representations,
-    is_stored_damage, read_bound_manifest, HistoryEntry, ReadOptions,
+    is_stored_damage, read_bound_manifest, read_descriptor, HistoryEntry, ReadOptions,
 };
 use crate::recovery::catalog_from_snapshot;
 use crate::report::{Finding, SeqRange, Severity};
@@ -53,6 +68,9 @@ use crate::storage::ReadStorage;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObjectRole {
+    /// The archive descriptor (D12). `seq` is the first commit of the run
+    /// of commits it makes unreadable.
+    Descriptor,
     DeltaManifest,
     SnapshotManifest,
     CatalogImage,
@@ -64,6 +82,7 @@ pub enum ObjectRole {
 impl ObjectRole {
     fn label(self) -> &'static str {
         match self {
+            ObjectRole::Descriptor => "archive descriptor",
             ObjectRole::DeltaManifest => "delta manifest",
             ObjectRole::SnapshotManifest => "snapshot manifest",
             ObjectRole::CatalogImage => "catalog image",
@@ -213,6 +232,40 @@ fn internal(msg: impl Into<String>) -> MochiError {
     )
 }
 
+/// One descriptor check: the reference and the archive ID the commit
+/// claims, which [`read_descriptor`] checks against the descriptor. The
+/// commit-frame bound it also applies is left out: the one valid descriptor
+/// ends before commit 0's frame, so the bound never decides validity.
+type DescriptorKey = (u64, u64, [u8; 32], ArchiveId);
+
+fn descriptor_key(e: &HistoryEntry) -> DescriptorKey {
+    let r = e.commit.descriptor;
+    (
+        r.offset,
+        r.stored_len,
+        *r.stored_hash.as_bytes(),
+        e.commit.archive_id,
+    )
+}
+
+/// Why commit *h* cannot interpret its descriptor, if it cannot.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DescriptorCause {
+    /// Its own descriptor check failed.
+    Own(DescriptorKey),
+    /// An earlier commit of its segment references a different descriptor
+    /// (D10.6), whose check failed.
+    Segment(DescriptorKey),
+}
+
+impl DescriptorCause {
+    fn key(self) -> DescriptorKey {
+        match self {
+            DescriptorCause::Own(k) | DescriptorCause::Segment(k) => k,
+        }
+    }
+}
+
 /// What checking one checkpoint's two representations found.
 struct CheckpointChecks {
     image: Option<MochiError>,
@@ -240,17 +293,94 @@ pub fn assess_damage(
     }
     ctx.report("damage", 0, Some(n as u64));
 
+    let is_cp: Vec<bool> = history
+        .iter()
+        .map(|e| e.commit.metadata.is_checkpoint())
+        .collect();
+    let base_of = |h: usize| (0..=h).rev().find(|&s| is_cp[s]).unwrap_or(0);
+    // The last commit of the segment that starts at or contains `x`.
+    let end_of = |x: usize| (x + 1..n).find(|&s| is_cp[s]).map_or(n - 1, |s| s - 1);
+    let mut checked = 0u64;
+
+    // ---- D12: descriptors, each distinct reference once -----------------------
+    let mut descriptors: BTreeMap<DescriptorKey, Option<MochiError>> = BTreeMap::new();
+    let mut own_failed: Vec<bool> = vec![false; n];
+    for (i, e) in history.iter().enumerate() {
+        ctx.check_cancelled()?;
+        let result = match descriptors.entry(descriptor_key(e)) {
+            Entry::Occupied(o) => o.into_mut(),
+            Entry::Vacant(v) => {
+                checked += 1;
+                v.insert(
+                    match read_descriptor(src, &e.commit, e.commit_offset, opts) {
+                        Ok(_) => None,
+                        Err(err) if err.code == ErrorCode::DescriptorInvalid => Some(err),
+                        // A refusal (this build will not interpret the
+                        // archive), a reader limit, or I/O: not evidence of
+                        // damage, and nothing after it could be assessed
+                        // honestly.
+                        Err(err) => return Err(err),
+                    },
+                )
+            }
+        };
+        own_failed[i] = result.is_some();
+    }
+    let mut desc_cause: Vec<Option<DescriptorCause>> = Vec::with_capacity(n);
+    for h in 0..n {
+        if own_failed[h] {
+            desc_cause.push(Some(DescriptorCause::Own(descriptor_key(&history[h]))));
+            continue;
+        }
+        // D10.6 compares references across the segment. Commit h's own
+        // reference is valid, and only one reference can be (one frame at
+        // offset 0), so any differing one in the segment failed its check.
+        let r_h = history[h].commit.descriptor;
+        match (base_of(h)..h).find(|&j| history[j].commit.descriptor != r_h) {
+            None => desc_cause.push(None),
+            Some(j) if own_failed[j] => {
+                desc_cause.push(Some(DescriptorCause::Segment(descriptor_key(&history[j]))))
+            }
+            Some(j) => {
+                return Err(internal(format!(
+                    "commits {j} and {h} reference different descriptors and both are valid"
+                )))
+            }
+        }
+    }
+
     let mut objects: Vec<ObjectDamage> = Vec::new();
     // Index into `objects` per commit and role.
+    let mut desc_obj: Vec<Option<usize>> = vec![None; n];
     let mut delta_obj: Vec<Option<usize>> = vec![None; n];
     let mut snap_obj: Vec<Option<usize>> = vec![None; n];
     let mut image_obj: Vec<Option<usize>> = vec![None; n];
     let mut pair_obj: Vec<Option<usize>> = vec![None; n];
-    let mut checked = 0u64;
 
     for (i, e) in history.iter().enumerate() {
         ctx.check_cancelled()?;
         let seq = e.commit.seq;
+        // One descriptor object per run of consecutive commits with the same
+        // failing descriptor, opened at the run's first commit.
+        if let Some(cause) = desc_cause[i] {
+            let key = cause.key();
+            let continues = i > 0 && desc_cause[i - 1].map(DescriptorCause::key) == Some(key);
+            desc_obj[i] = if continues {
+                desc_obj[i - 1]
+            } else {
+                let error = descriptors
+                    .get(&key)
+                    .and_then(|r| r.clone())
+                    .ok_or_else(|| internal("a failed descriptor without its error"))?;
+                objects.push(ObjectDamage {
+                    seq,
+                    role: ObjectRole::Descriptor,
+                    offset: key.0,
+                    error,
+                });
+                Some(objects.len() - 1)
+            };
+        }
         checked += 1;
         if let Err(error) = read_bound_manifest(
             src,
@@ -303,13 +433,6 @@ pub fn assess_damage(
         ctx.report("damage", (i + 1) as u64, Some(n as u64));
     }
 
-    let is_cp: Vec<bool> = history
-        .iter()
-        .map(|e| e.commit.metadata.is_checkpoint())
-        .collect();
-    let base_of = |h: usize| (0..=h).rev().find(|&s| is_cp[s]).unwrap_or(0);
-    // The last commit of the segment that starts at or contains `x`.
-    let end_of = |x: usize| (x + 1..n).find(|&s| is_cp[s]).map_or(n - 1, |s| s - 1);
     let damaged = |idx: Option<usize>| idx.is_some_and(|k| is_stored_damage(&objects[k].error));
 
     // ---- per commit -------------------------------------------------------------
@@ -317,12 +440,20 @@ pub fn assess_damage(
     for h in 0..n {
         let b = base_of(h);
         let mut causes = Vec::new();
-        // A delta in (b, h] that failed, or the commit's own delta when it is
-        // a checkpoint and the failure is not stored damage (Q31).
-        let delta_blocker = (b + 1..=h)
-            .find_map(|j| delta_obj[j])
-            .or_else(|| delta_obj[h].filter(|&k| is_cp[h] && !is_stored_damage(&objects[k].error)));
-        let (readable, status) = if let Some(k) = delta_blocker {
+        // In the order opening meets them: the commit's own descriptor; its
+        // own delta manifest (for a checkpoint, only a failure that is not
+        // stored damage, Q31); the segment's descriptors (D10.6); then any
+        // other delta in (b, h).
+        let own_desc =
+            desc_obj[h].filter(|_| matches!(desc_cause[h], Some(DescriptorCause::Own(_))));
+        let seg_desc =
+            desc_obj[h].filter(|_| matches!(desc_cause[h], Some(DescriptorCause::Segment(_))));
+        let own_delta = delta_obj[h].filter(|&k| !is_cp[h] || !is_stored_damage(&objects[k].error));
+        let blocker = own_desc
+            .or(own_delta)
+            .or(seg_desc)
+            .or_else(|| (b + 1..=h).find_map(|j| delta_obj[j]));
+        let (readable, status) = if let Some(k) = blocker {
             causes.push(k);
             (
                 Readability::Unreadable {
@@ -370,6 +501,14 @@ pub fn assess_damage(
         let c = o.seq as usize;
         let seg_end = end_of(c);
         let (first, last, effect) = match o.role {
+            // The run of commits this descriptor object was opened for.
+            ObjectRole::Descriptor => {
+                let last = (c..n)
+                    .take_while(|&h| desc_obj[h] == Some(k))
+                    .last()
+                    .ok_or_else(|| internal("a descriptor object with no commit"))?;
+                (c, last, Effect::Unreadable)
+            }
             ObjectRole::DeltaManifest if !is_cp[c] => (c, seg_end, Effect::Unreadable),
             ObjectRole::DeltaManifest if is_stored_damage(&o.error) => {
                 (c, c, Effect::NoReadAffected)

@@ -376,6 +376,7 @@ dependencies = [
  "clap",
  "mochi-core",
  "mochi-format",
+ "mochi-testkit",
  "serde_json",
 ]
 

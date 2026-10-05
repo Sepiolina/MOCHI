@@ -22,12 +22,19 @@
 //! build's reading of D12 and §26, which do not say; recorded as open in
 //! `docs/b2-implementation-checklist.md`.
 //!
-//! # Not here yet
+//! # Failure behaviour (plan T18)
 //!
-//! Creation writing the descriptor first, and commits binding it (key 10),
-//! land with commit record v1 (plan T8): a descriptor that no commit
-//! references would be unbound. Failure behaviour (refusing interpretation
-//! and append) is plan T18.
+//! Creation writes the descriptor first and every commit binds it (key 10,
+//! plan T8). When it is missing, damaged, or mismatched, head discovery,
+//! commit validation, and diagnostics still work (`publish::locate_head`,
+//! `publish::commit_history`); interpretation and append are refused
+//! (`publish::open_at`, `ArchiveWriter::open_append`, before any byte is
+//! written); and damage assessment reports it as a failed object
+//! (`damage::assess_damage`, `FAIL`).
+//!
+//! A [`Profile`] is fixed at creation. Asking an append for a different one
+//! is `PROFILE_CHANGE_UNSUPPORTED` (exit 4): there is no in-place conversion,
+//! in particular none to the Encrypted profile (D12).
 
 use mochi_format::cbor::{self, CborLimits, Fields, Value};
 use mochi_format::envelope::{check_required_features, encode_cbor_record};
@@ -57,6 +64,16 @@ pub struct DeclaredLimits {
     pub max_skippable_payload: u64,
     pub max_cbor_items: u64,
     pub max_image_len: u64,
+}
+
+/// The creation-time profile choices a writer can be asked for (spec §7,
+/// D4, D12). Both are fixed for the life of an archive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Profile {
+    /// The TAR-compatible profile (descriptor constraint 0, D4).
+    pub tar_compatible: bool,
+    /// The Encrypted profile (§7.3, D3).
+    pub encrypted: bool,
 }
 
 /// A decoded descriptor. Generation and draft identifier are not fields:
@@ -96,6 +113,18 @@ impl Descriptor {
             required_features: Vec::new(),
             tar_compatible,
             declared_limits: None,
+        }
+    }
+
+    /// The profile this archive was created with. `encrypted` is always
+    /// false here: the Encrypted profile's required-feature identifier is
+    /// not assigned yet (the cryptographic ratification item, §28), so a
+    /// descriptor that declares any required feature is refused at decode
+    /// and never reaches this point.
+    pub fn profile(&self) -> Profile {
+        Profile {
+            tar_compatible: self.tar_compatible,
+            encrypted: false,
         }
     }
 

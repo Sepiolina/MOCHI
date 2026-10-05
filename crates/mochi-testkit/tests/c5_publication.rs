@@ -1061,8 +1061,9 @@ fn os_storage_end_to_end() {
 // ---- schema 1: descriptor, snapshots, delta commits (plan T8, T9) -------------------------
 
 /// D12: a damaged descriptor refuses interpretation with DESCRIPTOR_INVALID,
-/// while head discovery and commit validation still work. (Full D12 failure
-/// behaviour, including verify reporting, is T18.)
+/// while head discovery and commit validation still work. The rest of D12's
+/// failure behaviour (assessment, profiles, refusal before tail truncation)
+/// is in `t18_descriptor.rs`.
 #[test]
 fn a_damaged_descriptor_is_descriptor_invalid_but_heads_are_still_found() {
     let s = SimStorage::new();

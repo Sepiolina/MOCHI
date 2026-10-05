@@ -288,8 +288,9 @@ fn t17_undamaged_control() {
     assert_eq!(r.integrity(), Status::Pass);
     assert_eq!(r.recoverability(), Status::Pass);
     assert_eq!(r.head_recoverability(), Status::Pass);
-    // 9 delta manifests, and a snapshot and an image for each of 3 checkpoints.
-    assert_eq!(r.objects_checked, 9 + 2 * 3);
+    // 9 delta manifests, a snapshot and an image for each of 3 checkpoints,
+    // and the one descriptor every commit references (T18).
+    assert_eq!(r.objects_checked, 9 + 2 * 3 + 1);
     assert_eq!(r.head_seq, 8);
 }
 

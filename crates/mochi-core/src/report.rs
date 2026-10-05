@@ -8,9 +8,9 @@
 //! * [`Report::validate`] rejects an overall status that hides a failing
 //!   dimension, or a `PASS` that contradicts skipped/failed evidence.
 //!
-//! Open question raised here (plan §9, O13): the timestamp format and the
-//! exit-code precedence are not defined by the spec; timestamps are opaque
-//! RFC 3339 strings for now.
+//! Timestamps follow Annex B.2 D15 ([`crate::timestamp::Timestamp`], T28);
+//! the v0 fields still hold them as strings until C7's schema v1. Exit-code
+//! precedence (D15) is T27.
 
 use std::collections::BTreeMap;
 use std::fmt;

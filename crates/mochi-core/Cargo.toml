@@ -30,6 +30,7 @@ rustix.workspace = true
 rusqlite = { workspace = true, features = ["trace"] }
 serde_json.workspace = true
 tempfile.workspace = true
+proptest.workspace = true
 
 [lints]
 workspace = true

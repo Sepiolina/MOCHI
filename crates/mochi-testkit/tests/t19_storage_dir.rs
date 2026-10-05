@@ -24,8 +24,17 @@ fn exists(e: &StorageError, want: &str) -> bool {
     matches!(e, StorageError::Exists { name } if name == want)
 }
 
-/// The conformance suite. `read` returns the bytes currently at a name.
-fn conformance<D: StorageDir>(mut dir: D, read: impl Fn(&str) -> Option<Vec<u8>>) {
+/// The conformance suite. `exists` says whether a name is present; `read`
+/// returns its bytes and is only called on files nobody holds locked:
+/// Windows byte-range locks are mandatory, so a locked file cannot be read
+/// through another handle there (error 33). `unconfirmed` is whether this
+/// backend's directory flush is best effort (the OS on Windows, O12).
+fn conformance<D: StorageDir>(
+    mut dir: D,
+    exists_at: impl Fn(&str) -> bool,
+    read: impl Fn(&str) -> Vec<u8>,
+    unconfirmed: bool,
+) {
     // Exclusive creation, locked.
     let mut t = dir.create_exclusive("a.tmp").unwrap();
     t.append(b"hello").unwrap();
@@ -38,15 +47,16 @@ fn conformance<D: StorageDir>(mut dir: D, read: impl Fn(&str) -> Option<Vec<u8>>
         dir.remove_if_unlocked("a.tmp").unwrap(),
         RemoveOutcome::Locked
     );
-    assert_eq!(read("a.tmp").as_deref(), Some(&b"hello"[..]));
+    assert!(exists_at("a.tmp"));
 
     // Publication without replacing: the old name is gone, the new one holds
     // the bytes, the handle still works.
     dir.publish_no_replace("a.tmp", "a").unwrap();
-    assert_eq!(read("a.tmp"), None);
-    assert_eq!(read("a").as_deref(), Some(&b"hello"[..]));
+    assert!(!exists_at("a.tmp"));
+    assert!(exists_at("a"));
     t.append(b"!").unwrap();
-    assert_eq!(read("a").as_deref(), Some(&b"hello!"[..]));
+    t.unlock().unwrap();
+    assert_eq!(read("a"), b"hello!");
     assert_eq!(
         dir.remove_if_unlocked("a.tmp").unwrap(),
         RemoveOutcome::Missing
@@ -61,12 +71,12 @@ fn conformance<D: StorageDir>(mut dir: D, read: impl Fn(&str) -> Option<Vec<u8>>
     u.append(b"other").unwrap();
     let e = dir.publish_no_replace("b.tmp", "a").unwrap_err();
     assert!(exists(&e, "a"), "{e}");
-    assert_eq!(read("a").as_deref(), Some(&b"hello!"[..]));
-    assert_eq!(read("b.tmp").as_deref(), Some(&b"other"[..]));
+    assert_eq!(read("a"), b"hello!");
+    assert!(exists_at("b.tmp"));
 
     // Removing one's own locked temporary file.
     dir.discard(u, "b.tmp").unwrap();
-    assert_eq!(read("b.tmp"), None);
+    assert!(!exists_at("b.tmp"));
 
     // Cleanup removes only what it can lock.
     let mut v = dir.create_exclusive("c.tmp").unwrap();
@@ -74,14 +84,14 @@ fn conformance<D: StorageDir>(mut dir: D, read: impl Fn(&str) -> Option<Vec<u8>>
         dir.remove_if_unlocked("c.tmp").unwrap(),
         RemoveOutcome::Locked
     );
-    assert!(read("c.tmp").is_some());
+    assert!(exists_at("c.tmp"));
     v.unlock().unwrap();
     drop(v);
     assert_eq!(
         dir.remove_if_unlocked("c.tmp").unwrap(),
         RemoveOutcome::Removed
     );
-    assert_eq!(read("c.tmp"), None);
+    assert!(!exists_at("c.tmp"));
     assert_eq!(
         dir.remove_if_unlocked("c.tmp").unwrap(),
         RemoveOutcome::Missing
@@ -102,9 +112,11 @@ fn conformance<D: StorageDir>(mut dir: D, read: impl Fn(&str) -> Option<Vec<u8>>
     }
 
     let d = dir.sync_directory().unwrap();
-    if cfg!(windows) {
-        assert!(matches!(d, DirectoryDurability::Unconfirmed(_)));
-    }
+    assert_eq!(
+        matches!(d, DirectoryDurability::Unconfirmed(_)),
+        unconfirmed,
+        "{d:?}"
+    );
     drop(t);
 }
 
@@ -112,15 +124,25 @@ fn conformance<D: StorageDir>(mut dir: D, read: impl Fn(&str) -> Option<Vec<u8>>
 fn t19_conformance_os_dir() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_path_buf();
-    let read = move |name: &str| std::fs::read(Path::new(&root).join(name)).ok();
-    conformance(OsDir::open(tmp.path()).unwrap(), read);
+    let root2 = root.clone();
+    conformance(
+        OsDir::open(tmp.path()).unwrap(),
+        move |name| Path::new(&root).join(name).exists(),
+        move |name| std::fs::read(Path::new(&root2).join(name)).unwrap(),
+        cfg!(windows),
+    );
 }
 
 #[test]
 fn t19_conformance_sim_dir() {
     let dir = SimDir::new();
-    let view = dir.clone();
-    conformance(dir, move |name| view.file(name).map(|f| f.contents()));
+    let (v1, v2) = (dir.clone(), dir.clone());
+    conformance(
+        dir,
+        move |name| v1.file(name).is_some(),
+        move |name| v2.file(name).unwrap().contents(),
+        false,
+    );
 }
 
 #[test]
@@ -149,6 +171,8 @@ fn t19_os_dir_two_creators_one_winner() {
         b.remove_if_unlocked("x.tmp").unwrap(),
         RemoveOutcome::Locked
     );
+    // Read only after the winner releases its lock (mandatory on Windows).
+    w.unlock().unwrap();
     assert_eq!(std::fs::read(tmp.path().join("x.tmp")).unwrap(), b"winner");
 }
 

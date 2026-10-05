@@ -115,7 +115,9 @@ use crate::manifest::{
     Attributes, ChunkEntry, FileVersionEntry, Manifest, ManifestKind, Mtime, ParentLink,
 };
 use crate::object::{build_object, ArchiveId, IdSource};
-use crate::recovery::{recover_from_manifests, ManifestRecovery};
+use crate::recovery::{
+    catalog_from_snapshot, recover_from_manifests, ManifestRecovery, RecoveryScope,
+};
 use crate::segment::{check_delta_parent_link, walk_segment, SegmentInfo};
 use crate::storage::{DirectoryDurability, ReadStorage, Storage, StorageError, StorageReader};
 
@@ -1152,21 +1154,210 @@ pub(crate) fn walk_back(
     Ok(out)
 }
 
-/// Rebuild the catalog from recovery manifests, trusting only the chain that
-/// ends at the manifest the **footer-verified head commit** names (plan C5,
-/// closing the gap found in C4). Use when the catalog checkpoint is damaged.
+/// Result of baseline recovery (Annex B.2 D10.8) for one head.
+#[derive(Debug)]
+pub struct BaselineRecovery {
+    pub head_seq: u64,
+    pub head_commit_id: CommitId,
+    /// The replay segment the head belongs to; `segment.base_seq` is *b*.
+    pub segment: SegmentInfo,
+    /// Query-only. Materializes commits *b* … *h*: `replay(Some(s))` works for
+    /// those, not for earlier commits. It was built from S(*b*), not from an
+    /// image, so it carries `META_ARCHIVE_ID` but no writer parameters
+    /// (review decision Q29).
+    pub catalog: Catalog,
+    /// Promised attributes of every version reachable at the head.
+    pub attributes: BTreeMap<FileVersionId, Attributes>,
+}
+
+/// Baseline recovery for the commit whose footer is at `footer_offset`
+/// (D10.8). Same footer checks as [`open_at_footer`]; the tail is not
+/// classified.
+pub fn recover_baseline_at_footer(
+    src: &dyn ReadStorage,
+    footer_offset: u64,
+    opts: &ReadOptions,
+) -> Result<BaselineRecovery> {
+    let r = reader(src)?;
+    let footer = validate_footer(&r, footer_offset, &opts.limits)?;
+    if !footer_names_commit(&footer) {
+        return Err(MochiError::new(
+            ErrorCode::FooterInvalid,
+            "the footer does not name a commit record",
+        ));
+    }
+    let (commit, commit_id) = read_commit(src, &footer, opts)?;
+    let head = HistoryEntry {
+        footer_offset: footer.footer_offset,
+        commit_offset: footer.fields.commit_offset,
+        commit,
+        commit_id,
+    };
+    recover_baseline(src, head, opts)
+}
+
+/// D10.8: recover the state of `head` from S(*b*) plus the delta manifests
+/// after *b*. Needs commit *b*'s record (the first later delta's parent link
+/// is checked against the delta-manifest hash it holds) and **neither SQLite,
+/// nor delta manifest *b*, nor any earlier manifest**.
 ///
-/// What this does and does not establish: manifests that disagree with the
-/// published commit chain (substituted, forged, or from another archive) are
-/// ignored. A forger who rewrites the commit records and footers as well
-/// produces a different, self-consistent file; only an external anchor (spec
-/// §5.7, D8) detects that.
+/// Reads, in order: the descriptor (D12: this is interpretation, so a bad
+/// descriptor is `DESCRIPTOR_INVALID`); the footers and commit records of the
+/// segment *b* … *h*; S(*b*); delta manifests *b*+1 … *h*. Any failure is
+/// returned as it is: no partial result, no earlier checkpoint, no search
+/// (D10.4, D10.6).
+fn recover_baseline(
+    src: &dyn ReadStorage,
+    head: HistoryEntry,
+    opts: &ReadOptions,
+) -> Result<BaselineRecovery> {
+    let head_seq = head.commit.seq;
+    let head_commit_id = head.commit_id;
+    read_descriptor(src, &head.commit, head.commit_offset, opts)?;
+    let (entries, segment) = walk_segment(src, head, opts)?;
+    let (Some(base), Some(last)) = (entries.first(), entries.last()) else {
+        return Err(MochiError::new(
+            ErrorCode::InvalidArgument,
+            "internal: an empty replay segment",
+        ));
+    };
+    let s_b = read_bound_manifest(
+        src,
+        &base.commit,
+        &checkpoint_snapshot_ref(&base.commit)?,
+        base.commit_offset,
+        ManifestKind::Snapshot,
+        opts,
+    )?;
+    let catalog = catalog_from_snapshot(&s_b)?;
+    let mut attributes: BTreeMap<FileVersionId, Attributes> = s_b
+        .file_versions
+        .iter()
+        .map(|v| (v.version.id, v.attributes))
+        .collect();
+    let mut applier = SegmentApplier::new(catalog)?;
+    apply_segment_deltas(
+        src,
+        &entries,
+        None,
+        &mut applier,
+        Some(&mut attributes),
+        opts,
+    )?;
+    if applier.head() != last.commit.seq {
+        return Err(MochiError::new(
+            ErrorCode::RecordInvalid,
+            "replay did not reach the head commit",
+        ));
+    }
+    // §11.1: snapshot recovery includes promised attributes, so a version
+    // with none is not a partial success (same code as checklist Q24).
+    let attributes = reachable_attributes(applier.namespace(), attributes).map_err(|e| {
+        MochiError::new(
+            e.code,
+            format!(
+                "cannot recover: promised attributes could not be reconstructed from the \
+                 base snapshot and the segment's deltas ({})",
+                e.message
+            ),
+        )
+    })?;
+    let catalog = applier.into_catalog();
+    catalog.make_query_only()?;
+    Ok(BaselineRecovery {
+        head_seq,
+        head_commit_id,
+        segment,
+        catalog,
+        attributes,
+    })
+}
+
+/// What [`recover_with_trusted_head`] found for the footer-verified head.
+#[derive(Debug)]
+pub struct TrustedRecovery {
+    pub head_seq: u64,
+    pub head_commit_id: CommitId,
+    /// Manifest-chain recovery (C4/C5), anchored on the head commit's key-6
+    /// hash. `Err` when it could not run at all (for example the head's delta
+    /// manifest is gone, or no manifest frame could be scanned).
+    pub chain: std::result::Result<ManifestRecovery, MochiError>,
+    /// D10.8 baseline recovery, attempted only when `chain` does not reach
+    /// the head (review decision Q30). `None`: not attempted.
+    pub baseline: Option<std::result::Result<BaselineRecovery, MochiError>>,
+}
+
+impl TrustedRecovery {
+    /// The §11.1 scope the metadata supports for commit `seq`: from the
+    /// baseline if it covers `seq` (snapshot recovery at the head, historical
+    /// below it), else from the chain, else payload salvage.
+    pub fn scope_for(&self, seq: u64) -> RecoveryScope {
+        if let Some(Ok(b)) = &self.baseline {
+            if (b.segment.base_seq..=b.head_seq).contains(&seq) {
+                return if seq == b.head_seq {
+                    RecoveryScope::SnapshotRecovery
+                } else {
+                    RecoveryScope::HistoricalRecovery
+                };
+            }
+        }
+        match &self.chain {
+            Ok(c) => c.scope_for(seq),
+            Err(_) => RecoveryScope::PayloadSalvage,
+        }
+    }
+
+    /// The catalog that reaches the head: the baseline's, else the chain's if
+    /// its rebuilt range ends at the head.
+    pub fn head_catalog(&self) -> Option<&Catalog> {
+        if let Some(Ok(b)) = &self.baseline {
+            return Some(&b.catalog);
+        }
+        match &self.chain {
+            Ok(c) if c.snapshot_range.map(|(_, last)| last) == Some(self.head_seq) => {
+                c.catalog.as_ref()
+            }
+            _ => None,
+        }
+    }
+
+    /// Promised attributes at the head, from the same source as
+    /// [`TrustedRecovery::head_catalog`]. (The chain's map covers every
+    /// version it saw, not only the reachable ones.)
+    pub fn head_attributes(&self) -> Option<&BTreeMap<FileVersionId, Attributes>> {
+        if let Some(Ok(b)) = &self.baseline {
+            return Some(&b.attributes);
+        }
+        match &self.chain {
+            Ok(c) if c.snapshot_range.map(|(_, last)| last) == Some(self.head_seq) => {
+                Some(&c.attributes)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Recover what the footer-verified head makes recoverable, when the catalog
+/// checkpoint cannot be used (plan C5, T16).
+///
+/// 1. Manifest-chain recovery, trusting only the chain that ends at the
+///    manifest the head commit names (closing the gap found in C4): manifests
+///    that disagree with the published commit chain (substituted, forged, or
+///    from another archive) are ignored. It is the only path that recovers
+///    history before the head's base.
+/// 2. If that chain does not reach the head, baseline recovery (D10.8):
+///    S(*b*) plus the later deltas, from the head's own segment only.
+///
+/// A forger who rewrites the commit records and footers as well produces a
+/// different, self-consistent file; only an external anchor (spec §5.7, D8)
+/// detects that. This function fails only when the head itself cannot be
+/// located or its commit record cannot be read.
 pub fn recover_with_trusted_head(
     src: &dyn ReadStorage,
     opts: &ReadOptions,
-) -> Result<ManifestRecovery> {
+) -> Result<TrustedRecovery> {
     let loc = locate_head(src, &opts.limits)?;
-    let (commit, _) = read_commit(src, &loc.footer, opts)?;
+    let (commit, commit_id) = read_commit(src, &loc.footer, opts)?;
     let r = StorageReader::prefix(src, loc.committed_len)?;
     let mut found = Vec::new();
     for span in Frames::new(&r, 0, opts.limits) {
@@ -1180,11 +1371,29 @@ pub fn recover_with_trusted_head(
             found.push(StoredObject::from_loaded(buf));
         }
     }
-    recover_from_manifests(
+    let head_seq = commit.seq;
+    let head = HistoryEntry {
+        footer_offset: loc.footer.footer_offset,
+        commit_offset: loc.footer.fields.commit_offset,
+        commit: commit.clone(),
+        commit_id,
+    };
+    let chain = recover_from_manifests(
         &found,
         Some(commit.delta_manifest.stored_hash),
         &opts.limits,
-    )
+    );
+    let reached = matches!(
+        &chain,
+        Ok(c) if c.snapshot_range.map(|(_, last)| last) == Some(head_seq)
+    );
+    let baseline = (!reached).then(|| recover_baseline(src, head, opts));
+    Ok(TrustedRecovery {
+        head_seq,
+        head_commit_id: commit_id,
+        chain,
+        baseline,
+    })
 }
 
 // ---- writing ---------------------------------------------------------------------

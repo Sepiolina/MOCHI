@@ -709,7 +709,7 @@ fn a_destroyed_catalog_is_recovered_through_the_footer_verified_head() {
     let rec = recover_with_trusted_head(&damaged, &opts()).unwrap();
     assert_eq!(rec.scope_for(2), RecoveryScope::SnapshotRecovery);
     assert_eq!(rec.scope_for(0), RecoveryScope::HistoricalRecovery);
-    let cat = rec.catalog.as_ref().unwrap();
+    let cat = rec.head_catalog().unwrap();
     for seq in 0..=2 {
         assert_eq!(
             cat.replay(Some(seq)).unwrap(),

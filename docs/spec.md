@@ -1740,8 +1740,8 @@ This envelope replaces the 68-byte draft in `mochi-format/src/envelope.rs`. That
 | Decoded | Image / CBOR record | = stored | Stored uncompressed; revisit under C11 |
 | Resource | CBOR items / depth | 16 Mi / 64 | Unchanged |
 | Resource | Required features per record | 64 | New |
-| Resource | Catalog memory | ≈ image size | O25; measured (G4) |
-| Resource | Decoded-CBOR memory | Unbounded by the format | Measured (G4) |
+| Resource | Catalog memory | ≈ 5.2–5.7 × image size | O25; measured (G4, T32): peak heap while opening, which holds the stored image, SQLite's in-memory copy, and verification's working set. About 1.5 GiB at the full image budget |
+| Resource | Decoded-CBOR memory | ≈ 50 B per item (≈ 7.6 × stored size) | Unbounded by the format; measured (G4, T32). About 800 MiB for one record at the 16 Mi item limit |
 
 **Writer default rule.**
 - A default writer enforces every *reader-default* limit on everything it emits, whatever limits it was configured to read with.
@@ -1757,20 +1757,20 @@ This envelope replaces the 68-byte draft in `mochi-format/src/envelope.rs`. That
 
 **Storage bound (conditional).**
 - **Assumption.** Suppose *B*ᵢ ≤ *B*ᵢ₋₁ + *k*·Δᵢ holds uniformly across intervals and workloads. Here *B* counts both representations, and *k* is measured per interval.
-- **Bound.** Then total stored metadata ≤ (1 + 1/α + *k*)·ΣΔ + *B*₀ + Σ*B*_forced, where *B*₀ is the initial checkpoint and *B*_forced each forced checkpoint.
+- **Bound.** Then total stored metadata ≤ (1 + 1/α + *k*)·ΣΔ + *B*₀ + Σ*B*_forced. Here ΣΔ is the delta-manifest, commit-record, and footer bytes of every commit after commit 0, checkpoint commits' own included; *B*₀ is all of commit 0's metadata (descriptor, delta manifest, commit record, footer, image, and snapshot manifest); and *B*_forced is each forced checkpoint's image and snapshot manifest. (Clarified 2026-10-05 from the T32 measurements: with *B*₀ read as image and snapshot only, the bound fails whenever commit 0 introduces much state, because commit 0's own delta manifest is then as large as its snapshot.)
 - **When it is linear.** The bound is linear in ΣΔ only if that assumption holds and forced checkpoints are bounded.
 - **Replay.** Replay reads less than α·max(*B*, *F*) bytes plus one commit's metadata.
 - **Evidence, not proof.** Benchmarks can estimate *k* and can refute the assumption. They cannot prove it.
 
-#### B.2.4 Capacity (unmeasured)
+#### B.2.4 Capacity
 
 Every mandatory checkpoint must fit within all of the limits above, so archive state is bounded. Once the bound is reached, mandatory checkpoints fail with `CAPACITY_EXCEEDED`. Reads continue, and only commits that reduce state below the bound succeed.
 
-**Unmeasured estimates.** These come from schema-conformant synthetic instances encoded with a general-purpose CBOR library, not from the MOCHI writer or codec. They are labelled *unmeasured* until gate G5:
-- **Per-file cost.** A single-chunk file with POSIX attributes and a 22-byte path costs about 318 bytes and 49 items in a snapshot manifest.
-- **Binding limit.** The item limit binds first, at about 340,000 such files. The stored-size limit would bind at about 840,000.
-- **Multi-chunk files** cost about 25 more items per chunk.
-- **Image limit.** From the C5 benchmark's bytes per file, the image limit binds at roughly 600,000 files.
+**Measured (gate G5, T32, 2026-10-05).** From the MOCHI writer and codec (`docs/benchmarks/t32-capacity-memory.md`). These replace the earlier estimates, which came from a general-purpose CBOR library; each estimate was within 5%:
+- **Per-file cost.** A single-chunk file with POSIX attributes and a 22-byte path costs **322 bytes and 49 items** in a snapshot manifest (estimated: 318 bytes, 49 items), and 426.5 bytes in the catalog image.
+- **Binding limit.** The item limit binds first, at **342,391** such files. The snapshot's stored-size limit would bind at 833,761.
+- **Multi-chunk files** cost **24** more items per chunk (estimated: about 25), so a file of *c* chunks costs 49 + 24(*c* − 1) items.
+- **Image limit.** The image budget binds at **629,231** such files (estimated: roughly 600,000).
 
 #### B.2.5 Specification text amended by this batch
 
@@ -1779,6 +1779,7 @@ Every mandatory checkpoint must fit within all of the limits above, so archive s
 - **D10.4** (2026-10-04). Introduction versus reference during replay, and its relation to §10.2 (Q18, Q26); unknown required feature versus unknown operation kind (Q19).
 - **D10.6** (2026-10-03 and 2026-10-04). Parent traversal offset versus base footer hint (Q17, Q23); one descriptor per segment (Q16).
 - **D12** (2026-10-04). Placement note tying the single descriptor to D10.6.
+- **B.2.3, B.2.4** (2026-10-05, from the T32 measurements). Storage-bound terms defined (ΣΔ, *B*₀, *B*_forced); measured catalog and decoded-CBOR memory; B.2.4's estimates replaced by measurements.
 
 #### B.2.6 Evidence and release gates
 

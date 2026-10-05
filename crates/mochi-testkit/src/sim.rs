@@ -56,6 +56,15 @@ pub enum Fault {
     /// The `index`-th `sync_directory` reports a best-effort flush that did
     /// not confirm durability (the Windows case, plan O12).
     UnconfirmedSyncDirectory { index: usize },
+    /// The `append_index`-th append stores its bytes with `data[at] ^= xor`
+    /// (ignored if `at` is out of range) and returns `Ok` as if they were
+    /// written as given: silent write corruption, which only a re-read can
+    /// find.
+    CorruptAppend {
+        append_index: usize,
+        at: usize,
+        xor: u8,
+    },
 }
 
 /// Operations recorded in the trace, in order.
@@ -305,7 +314,21 @@ impl Storage for SimStorage {
             return Err(halted_error());
         }
 
+        let corrupt = inner.faults.iter().find_map(|f| match f {
+            Fault::CorruptAppend {
+                append_index,
+                at,
+                xor,
+            } if *append_index == append_idx => Some((*at, *xor)),
+            _ => None,
+        });
+        let start = inner.data.len();
         inner.data.extend_from_slice(data);
+        if let Some((at, xor)) = corrupt {
+            if let Some(b) = start.checked_add(at).and_then(|i| inner.data.get_mut(i)) {
+                *b ^= xor;
+            }
+        }
         inner.trace.push(Op::Append {
             offset,
             len: data.len() as u64,
@@ -440,6 +463,31 @@ mod tests {
                 .contents(),
             b"0123AB"
         );
+    }
+
+    #[test]
+    fn a_corrupted_append_changes_exactly_one_byte_and_reports_success() {
+        let mut s = SimStorage::with_faults([Fault::CorruptAppend {
+            append_index: 1,
+            at: 2,
+            xor: 0x40,
+        }]);
+        assert_eq!(s.append(b"0123").unwrap(), 0);
+        assert_eq!(s.append(b"ABCD").unwrap(), 4);
+        assert_eq!(s.append(b"EFGH").unwrap(), 8);
+        let got = s.contents();
+        let want = b"0123ABCDEFGH";
+        let diff: Vec<usize> = (0..want.len()).filter(|&i| got[i] != want[i]).collect();
+        assert_eq!(diff, [6]);
+        assert_eq!(got[6], b'C' ^ 0x40);
+        // Out of range: no effect.
+        let mut t = SimStorage::with_faults([Fault::CorruptAppend {
+            append_index: 0,
+            at: 99,
+            xor: 1,
+        }]);
+        t.append(b"xy").unwrap();
+        assert_eq!(t.contents(), b"xy");
     }
 
     #[test]

@@ -67,10 +67,20 @@
 //! * **Physical order** of a checkpoint's objects is delta manifest,
 //!   snapshot manifest, image (spec §8.1: recovery records, then metadata;
 //!   "physical ordering MAY vary"). Not a wire rule; readers use the refs.
-//! * **The snapshot manifest is not read when opening.** D10.9: a damaged
+//! * **The snapshot manifest is not read when opening, unless the image's
+//!   stored bytes are damaged** (D10.9, review decisions Q31, Q32). A damaged
 //!   snapshot with an intact image leaves reads working (recoverability
-//!   `DEGRADED`, reported by T17). [`read_snapshot`] reads it on demand.
-//!   Appending does read it, for promised attributes (below).
+//!   `DEGRADED`, [`crate::damage`]). A reader whose base image fails with
+//!   [`is_stored_damage`] rebuilds the catalog from the same commit's
+//!   snapshot manifest, hash-verified and identity-bound, without SQLite
+//!   ([`CatalogSource::SnapshotManifest`]); it never uses an earlier
+//!   checkpoint, and any other failure (an invalid record, an unsupported
+//!   envelope, a limit, I/O) is refused as before. A checkpoint head
+//!   likewise tolerates stored damage to its own delta manifest, which no
+//!   read needs ([`OpenedHead::manifest_error`]). [`read_snapshot`] reads
+//!   the snapshot on demand. Appending does read it, for promised
+//!   attributes (below), and refuses on any failure rather than falling
+//!   back (Q34).
 //! * **Promised attributes** are not in the catalog until C6, so the image
 //!   cannot carry them, but a snapshot must (D10.3). The writer keeps them
 //!   per reachable version. On `open_append` it takes them from the base
@@ -710,7 +720,7 @@ fn read_descriptor(
 /// that it is of `kind` and carries the commit's D11 identity
 /// (`ENVELOPE_INVALID` on a mismatch, the same fault codes as the binary
 /// envelope).
-fn read_bound_manifest(
+pub(crate) fn read_bound_manifest(
     src: &dyn ReadStorage,
     commit: &CommitRecord,
     r: &ObjectRef,
@@ -908,7 +918,7 @@ fn open_at(
     })
 }
 
-fn checkpoint_snapshot_ref(commit: &CommitRecord) -> Result<ObjectRef> {
+pub(crate) fn checkpoint_snapshot_ref(commit: &CommitRecord) -> Result<ObjectRef> {
     match commit.metadata {
         Metadata::Checkpoint { snapshot, .. } => Ok(snapshot),
         Metadata::Delta { .. } => Err(MochiError::new(
@@ -946,7 +956,7 @@ fn attributes_incomplete(e: MochiError) -> MochiError {
 /// envelope bound to `cp` (D11), and only then SQLite (plan C5). The catalog
 /// must materialize `cp` and belong to its archive. `writable` selects a
 /// catalog that accepts writes (replay and append) over a query-only one.
-fn check_image(
+pub(crate) fn check_image(
     src: &dyn ReadStorage,
     cp: &HistoryEntry,
     image_ref: &ObjectRef,

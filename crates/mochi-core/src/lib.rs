@@ -25,6 +25,7 @@
 
 pub mod catalog;
 pub mod commit;
+pub mod damage;
 pub mod descriptor;
 pub mod error;
 pub mod image;

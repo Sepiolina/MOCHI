@@ -53,6 +53,14 @@ pub enum Severity {
     Error,
 }
 
+/// An inclusive range of commit sequences (Annex B.2 D10.9: "verification
+/// names the affected sequence range").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeqRange {
+    pub first: u64,
+    pub last: u64,
+}
+
 /// A structured finding carrying a stable code (spec §20.5, §23.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {
@@ -64,6 +72,10 @@ pub struct Finding {
     pub expected: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed: Option<String>,
+    /// The commits this finding affects, when it is about stored objects of
+    /// the history (review decision Q35; an input to ratification item R7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affected: Option<SeqRange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,6 +324,7 @@ mod tests {
             message: None,
             expected: None,
             observed: None,
+            affected: None,
         });
         let v = r.validate().unwrap_err();
         assert!(v.contains(&ReportViolation::PassWithSkippedItems { count: 1 }));
@@ -345,11 +358,32 @@ mod tests {
             message: Some("m".into()),
             expected: Some("3".into()),
             observed: Some("2".into()),
+            affected: None,
         });
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("\"overall_status\":\"UNKNOWN\""));
         assert!(json.contains("\"code\":\"UNSUPPORTED_FEATURE\""));
+        // A finding without a range serializes exactly as it did before the
+        // field existed (review decision Q35).
+        assert!(!json.contains("affected"));
         let back: Report = serde_json::from_str(&json).unwrap();
         assert_eq!(back, r);
+    }
+
+    #[test]
+    fn an_affected_range_round_trips_and_old_json_still_parses() {
+        let f = Finding {
+            code: ErrorCode::StoredIntegrityFailed,
+            severity: Severity::Error,
+            message: None,
+            expected: None,
+            observed: None,
+            affected: Some(SeqRange { first: 3, last: 5 }),
+        };
+        let json = serde_json::to_string(&f).unwrap();
+        assert!(json.contains("\"affected\":{\"first\":3,\"last\":5}"));
+        assert_eq!(serde_json::from_str::<Finding>(&json).unwrap(), f);
+        let old = r#"{"code":"IO_ERROR","severity":"error"}"#;
+        assert_eq!(serde_json::from_str::<Finding>(old).unwrap().affected, None);
     }
 }

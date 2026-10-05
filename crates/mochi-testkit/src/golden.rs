@@ -1064,6 +1064,18 @@ pub fn c4_manifest_vectors() -> Vec<ManifestVector> {
         },
         "MALFORMED_FRAME",
     ));
+    // Added for G1 (T30): D11 "Payload length", CBOR: the whole payload is
+    // consumed. Appended last so earlier vectors.txt lines stay identical.
+    v.push(reject(
+        "reject-manifest-payload-not-consumed",
+        "one byte after the manifest's CBOR item, inside the frame",
+        {
+            let mut p = root.encode().expect("fixture");
+            p.push(0x00);
+            encode_skippable_frame(FrameKind::RecoveryManifest, &p).expect("frame")
+        },
+        "RECORD_INVALID",
+    ));
     v
 }
 
@@ -1455,6 +1467,18 @@ pub fn c5_commit_vectors() -> Vec<ManifestVector> {
                 b
             },
             "MALFORMED_FRAME",
+        ),
+        // Added for G1 (T30): D11 "Payload length", CBOR: the whole payload
+        // is consumed. Appended last so earlier lines stay identical.
+        reject(
+            "reject-commit-payload-not-consumed",
+            "one byte after the commit's CBOR item, inside the frame",
+            {
+                let (mut p, _) = root.encode().expect("fixture");
+                p.push(0x00);
+                encode_skippable_frame(FrameKind::CommitRecord, &p).expect("frame")
+            },
+            "RECORD_INVALID",
         ),
     ]
 }
@@ -1996,6 +2020,16 @@ pub fn b2_descriptor_vectors() -> Vec<DescriptorVector> {
         trailing,
         Err(d),
     );
+    // Added for G1 (T30): D11 "Payload length", CBOR: the whole payload is
+    // consumed. Appended last so earlier lines stay identical.
+    let mut p = ok.to_stored().expect("fixture").as_bytes()[8..].to_vec();
+    p.push(0x00);
+    push(
+        "reject-descriptor-payload-not-consumed",
+        "one byte after the descriptor's CBOR item, inside the frame",
+        skippable(registry::ARCHIVE_DESCRIPTOR, &p),
+        Err(d),
+    );
     out
 }
 
@@ -2274,7 +2308,11 @@ pub fn c5_archive_vectors() -> Vec<ArchiveVector> {
     );
     push(
         "reject-archive-segment-descriptor-differs",
-        "T11 / decision 16: an intermediate commit's descriptor reference differs",
+        // Frozen as first written. `forge::delta_record` copies c2's wrong
+        // reference into c3, so the head fails on its own descriptor (D12)
+        // and the segment rule is never reached; the mid-segment case is
+        // `reject-archive-segment-descriptor-differs-head-valid`.
+        "D12: the head and an intermediate commit reference another descriptor",
         ArchiveExpect::Rejected("DESCRIPTOR_INVALID"),
         {
             let mut f = cp0_d1();
@@ -2413,6 +2451,105 @@ pub fn c5_archive_vectors() -> Vec<ArchiveVector> {
             let r3 = f.append_manifest(&empty_delta(&c2, txid(0x70)));
             f.append_delta(&c2, rule_base(&h[1]), r3, txid(0x70));
             f.bytes
+        },
+    );
+    // Added for G1 (T18 review, T30). Appended last so earlier vectors.txt
+    // lines stay byte-identical.
+    push(
+        "reject-archive-segment-descriptor-differs-head-valid",
+        "D10.6: an intermediate commit references another descriptor; the head references \
+         the real one, so only the segment rule refuses it",
+        ArchiveExpect::Rejected("DESCRIPTOR_INVALID"),
+        {
+            let mut f = cp0_d1();
+            let h = f.history();
+            let r2 = f.append_manifest(&empty_delta(&h[1], txid(0x71)));
+            let mut rec = forge::delta_record(&h[1], rule_base(&h[1]), r2, txid(0x71));
+            rec.descriptor.stored_hash = StoredObjectHash::from_bytes([0x11; 32]);
+            let c2 = f.append_commit(&rec);
+            let r3 = f.append_manifest(&empty_delta(&c2, txid(0x72)));
+            let mut head = forge::delta_record(&c2, rule_base(&h[1]), r3, txid(0x72));
+            head.descriptor = h[1].commit.descriptor;
+            f.append_commit(&head);
+            f.bytes
+        },
+    );
+    // D11 bindings of a CBOR record to the commit that references it.
+    push(
+        "reject-archive-manifest-archive-id",
+        "D11 archive identity: the head's delta manifest names another archive",
+        ArchiveExpect::Rejected("ENVELOPE_INVALID"),
+        forge_c2(
+            |m, _| m.archive_id = mochi_core::object::ArchiveId::from_bytes([0x5A; 32]),
+            |_, _| {},
+        ),
+    );
+    push(
+        "reject-archive-manifest-transaction-id",
+        "D11 identity: the head's delta manifest carries another transaction ID",
+        ArchiveExpect::Rejected("ENVELOPE_INVALID"),
+        forge_c2(|m, _| m.transaction_id = txid(0x73), |_, _| {}),
+    );
+    push(
+        "reject-archive-manifest-sequence",
+        "D11 identity: the head's delta manifest names another commit sequence",
+        ArchiveExpect::Rejected("ENVELOPE_INVALID"),
+        forge_c2(
+            |m, _| {
+                m.commit_seq += 1;
+                if let Some(p) = m.parent.as_mut() {
+                    p.seq += 1;
+                }
+            },
+            |_, _| {},
+        ),
+    );
+    push(
+        "reject-archive-manifest-hash",
+        "D11 integrity scope: the head's delta manifest fails its stored-object hash",
+        ArchiveExpect::Rejected("STORED_INTEGRITY_FAILED"),
+        {
+            let mut f = cp0_d1();
+            let h = f.history();
+            let r = f.append_manifest(&empty_delta(&h[1], txid(0x74)));
+            f.append_delta(&h[1], rule_base(&h[1]), r, txid(0x74));
+            let at = (r.offset + r.stored_len / 2) as usize;
+            f.bytes[at] ^= 0x01;
+            f.bytes
+        },
+    );
+    push(
+        "reject-archive-descriptor-hash",
+        "D11 integrity scope / D12: the descriptor fails its stored-object hash",
+        ArchiveExpect::Rejected("DESCRIPTOR_INVALID"),
+        {
+            let mut b = cp0_d1().bytes;
+            b[20] ^= 0x01; // inside the descriptor's archive ID
+            b
+        },
+    );
+    push(
+        "reject-archive-descriptor-archive-id",
+        "D11 archive identity / D12: the descriptor names another archive",
+        ArchiveExpect::Rejected("DESCRIPTOR_INVALID"),
+        {
+            let f = cp0_d1();
+            let e0 = f.history().remove(0);
+            let other =
+                Descriptor::new(mochi_core::object::ArchiveId::from_bytes([0x5A; 32]), false)
+                    .to_stored()
+                    .expect("fixture");
+            let desc = other.as_bytes();
+            let r = e0.commit.descriptor;
+            assert_eq!(desc.len() as u64, r.stored_len, "same-length descriptor");
+            let mut b = f.bytes;
+            b[..desc.len()].copy_from_slice(desc);
+            b.truncate(e0.commit_offset as usize);
+            let mut g = Forge::new(b);
+            let mut rec = e0.commit.clone();
+            rec.descriptor.stored_hash = mochi_format::digest::stored_object_hash(other.view());
+            g.append_commit(&rec);
+            g.bytes
         },
     );
     out

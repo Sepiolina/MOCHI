@@ -27,3 +27,4 @@ reject-manifest-snapshot-not-self-contained rejects RECORD_INVALID
 reject-manifest-noncanonical-cbor rejects RECORD_INVALID
 reject-manifest-wrong-frame-kind rejects MALFORMED_FRAME
 reject-manifest-trailing-frame rejects MALFORMED_FRAME
+reject-manifest-payload-not-consumed rejects RECORD_INVALID

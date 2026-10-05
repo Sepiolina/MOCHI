@@ -21,5 +21,8 @@ mochi-format.workspace = true
 clap.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+mochi-testkit.workspace = true
+
 [lints]
 workspace = true

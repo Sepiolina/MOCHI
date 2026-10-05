@@ -65,6 +65,8 @@ pub fn test_options() -> WriterOptions {
         chunk_size: Some(64),
         zstd_level: Some(3),
         record_time: false,
+        profile: None,
+        checkpoint_trigger: None,
     }
 }
 
@@ -174,9 +176,13 @@ pub fn scripted_history() -> Vec<Step> {
     steps
 }
 
-/// Create an archive in `storage` and commit `steps` in order.
+/// Create an archive in `storage` and commit `steps` in order, every commit
+/// a checkpoint: the C5 full-checkpoint writer that the C5 publication tests
+/// and the replay oracle are written against. The production trigger (T14)
+/// is exercised by `t14_trigger.rs`.
 pub fn build<S: Storage>(storage: S, seed: u64, steps: &[Step]) -> Result<Vec<CommitOutcome>> {
     let mut w = ArchiveWriter::create(storage, Box::new(SeqIds::new(seed)), test_options())?;
+    w.set_checkpoint_policy(mochi_core::publish::CheckpointPolicy::EveryCommit)?;
     let job = Job::new();
     let mut out = Vec::new();
     for s in steps {

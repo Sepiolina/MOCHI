@@ -118,7 +118,7 @@ use crate::catalog::namespace::{EntryKind, FileVersionId, NamespaceOp, Snapshot}
 use crate::catalog::path::ArchivePath;
 use crate::catalog::{Catalog, CatalogLimits, Commit, FileVersion, SegmentApplier};
 use crate::commit::{uuid_v4, CommitLink, CommitParent, CommitRecord, Metadata, ObjectRef};
-use crate::descriptor::Descriptor;
+use crate::descriptor::{Descriptor, Profile};
 use crate::error::{ErrorCode, MochiError, Result};
 use crate::image::{decode_image_record, encode_image_record};
 use crate::job::JobContext;
@@ -165,24 +165,99 @@ pub struct WriterOptions {
     /// Record the system time in each commit (informational, §12.1).
     /// Ignored when a transaction carries an explicit time.
     pub record_time: bool,
+    /// The profile asked for (spec §7, D4, D12). `None` means the default
+    /// profile when creating and the archive's own when appending. Appending
+    /// with a different profile is `PROFILE_CHANGE_UNSUPPORTED`: a profile is
+    /// fixed at creation (D12). Creating with one this build cannot write is
+    /// `UNSUPPORTED_FEATURE`.
+    pub profile: Option<Profile>,
+    /// The checkpoint trigger's α and *F* (Annex B.2.3). `None` means the
+    /// provisional defaults. Writer policy: not recorded in the archive.
+    pub checkpoint_trigger: Option<CheckpointTrigger>,
+}
+
+/// The checkpoint trigger (Annex B.2.3, writer policy, not wire format): a
+/// commit is a checkpoint when Δ ≥ α·max(*B*, *F*), where Δ is the stored
+/// bytes of the delta manifests, commit records, and footers since the base
+/// and *B* is the base's image plus snapshot manifest. α is held as a ratio
+/// so the decision is exact integer arithmetic, the same on every platform.
+/// The provisional defaults are α = 1 and *F* = 1 MiB, to be confirmed or
+/// revised by gate G3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckpointTrigger {
+    alpha_num: u64,
+    alpha_den: u64,
+    floor: u64,
+}
+
+impl Default for CheckpointTrigger {
+    fn default() -> Self {
+        CheckpointTrigger {
+            alpha_num: 1,
+            alpha_den: 1,
+            floor: DEFAULT_CHECKPOINT_FLOOR,
+        }
+    }
+}
+
+/// *F*'s provisional default (Annex B.2.3).
+pub const DEFAULT_CHECKPOINT_FLOOR: u64 = 1 << 20;
+
+impl CheckpointTrigger {
+    /// α = `alpha_num` / `alpha_den`, *F* = `floor` bytes. α must be
+    /// positive: α = 0 would make every commit a checkpoint and removes the
+    /// storage bound's 1/α term (B.2.3), so it is refused rather than
+    /// silently meaning "every commit".
+    pub fn new(alpha_num: u64, alpha_den: u64, floor: u64) -> Result<Self> {
+        if alpha_num == 0 || alpha_den == 0 {
+            return Err(MochiError::new(
+                ErrorCode::InvalidArgument,
+                "checkpoint trigger: α must be a positive ratio (numerator and denominator \
+                 at least 1)",
+            ));
+        }
+        Ok(CheckpointTrigger {
+            alpha_num,
+            alpha_den,
+            floor,
+        })
+    }
+
+    pub fn alpha(&self) -> (u64, u64) {
+        (self.alpha_num, self.alpha_den)
+    }
+
+    pub fn floor(&self) -> u64 {
+        self.floor
+    }
+
+    /// Whether Δ ≥ α·max(*B*, *F*), exactly (`u128`, no overflow).
+    pub fn requires_checkpoint(&self, delta_bytes: u64, base_bytes: u64) -> bool {
+        let threshold = u128::from(base_bytes.max(self.floor));
+        u128::from(delta_bytes) * u128::from(self.alpha_den)
+            >= threshold * u128::from(self.alpha_num)
+    }
 }
 
 /// Which commits the writer makes checkpoints (Annex B.2 D10).
 ///
-/// **Production writes [`CheckpointPolicy::EveryCommit`] until the T14
-/// trigger exists** (B.2.3: Δ ≥ α·max(*B*, *F*)). The other policies exist
-/// to produce delta commits for replay tests (review decision 14) and can
+/// **Production writes [`CheckpointPolicy::Trigger`]** (T14, B.2.3:
+/// Δ ≥ α·max(*B*, *F*)), with α and *F* from
+/// [`WriterOptions::checkpoint_trigger`]. The other policies exist to
+/// produce fixed checkpoint schedules for tests (review decision 14) and can
 /// only be selected through [`ArchiveWriter::set_checkpoint_policy`], which
 /// is compiled in with the non-default `test-controls` feature. Cargo
 /// features are additive, so that feature is not an isolation boundary.
 ///
-/// Whatever the policy, commit 0 is a checkpoint (D10), and a delta's base
-/// is derived by the base rule: the parent if the parent is a checkpoint,
-/// else the parent's base (D10.6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Whatever the policy, commit 0 is a checkpoint (D10), a commit after
+/// [`ArchiveWriter::request_checkpoint`] is one, and a delta's base is
+/// derived by the base rule: the parent if the parent is a checkpoint, else
+/// the parent's base (D10.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckpointPolicy {
+    /// The B.2.3 trigger (production).
+    Trigger(CheckpointTrigger),
     /// Every commit is a checkpoint (the C5 writer; the replay oracle).
-    #[default]
     EveryCommit,
     /// Commit 0 is a checkpoint; every later commit is a delta on it.
     Never,
@@ -204,10 +279,12 @@ impl CheckpointPolicy {
         Ok(self)
     }
 
-    /// Whether commit `seq` is written as a checkpoint. Commit 0 always is.
-    fn is_checkpoint(self, seq: u64) -> bool {
+    /// Whether commit `seq` is written as a checkpoint, given the trigger's
+    /// Δ and *B* at the current head. Commit 0 always is.
+    fn is_checkpoint(self, seq: u64, delta_bytes: u64, base_bytes: u64) -> bool {
         seq == 0
             || match self {
+                CheckpointPolicy::Trigger(t) => t.requires_checkpoint(delta_bytes, base_bytes),
                 CheckpointPolicy::EveryCommit => true,
                 CheckpointPolicy::Never => false,
                 // Every(0) is refused by `validate`; treat it as EveryCommit
@@ -684,7 +761,7 @@ pub fn open_at_footer(
 /// D12: a descriptor that cannot be loaded, hash-verified, or decoded, or
 /// that names another archive, is `DESCRIPTOR_INVALID`. Refusals
 /// (`UNSUPPORTED_FEATURE`), reader limits, and I/O keep their codes.
-fn read_descriptor(
+pub(crate) fn read_descriptor(
     src: &dyn ReadStorage,
     commit: &CommitRecord,
     limit: u64,
@@ -860,11 +937,15 @@ fn open_at(
                 // A catalog rebuilt from S(b) is writable; a reader's never is.
                 catalog.make_query_only()?;
             }
+            let (delta_bytes, base_bytes) =
+                crate::segment::segment_accounting(std::slice::from_ref(&head_entry));
             let segment = SegmentInfo {
                 base_seq: commit.seq,
                 base_commit_id: commit_id,
                 base_footer_offset: head_entry.footer_offset,
                 base_hint_mismatch: None,
+                delta_bytes,
+                base_bytes,
             };
             let attributes = match mode {
                 OpenMode::Read => None,
@@ -1702,12 +1783,18 @@ struct WriterHead {
     /// The base a delta written next would name (D10.6 base rule): the head
     /// itself if it is a checkpoint, else the head's own base.
     next_base: CommitLink,
+    /// Checkpoint-trigger Δ and *B* at the head (B.2.3; see
+    /// [`SegmentInfo::delta_bytes`]).
+    delta_bytes: u64,
+    base_bytes: u64,
 }
 
 /// Bytes written before the footer, ready to publish.
 struct Prepared {
     seq: u64,
     next_base: CommitLink,
+    delta_bytes: u64,
+    base_bytes: u64,
     commit_offset: u64,
     commit_frame: StoredObject,
     commit_id: CommitId,
@@ -1764,6 +1851,9 @@ pub struct ArchiveWriter<S: Storage> {
     new_descriptor: Option<Descriptor>,
     /// `EveryCommit` unless a test changed it (see [`CheckpointPolicy`]).
     policy: CheckpointPolicy,
+    /// Set by [`ArchiveWriter::request_checkpoint`]; cleared when a commit
+    /// is published.
+    checkpoint_requested: bool,
     /// Test control: damage what a checkpoint serializes (see
     /// [`CheckpointTamper`]).
     #[cfg(any(test, feature = "test-controls"))]
@@ -1781,6 +1871,66 @@ impl<S: Storage> std::fmt::Debug for ArchiveWriter<S> {
             .field("poisoned", &self.poisoned)
             .finish()
     }
+}
+
+/// The profiles this build can write a new archive in: the default (Core)
+/// profile only, until the TAR-compatible and Encrypted writers exist.
+fn check_create_profile(asked: Profile) -> Result<()> {
+    if asked.encrypted {
+        return Err(MochiError::new(
+            ErrorCode::UnsupportedFeature,
+            "this build cannot write the Encrypted profile (spec §7.3)",
+        ));
+    }
+    if asked.tar_compatible {
+        return Err(MochiError::new(
+            ErrorCode::UnsupportedFeature,
+            "this build cannot write the TAR-compatible profile (spec §7.2, D4)",
+        ));
+    }
+    Ok(())
+}
+
+/// D12: a profile is fixed at creation, so an append that asks for a
+/// different one is refused, whatever this build can write; then an archive
+/// whose profile this build cannot write is refused too.
+fn check_append_profile(descriptor: &Descriptor, asked: Option<Profile>) -> Result<()> {
+    let have = descriptor.profile();
+    if let Some(asked) = asked {
+        let mut changes = Vec::new();
+        if asked.encrypted != have.encrypted {
+            changes.push(if asked.encrypted {
+                "enabling the Encrypted profile"
+            } else {
+                "removing the Encrypted profile"
+            });
+        }
+        if asked.tar_compatible != have.tar_compatible {
+            changes.push(if asked.tar_compatible {
+                "enabling the TAR-compatible profile"
+            } else {
+                "removing the TAR-compatible profile"
+            });
+        }
+        if !changes.is_empty() {
+            return Err(MochiError::new(
+                ErrorCode::ProfileChangeUnsupported,
+                format!(
+                    "{} in place is not supported: an archive's profile is fixed at creation \
+                     (spec D12). Write a new archive with the profile you want.",
+                    changes.join(" and ")
+                ),
+            ));
+        }
+    }
+    if have.tar_compatible {
+        return Err(MochiError::new(
+            ErrorCode::UnsupportedFeature,
+            "this archive was created with the TAR-compatible profile (spec D4), which this \
+             build cannot write; appending would break that constraint",
+        ));
+    }
+    Ok(())
 }
 
 fn lock(storage: &mut dyn Storage) -> Result<()> {
@@ -1805,6 +1955,7 @@ impl<S: Storage> ArchiveWriter<S> {
                     "create needs empty storage; use open_append for an existing archive",
                 ));
             }
+            check_create_profile(opts.profile.unwrap_or_default())?;
             let params = WriterParams {
                 chunk_size: opts.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE),
                 zstd_level: opts.zstd_level.unwrap_or(EncodeParams::default().level),
@@ -1816,6 +1967,7 @@ impl<S: Storage> ArchiveWriter<S> {
                 Catalog::new_working()?,
             ))
         })();
+        let policy = CheckpointPolicy::Trigger(opts.checkpoint_trigger.unwrap_or_default());
         let (archive_id, params, catalog) = match result {
             Ok(v) => v,
             Err(e) => {
@@ -1836,7 +1988,8 @@ impl<S: Storage> ArchiveWriter<S> {
             // The default profile is not TAR-compatible (spec D4); choosing
             // TAR compatibility at creation arrives with that profile.
             new_descriptor: Some(Descriptor::new(archive_id, false)),
-            policy: CheckpointPolicy::EveryCommit,
+            policy,
+            checkpoint_requested: false,
             #[cfg(any(test, feature = "test-controls"))]
             tamper: None,
             needs_directory_sync: true,
@@ -1875,11 +2028,16 @@ impl<S: Storage> ArchiveWriter<S> {
                             delta_manifest_hash: head.commit.delta_manifest.stored_hash,
                             descriptor: head.commit.descriptor,
                             next_base: next_base_after(&head),
+                            delta_bytes: head.segment.delta_bytes,
+                            base_bytes: head.segment.base_bytes,
                         }),
                         catalog: head.catalog,
                         attributes,
                         new_descriptor: None,
-                        policy: CheckpointPolicy::EveryCommit,
+                        policy: CheckpointPolicy::Trigger(
+                            opts.checkpoint_trigger.unwrap_or_default(),
+                        ),
+                        checkpoint_requested: false,
                         #[cfg(any(test, feature = "test-controls"))]
                         tamper: None,
                         needs_directory_sync: false,
@@ -1902,6 +2060,18 @@ impl<S: Storage> ArchiveWriter<S> {
         tail: TailPolicy,
     ) -> Result<OpenedForAppend> {
         let mut location = locate_head(storage, &opts.read.limits)?;
+        // D12, before anything is written (a tail truncation included):
+        // append needs a valid descriptor bound to the head, and refuses a
+        // profile change and a profile this build cannot write. open_at
+        // checks the descriptor again on the same head.
+        let (head_commit, head_id) = read_commit(storage, &location.footer, &opts.read)?;
+        let descriptor = read_descriptor(
+            storage,
+            &head_commit,
+            location.footer.fields.commit_offset,
+            &opts.read,
+        )?;
+        check_append_profile(&descriptor, opts.profile)?;
         let mut truncation = None;
         match (&location.tail, tail) {
             (TailState::Clean, _) => {}
@@ -1931,7 +2101,6 @@ impl<S: Storage> ArchiveWriter<S> {
                 },
                 TailPolicy::TruncateUncommitted,
             ) => {
-                let (head_commit, head_id) = read_commit(storage, &location.footer, &opts.read)?;
                 let t = TailTruncation {
                     committed_len: location.committed_len,
                     removed_len: *len,
@@ -1954,13 +2123,6 @@ impl<S: Storage> ArchiveWriter<S> {
             }
         }
         let Opened { head, attributes } = open_at(storage, location, &opts.read, OpenMode::Append)?;
-        if head.descriptor.tar_compatible {
-            return Err(MochiError::new(
-                ErrorCode::UnsupportedFeature,
-                "this archive was created with the TAR-compatible profile (spec D4), which this \
-                 build cannot write; appending would break that constraint",
-            ));
-        }
         // The next snapshot must carry every reachable version's promised
         // attributes, which only snapshot manifests (and the deltas after
         // them) hold until C6 moves them into the catalog. open_at refused
@@ -2021,6 +2183,26 @@ impl<S: Storage> ArchiveWriter<S> {
     /// The checkpoint policy the next commit will follow.
     pub fn checkpoint_policy(&self) -> CheckpointPolicy {
         self.policy
+    }
+
+    /// Make the next published commit a checkpoint, whatever the policy (a
+    /// forced checkpoint; the `checkpoint` command). It resets the base like
+    /// any checkpoint (B.2.3). The request stays until a commit is
+    /// published, so a commit that fails or is cancelled does not use it up.
+    pub fn request_checkpoint(&mut self) {
+        self.checkpoint_requested = true;
+    }
+
+    /// Whether the next commit will be a checkpoint because of
+    /// [`request_checkpoint`](Self::request_checkpoint).
+    pub fn checkpoint_requested(&self) -> bool {
+        self.checkpoint_requested
+    }
+
+    /// The checkpoint trigger's Δ and *B* at the current head (B.2.3), or
+    /// `None` before the first commit.
+    pub fn trigger_accounting(&self) -> Option<(u64, u64)> {
+        self.head.map(|h| (h.delta_bytes, h.base_bytes))
     }
 
     /// Release the publication lock, reporting a failure to do so (dropping
@@ -2179,7 +2361,10 @@ impl<S: Storage> ArchiveWriter<S> {
             delta_manifest_hash: prepared.delta_manifest_hash,
             descriptor: prepared.descriptor,
             next_base: prepared.next_base,
+            delta_bytes: prepared.delta_bytes,
+            base_bytes: prepared.base_bytes,
         });
+        self.checkpoint_requested = false;
         self.catalog = prepared.catalog;
         self.attributes = prepared.attributes;
         self.new_descriptor = None;
@@ -2403,11 +2588,16 @@ impl<S: Storage> ArchiveWriter<S> {
         let delta_manifest = self.append_object(&manifest.to_stored()?)?;
         ctx.check_cancelled()?;
 
-        // Checkpoint or delta (D10). Commit 0 is always a checkpoint; after
-        // that the policy decides (production: every commit, until T14).
+        // Checkpoint or delta (D10). Commit 0 is always a checkpoint, and so
+        // is a requested one; otherwise the policy decides (production: the
+        // B.2.3 trigger on Δ and B as published so far, so a delta's replay
+        // reads less than α·max(B, F) plus its own metadata).
         let checkpoint = match self.head {
             None => true,
-            Some(_) => self.policy.is_checkpoint(seq),
+            Some(h) => {
+                self.checkpoint_requested
+                    || self.policy.is_checkpoint(seq, h.delta_bytes, h.base_bytes)
+            }
         };
         let (metadata, attributes) = if checkpoint {
             ctx.report(phase::CHECKPOINT, 0, None);
@@ -2536,9 +2726,32 @@ impl<S: Storage> ArchiveWriter<S> {
             },
             Metadata::Delta { base } => base,
         };
+        // B.2.3 accounting for the next decision. A checkpoint resets the
+        // base; a delta adds its manifest, record, and footer. Generated
+        // checkpoint bytes and data objects never count.
+        let (delta_bytes, base_bytes) = match (record.metadata, self.head) {
+            (Metadata::Checkpoint { image, snapshot }, _) => {
+                (0, image.stored_len.saturating_add(snapshot.stored_len))
+            }
+            (Metadata::Delta { .. }, Some(h)) => (
+                h.delta_bytes
+                    .saturating_add(delta_manifest.stored_len)
+                    .saturating_add(commit_frame.len())
+                    .saturating_add(FOOTER_FRAME_LEN),
+                h.base_bytes,
+            ),
+            (Metadata::Delta { .. }, None) => {
+                return Err(MochiError::new(
+                    ErrorCode::InvalidArgument,
+                    "internal: commit 0 must be a checkpoint",
+                ))
+            }
+        };
         Ok(Prepared {
             seq,
             next_base,
+            delta_bytes,
+            base_bytes,
             commit_offset,
             commit_frame,
             commit_id,
@@ -2773,7 +2986,7 @@ impl<S: Storage> ArchiveWriter<S> {
     /// Choose which later commits are checkpoints. Commit 0 is a checkpoint
     /// under every policy. `Every(0)` is refused with `INVALID_ARGUMENT` and
     /// leaves the current policy unchanged. Production code cannot call
-    /// this; it writes `EveryCommit` until the T14 trigger exists.
+    /// this; it writes the B.2.3 trigger.
     pub fn set_checkpoint_policy(&mut self, policy: CheckpointPolicy) -> Result<()> {
         self.policy = policy.validate()?;
         Ok(())

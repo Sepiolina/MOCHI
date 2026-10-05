@@ -22,8 +22,12 @@ fn opts() -> ReadOptions {
     ReadOptions::default()
 }
 
+/// Adoption runs on every checkpoint; these tests make every commit one.
 fn writer(s: &SimStorage) -> ArchiveWriter<SimStorage> {
-    ArchiveWriter::create(s.clone(), Box::new(SeqIds::new(7)), test_options()).unwrap()
+    let mut w = ArchiveWriter::create(s.clone(), Box::new(SeqIds::new(7)), test_options()).unwrap();
+    w.set_checkpoint_policy(CheckpointPolicy::EveryCommit)
+        .unwrap();
+    w
 }
 
 fn commit(w: &mut ArchiveWriter<SimStorage>, st: &Step) {
@@ -277,6 +281,8 @@ fn t15_user_read_limits_do_not_block_adoption() {
     o.read.limits.max_frame_len = 30_000;
     let s = SimStorage::new();
     let mut w = ArchiveWriter::create(s.clone(), Box::new(SeqIds::new(7)), o).unwrap();
+    w.set_checkpoint_policy(CheckpointPolicy::EveryCommit)
+        .unwrap();
     for st in &steps[..3] {
         commit(&mut w, st);
     }

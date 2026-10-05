@@ -22,7 +22,8 @@ use std::time::{Duration, Instant};
 
 use mochi_core::job::{CancellationToken, JobContext, ProgressEvent, ProgressSink};
 use mochi_core::publish::{
-    locate_head, open_head, ArchiveWriter, ReadOptions, TailPolicy, Transaction, WriterOptions,
+    locate_head, open_head, ArchiveWriter, CheckpointPolicy, ReadOptions, TailPolicy, Transaction,
+    WriterOptions,
 };
 use mochi_core::storage::os::{OsReadStorage, OsStorage};
 use mochi_core::storage::ReadStorage;
@@ -30,6 +31,10 @@ use mochi_testkit::archive::path;
 use mochi_testkit::{deterministic_bytes, SeqIds};
 
 const SIZES: &[u64] = &[1, 10, 100, 1000];
+/// The recorded tables (`docs/benchmarks/c5-append.md`) measure a
+/// checkpoint on every commit, so every session selects it explicitly; the
+/// production writer uses the T14 trigger, which T32 measures.
+const EVERY: CheckpointPolicy = CheckpointPolicy::EveryCommit;
 const SAMPLES: usize = 7;
 const FILE_BYTES: usize = 4096;
 
@@ -51,6 +56,8 @@ fn options() -> WriterOptions {
         chunk_size: None,
         zstd_level: None,
         record_time: false,
+        profile: None,
+        checkpoint_trigger: None,
     }
 }
 
@@ -115,6 +122,7 @@ fn main() {
 
     let mut w = ArchiveWriter::create(OsStorage::create_new(&file).unwrap(), next_ids(), options())
         .unwrap();
+    w.set_checkpoint_policy(EVERY).unwrap();
     let mut committed = 0u64;
     println!();
     println!("| prior commits | archive MiB | catalog image KiB | snapshot manifest KiB | footer lookup | open (verify + catalog) | append open (+ snapshot read) | head catalog copy + replay | content | catalog update | delta manifest | checkpoint (snapshot + image) | adopt (re-read + compare, T15) | adopt / checkpoint | commit record | sync objects | footer + sync | **append total** (ms) |");
@@ -150,6 +158,7 @@ fn main() {
                 TailPolicy::Refuse,
             )
             .unwrap();
+            aw.set_checkpoint_policy(EVERY).unwrap();
             let phases = Phases::default();
             let ctx = JobContext {
                 progress: &phases,
@@ -217,6 +226,7 @@ fn main() {
         )
         .unwrap()
         .0;
+        w.set_checkpoint_policy(EVERY).unwrap();
     }
     println!();
     println!(

@@ -475,11 +475,45 @@ fn damage_assessment_is_sound(
         Ok(r) => {
             assert_eq!(r.commits.len() as u64, r.head_seq + 1);
             assert_eq!(r.objects.len(), r.ranges.len());
+            descriptor_verdict_matches_open(storage, opts, &r);
         }
         Err(e) => assert!(
             !e.message.starts_with("internal:"),
             "the assessment found itself inconsistent: {e}"
         ),
+    }
+}
+
+/// D12 (T18): the assessment's descriptor verdict for the head agrees with
+/// opening it. If the report says the head is unreadable because of a
+/// descriptor, opening fails; if opening fails on the descriptor, the report
+/// says the head is unreadable.
+fn descriptor_verdict_matches_open(
+    storage: &crate::SimStorage,
+    opts: &mochi_core::publish::ReadOptions,
+    r: &mochi_core::damage::DamageReport,
+) {
+    use mochi_core::damage::Readability;
+    use mochi_core::ErrorCode;
+    let Some(head) = r.commits.last() else {
+        return;
+    };
+    let opened = mochi_core::publish::open_head(storage, opts);
+    if head.readable
+        == (Readability::Unreadable {
+            code: ErrorCode::DescriptorInvalid,
+        })
+    {
+        assert!(opened.is_err(), "the report refuses a head that opens");
+    }
+    if opened
+        .as_ref()
+        .is_err_and(|e| e.code == ErrorCode::DescriptorInvalid)
+    {
+        assert!(
+            matches!(head.readable, Readability::Unreadable { .. }),
+            "opening refuses the descriptor, the report reads the head"
+        );
     }
 }
 

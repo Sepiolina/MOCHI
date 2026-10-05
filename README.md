@@ -120,9 +120,9 @@ which tracks every task, decision, CI run, and gate). Archives written today
 carry the archive descriptor at offset 0, v1 commit records, and delta
 manifests with checkpoints; pre-batch drafts (no descriptor, v0 commits or
 manifests) are refused as legacy (§26). Gates G1 (conformance), G3
-(scaling), and G5 (capacity) have passed, and G9's (reports) criteria are
-met at library level. G7 (creation) needs only its device-mapper
-power-loss run. Still open: the CLI flags for
+(scaling), G5 (capacity), and G7 (creation, including power loss on ext4
+over dm-flakey) have passed, and G9's (reports) criteria are met at
+library level. Still open: the CLI flags for
 truncation and limits (T29, with C14), native
 Windows durability evidence (T33, gate G6), and the GC hold test (C9).
 

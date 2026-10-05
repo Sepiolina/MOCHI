@@ -29,20 +29,21 @@
 //! * `sync_data` is `FlushFileBuffers` (what `File::sync_data` calls), which
 //!   also flushes the file's metadata, including its size. Appending needs
 //!   no directory flush.
-//! * Creating: O12 decides that a new file is published with
-//!   `MoveFileExW(…, MOVEFILE_WRITE_THROUGH)` (documented not to return until
-//!   the move is on disk), followed by a best-effort directory flush that
-//!   degrades the report only if it fails. **C5 does not create by rename
-//!   yet**: it creates the archive in place (`create_new`). Without the
-//!   write-through rename, the directory entry rests entirely on the
-//!   undocumented directory flush, so `sync_directory` reports
+//! * Creating (D13, T22): the first commit goes to a locked temporary file,
+//!   which is published by hard link (`CreateHardLinkW`, which fails if the
+//!   name exists) and then removal of the temporary name; see [`OsDir`].
+//!   The owner chose this over `MoveFileExW(…, MOVEFILE_WRITE_THROUGH)`
+//!   (T21, checklist Q63), so `mochi-core` keeps `forbid(unsafe_code)` and
+//!   needs no Windows API crate. Neither step is documented as
+//!   write-through, so the new directory entry rests on the undocumented
+//!   directory flush, and `sync_directory` reports
 //!   [`DirectoryDurability::Unconfirmed`] on Windows **even when the flush
-//!   succeeds**, and the first commit of a new archive is reported as
-//!   degraded ("directory durability unconfirmed"). This is stricter than
-//!   O12, deliberately, until creation-by-rename lands (plan §9, O12 note).
+//!   succeeds**: the first commit of a new archive is reported as degraded
+//!   ("directory durability unconfirmed"), as D13 requires until G6.
 //!   Appends to an existing archive are unaffected.
-//! * **This Windows path has not been compiled or run by the C5 author's
-//!   environment;** Windows CI (plan C0) is its first check.
+//! * Windows CI (`windows-latest`) runs the storage conformance suite,
+//!   including publication of a locked temporary file and refusal of an
+//!   existing destination.
 //!
 //! **Locking.** `try_lock_exclusive` is `File::try_lock` (Linux `flock`,
 //! Windows `LockFileEx`). Advisory on Linux: a process that ignores it is not
@@ -273,15 +274,15 @@ impl Storage for OsStorage {
 /// * **Linux:** one atomic `renameat2(RENAME_NOREPLACE)`. `EEXIST` is
 ///   `Exists`. If the filesystem (`EINVAL`) or kernel (`ENOSYS`) rejects the
 ///   flag, it falls back to the portable mechanism below.
-/// * **Portable** (other Unix, Windows until T21, and Linux's fallback): a
+/// * **Portable** (Windows, other Unix, and Linux's fallback): a
 ///   hard link to the new name, then removal of the old one. `link(2)` /
 ///   `CreateHardLinkW` fail if the new name exists, so nothing is ever
 ///   replaced. A crash between the two steps leaves both names on the same
 ///   bytes; cleanup removes the temporary name once its lock is free.
 ///
 /// A filesystem with neither refuses publication with an I/O error; nothing
-/// ever falls back to a replacing rename. Plan T21 uses `MoveFileExW` with
-/// `MOVEFILE_WRITE_THROUGH` on Windows.
+/// ever falls back to a replacing rename. Windows keeps the portable
+/// mechanism (T21 decided, checklist Q63): no `MoveFileExW`.
 #[derive(Debug)]
 pub struct OsDir {
     path: PathBuf,

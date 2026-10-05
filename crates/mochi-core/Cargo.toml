@@ -21,6 +21,9 @@ serde.workspace = true
 getrandom.workspace = true
 rusqlite.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix.workspace = true
+
 [dev-dependencies]
 # `trace`: the T13 work-bound tests count SQL statements and full-scan steps
 # with SQLite's own profiler, independently of the code under test.

@@ -30,6 +30,9 @@ getrandom = "0.3"
 ciborium = "0.2"
 rusqlite = { version = "0.40", features = ["bundled", "serialize"] }
 proptest = { version = "1", default-features = false, features = ["std"] }
+# Linux renameat2(RENAME_NOREPLACE) (plan T20). Apache-2.0 WITH
+# LLVM-exception OR Apache-2.0 OR MIT; already in the tree through tempfile.
+rustix = { version = "1.1", default-features = false, features = ["std", "fs"] }
 
 # AGENTS.md: library crates must not unwrap/expect/panic on paths reachable
 # from archive contents. Unit tests opt out locally with cfg_attr(test, ...).

@@ -245,18 +245,116 @@ impl Storage for OsStorage {
 
 /// The directory that holds an archive (plan T19; Annex B.2 D13, D14).
 ///
-/// **Publication without replacing** is a hard link to the new name followed
-/// by removing the old one: `link(2)` / `CreateHardLinkW` fail if the new name
-/// exists, so an existing file is never replaced, on every filesystem that
-/// supports hard links. A crash between the two steps leaves both names on
-/// the same bytes; cleanup removes the temporary name once its lock is free.
-/// Plan T20 puts `renameat2(RENAME_NOREPLACE)` first on Linux, keeping this as
-/// its fallback, and T21 uses `MoveFileExW` with `MOVEFILE_WRITE_THROUGH` on
-/// Windows. A filesystem without hard links refuses publication with an I/O
-/// error rather than falling back to a replacing rename.
+/// **Publication without replacing** (plan T20):
+/// * **Linux:** one atomic `renameat2(RENAME_NOREPLACE)`. `EEXIST` is
+///   `Exists`. If the filesystem (`EINVAL`) or kernel (`ENOSYS`) rejects the
+///   flag, it falls back to the portable mechanism below.
+/// * **Portable** (other Unix, Windows until T21, and Linux's fallback): a
+///   hard link to the new name, then removal of the old one. `link(2)` /
+///   `CreateHardLinkW` fail if the new name exists, so nothing is ever
+///   replaced. A crash between the two steps leaves both names on the same
+///   bytes; cleanup removes the temporary name once its lock is free.
+///
+/// A filesystem with neither refuses publication with an I/O error; nothing
+/// ever falls back to a replacing rename. Plan T21 uses `MoveFileExW` with
+/// `MOVEFILE_WRITE_THROUGH` on Windows.
 #[derive(Debug)]
 pub struct OsDir {
     path: PathBuf,
+    last_publish: Option<PublishMechanism>,
+}
+
+/// How the last [`StorageDir::publish_no_replace`] was carried out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishMechanism {
+    /// One atomic `renameat2(RENAME_NOREPLACE)` (Linux).
+    RenameNoReplace,
+    /// Hard link to the new name, then unlink of the old: the portable
+    /// mechanism, and Linux's fallback where the filesystem or kernel
+    /// rejects the flag.
+    LinkThenUnlink,
+}
+
+impl OsDir {
+    /// The mechanism the last successful publication used (diagnostics and
+    /// tests).
+    pub fn last_publish(&self) -> Option<PublishMechanism> {
+        self.last_publish
+    }
+}
+
+fn link_then_unlink(src: &Path, dst: &Path, to: &str) -> Result<PublishMechanism, StorageError> {
+    std::fs::hard_link(src, dst).map_err(exists_as(to))?;
+    std::fs::remove_file(src)?;
+    Ok(PublishMechanism::LinkThenUnlink)
+}
+
+/// What a failed `renameat2(RENAME_NOREPLACE)` means (plan T20).
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenameOutcome {
+    /// The destination exists: never replaced.
+    Exists,
+    /// The filesystem (`EINVAL`) or kernel (`ENOSYS`) does not support the
+    /// flag: fall back to link then unlink, which is also no-replace.
+    Unsupported,
+    /// Any other failure is reported as is.
+    Failed,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn classify_rename_errno(raw: i32) -> RenameOutcome {
+    const EEXIST: i32 = 17;
+    const EINVAL: i32 = 22;
+    const ENOSYS: i32 = 38;
+    match raw {
+        EEXIST => RenameOutcome::Exists,
+        EINVAL | ENOSYS => RenameOutcome::Unsupported,
+        _ => RenameOutcome::Failed,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn publish_no_replace_at(
+    src: &Path,
+    dst: &Path,
+    to: &str,
+) -> Result<PublishMechanism, StorageError> {
+    use rustix::fs::{renameat_with, RenameFlags, CWD};
+    publish_with(src, dst, to, |s, d| {
+        renameat_with(CWD, s, CWD, d, RenameFlags::NOREPLACE).map_err(|e| e.raw_os_error())
+    })
+}
+
+/// The Linux decision, with the no-replace rename passed in (it returns the
+/// raw errno on failure), so the fallback can be tested on filesystems that
+/// support the flag.
+#[cfg(any(target_os = "linux", test))]
+fn publish_with(
+    src: &Path,
+    dst: &Path,
+    to: &str,
+    rename_noreplace: impl FnOnce(&Path, &Path) -> Result<(), i32>,
+) -> Result<PublishMechanism, StorageError> {
+    match rename_noreplace(src, dst) {
+        Ok(()) => Ok(PublishMechanism::RenameNoReplace),
+        Err(errno) => match classify_rename_errno(errno) {
+            RenameOutcome::Exists => Err(StorageError::Exists {
+                name: to.to_string(),
+            }),
+            RenameOutcome::Unsupported => link_then_unlink(src, dst, to),
+            RenameOutcome::Failed => Err(StorageError::Io(io::Error::from_raw_os_error(errno))),
+        },
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn publish_no_replace_at(
+    src: &Path,
+    dst: &Path,
+    to: &str,
+) -> Result<PublishMechanism, StorageError> {
+    link_then_unlink(src, dst, to)
 }
 
 impl OsDir {
@@ -269,7 +367,10 @@ impl OsDir {
                 format!("{} is not a directory", path.display()),
             )));
         }
-        Ok(Self { path })
+        Ok(Self {
+            path,
+            last_publish: None,
+        })
     }
 
     /// The directory that contains `file`.
@@ -313,8 +414,7 @@ impl StorageDir for OsDir {
 
     fn publish_no_replace(&mut self, from: &str, to: &str) -> Result<(), StorageError> {
         let (src, dst) = (self.entry(from)?, self.entry(to)?);
-        std::fs::hard_link(&src, &dst).map_err(exists_as(to))?;
-        std::fs::remove_file(&src)?;
+        self.last_publish = Some(publish_no_replace_at(&src, &dst, to)?);
         Ok(())
     }
 
@@ -446,6 +546,79 @@ mod tests {
         r.read_exact_at(0, &mut buf).unwrap();
         assert_eq!(&buf, b"payload");
         assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn t20_rename_errnos_are_classified() {
+        assert_eq!(classify_rename_errno(17), RenameOutcome::Exists);
+        assert_eq!(classify_rename_errno(22), RenameOutcome::Unsupported);
+        assert_eq!(classify_rename_errno(38), RenameOutcome::Unsupported);
+        for other in [1, 2, 5, 13, 18, 28, 30, 95] {
+            assert_eq!(
+                classify_rename_errno(other),
+                RenameOutcome::Failed,
+                "{other}"
+            );
+        }
+    }
+
+    /// **T20 DoD (fallback).** A rename that the filesystem rejects with
+    /// `EINVAL` (or the kernel with `ENOSYS`) falls back to link then
+    /// unlink, which still never replaces. The rename is injected because
+    /// every filesystem in CI supports the flag.
+    #[test]
+    fn t20_rejected_flag_falls_back_to_link_then_unlink() {
+        for errno in [22, 38] {
+            let (td, _) = tmp();
+            let dir = td.path().to_path_buf();
+            let (src, dst) = (dir.join("a.tmp"), dir.join("a"));
+            std::fs::write(&src, b"payload").unwrap();
+            let used = publish_with(&src, &dst, "a", |_, _| Err(errno)).unwrap();
+            assert_eq!(used, PublishMechanism::LinkThenUnlink);
+            assert!(!src.exists());
+            assert_eq!(std::fs::read(&dst).unwrap(), b"payload");
+
+            // The fallback never replaces either.
+            std::fs::write(&src, b"other").unwrap();
+            let e = publish_with(&src, &dst, "a", |_, _| Err(errno)).unwrap_err();
+            assert!(
+                matches!(e, StorageError::Exists { ref name } if name == "a"),
+                "{e}"
+            );
+            assert_eq!(std::fs::read(&dst).unwrap(), b"payload");
+            assert_eq!(std::fs::read(&src).unwrap(), b"other");
+        }
+    }
+
+    #[test]
+    fn t20_other_rename_failures_do_not_fall_back() {
+        let (td, _) = tmp();
+        let dir = td.path().to_path_buf();
+        let (src, dst) = (dir.join("a.tmp"), dir.join("a"));
+        std::fs::write(&src, b"payload").unwrap();
+        let e = publish_with(&src, &dst, "a", |_, _| Err(13)).unwrap_err();
+        assert!(matches!(e, StorageError::Io(_)), "{e}");
+        assert!(src.exists() && !dst.exists());
+    }
+
+    /// On Linux filesystems that support the flag (ext4 and tmpfs in CI),
+    /// publication is the one atomic rename, and `EEXIST` comes from it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn t20_linux_uses_rename_noreplace() {
+        let (td, _) = tmp();
+        let dir = td.path().to_path_buf();
+        let mut d = OsDir::open(&dir).unwrap();
+        let mut f = d.create_exclusive("a.tmp").unwrap();
+        f.append(b"payload").unwrap();
+        d.publish_no_replace("a.tmp", "a").unwrap();
+        assert_eq!(d.last_publish(), Some(PublishMechanism::RenameNoReplace));
+        let mut g = d.create_exclusive("b.tmp").unwrap();
+        g.append(b"other").unwrap();
+        let e = d.publish_no_replace("b.tmp", "a").unwrap_err();
+        assert!(matches!(e, StorageError::Exists { .. }), "{e}");
+        assert_eq!(std::fs::read(dir.join("a")).unwrap(), b"payload");
+        assert_eq!(std::fs::read(dir.join("b.tmp")).unwrap(), b"other");
     }
 
     #[test]

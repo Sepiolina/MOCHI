@@ -49,6 +49,37 @@ pub struct SegmentInfo {
     /// The head's recorded base hint, if it differs from
     /// `base_footer_offset`. Not an error (decision 17); a diagnostic.
     pub base_hint_mismatch: Option<u64>,
+    /// Δ of the checkpoint trigger (Annex B.2.3) at the head: the stored
+    /// bytes of the delta manifests, commit records, and footers of commits
+    /// *b*+1 … *h*. Generated checkpoint bytes (the base's image and
+    /// snapshot) and data objects are not counted. 0 for a checkpoint head.
+    pub delta_bytes: u64,
+    /// *B* of the checkpoint trigger: the base's image plus snapshot
+    /// manifest, stored bytes.
+    pub base_bytes: u64,
+}
+
+/// Checkpoint-trigger accounting (Annex B.2.3) for a segment given base
+/// first: (Δ, *B*). Writer policy, not validation, so archive-derived sums
+/// saturate rather than fail. A commit's record is the bytes from its
+/// commit offset to its footer, plus the footer frame.
+pub fn segment_accounting(entries: &[HistoryEntry]) -> (u64, u64) {
+    use mochi_format::footer::FOOTER_FRAME_LEN;
+    let base_bytes = match entries.first().map(|e| e.commit.metadata) {
+        Some(Metadata::Checkpoint { image, snapshot }) => {
+            image.stored_len.saturating_add(snapshot.stored_len)
+        }
+        _ => 0,
+    };
+    let delta_bytes = entries.iter().skip(1).fold(0u64, |acc, e| {
+        let record = e
+            .footer_offset
+            .saturating_sub(e.commit_offset)
+            .saturating_add(FOOTER_FRAME_LEN);
+        acc.saturating_add(e.commit.delta_manifest.stored_len)
+            .saturating_add(record)
+    });
+    (delta_bytes, base_bytes)
 }
 
 /// Check a segment, given its commits in ascending sequence order from the
@@ -162,7 +193,10 @@ pub fn check_segment(entries: &[HistoryEntry]) -> Result<SegmentInfo> {
         }
     }
 
+    let (delta_bytes, base_bytes) = segment_accounting(entries);
     Ok(SegmentInfo {
+        delta_bytes,
+        base_bytes,
         base_seq: b,
         base_commit_id: id_b,
         base_footer_offset: first.footer_offset,

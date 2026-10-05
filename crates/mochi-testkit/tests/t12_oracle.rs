@@ -387,7 +387,8 @@ fn attrs_at(
         TailPolicy::Refuse,
     )
     .unwrap();
-    assert_eq!(w.checkpoint_policy(), CheckpointPolicy::EveryCommit);
+    // A forced checkpoint (T14): the probe commit carries a snapshot.
+    w.request_checkpoint();
     w.commit(Transaction::new(), &Job::new().ctx()).unwrap();
     w.close().unwrap();
     let probe = open_at_footer(

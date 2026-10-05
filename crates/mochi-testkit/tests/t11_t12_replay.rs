@@ -16,7 +16,7 @@ use mochi_core::commit::{CommitLink, Metadata};
 use mochi_core::manifest::Attributes;
 use mochi_core::publish::{
     commit_history, open_at_footer, open_head, read_snapshot, ArchiveWriter, CheckpointPolicy,
-    HistoryEntry, OpenedHead, ReadOptions, TailPolicy, Transaction,
+    CheckpointTrigger, HistoryEntry, OpenedHead, ReadOptions, TailPolicy, Transaction,
 };
 use mochi_core::ErrorCode;
 use mochi_format::cbor::Value;
@@ -40,14 +40,17 @@ fn code_at(s: &SimStorage, e: &HistoryEntry) -> Result<OpenedHead, ErrorCode> {
 
 // ---- decision 14: the test checkpoint policy ----------------------------------------
 
-/// Decision 14: production default is `EveryCommit`; `Every(0)` is refused
+/// Decision 14 (T14): production default is the B.2.3 trigger; `Every(0)` is refused
 /// and leaves the policy unchanged; commit 0 is a checkpoint under every
 /// policy.
 #[test]
 fn checkpoint_policy_controls() {
     let s = SimStorage::new();
     let mut w = ArchiveWriter::create(s.clone(), Box::new(SeqIds::new(1)), test_options()).unwrap();
-    assert_eq!(w.checkpoint_policy(), CheckpointPolicy::EveryCommit);
+    assert_eq!(
+        w.checkpoint_policy(),
+        CheckpointPolicy::Trigger(CheckpointTrigger::default())
+    );
     w.set_checkpoint_policy(CheckpointPolicy::Never).unwrap();
     let e = w
         .set_checkpoint_policy(CheckpointPolicy::Every(0))
@@ -80,7 +83,10 @@ fn checkpoint_policy_controls() {
         TailPolicy::Refuse,
     )
     .unwrap();
-    assert_eq!(w.checkpoint_policy(), CheckpointPolicy::EveryCommit);
+    assert_eq!(
+        w.checkpoint_policy(),
+        CheckpointPolicy::Trigger(CheckpointTrigger::default())
+    );
 }
 
 fn expect_cp(policy: CheckpointPolicy, seq: u64) -> bool {
@@ -89,6 +95,7 @@ fn expect_cp(policy: CheckpointPolicy, seq: u64) -> bool {
             CheckpointPolicy::EveryCommit => true,
             CheckpointPolicy::Never => false,
             CheckpointPolicy::Every(n) => seq.is_multiple_of(n),
+            CheckpointPolicy::Trigger(_) => unreachable!("not a fixed schedule"),
         }
 }
 

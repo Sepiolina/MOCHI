@@ -3,6 +3,12 @@
 Two record sets: **schema 1** (plan T8/T9, current) and the original
 **schema 0** run, kept below for comparison. Same dataset, settings, and VM.
 
+**Since T14 (2026-10-05)** the production writer makes a commit a checkpoint
+only when the Annex B.2.3 trigger fires. Every table here measures a
+checkpoint on **every** commit, and the example now selects that policy
+explicitly, so these numbers stay reproducible. The trigger's own
+measurements belong to T32 (gate G3).
+
 Plan C5 exit criterion; reported per spec §27. Reproduce with
 `cargo run --release -p mochi-testkit --example c5_append_bench [dir]`.
 

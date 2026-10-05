@@ -103,7 +103,7 @@ Earlier status reports described G2 as waiting on CI and native-Windows evidence
 
 1. **T11, T12:** remote CI green on every job and native-Windows results, on the candidate. **2026-10-05:** native Windows green; every job green except the Ubuntu invariants step, fixed but not yet re-run (see "CI evidence").
 2. **T13** (per-operation mutation and lookup maxima; backs D10.5's bounded-work claim). **Implemented 2026-10-05; CI outstanding.** **T16 next.**
-3. **T16** (baseline recovery from S(*b*) plus deltas, without SQLite), then **T17** (damage-scope reporting), then **T15** (adoption).
+3. **T16** (baseline recovery from S(*b*) plus deltas, without SQLite), then **T17** (damage-scope reporting), then **T15** (adoption). Implementation plan, with proposed decisions Q29–Q40: `docs/t16-t17-t15-plan.md` (2026-10-05; not started).
 
 **T14** is gated by G3, not G2; it stays after G2 by the owner's standing instruction. Production stays on `EveryCommit` until T14.
 

@@ -32,7 +32,7 @@ jobs:
         run: cargo test --workspace --locked
       - name: AGENTS.md invariants
         shell: bash
-        run: ci/check-invariants.sh
+        run: bash ci/check-invariants.sh
 
   fuzz-smoke:
     name: fuzz smoke (${{ matrix.target }})

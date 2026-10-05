@@ -172,7 +172,7 @@ pub struct WriterOptions {
     /// `UNSUPPORTED_FEATURE`.
     pub profile: Option<Profile>,
     /// The checkpoint trigger's α and *F* (Annex B.2.3). `None` means the
-    /// provisional defaults. Writer policy: not recorded in the archive.
+    /// defaults. Writer policy: not recorded in the archive.
     pub checkpoint_trigger: Option<CheckpointTrigger>,
 }
 
@@ -181,8 +181,8 @@ pub struct WriterOptions {
 /// bytes of the delta manifests, commit records, and footers since the base
 /// and *B* is the base's image plus snapshot manifest. α is held as a ratio
 /// so the decision is exact integer arithmetic, the same on every platform.
-/// The provisional defaults are α = 1 and *F* = 1 MiB, to be confirmed or
-/// revised by gate G3.
+/// The defaults are α = 1 and *F* = 1 MiB, confirmed by the gate G3
+/// measurements (T32, `docs/benchmarks/t32-scaling.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CheckpointTrigger {
     alpha_num: u64,
@@ -200,7 +200,7 @@ impl Default for CheckpointTrigger {
     }
 }
 
-/// *F*'s provisional default (Annex B.2.3).
+/// *F*'s default (Annex B.2.3; confirmed by G3, T32).
 pub const DEFAULT_CHECKPOINT_FLOOR: u64 = 1 << 20;
 
 impl CheckpointTrigger {

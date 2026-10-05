@@ -1752,7 +1752,7 @@ This envelope replaces the 68-byte draft in `mochi-format/src/envelope.rs`. That
 - **Δ** is the stored bytes of delta manifests, commit records, and footers since the base. It excludes generated checkpoint bytes.
 - **B** is the base's combined image and snapshot-manifest size.
 - **Rule.** A checkpoint is mandatory when Δ ≥ α·max(*B*, *F*).
-- **Provisional defaults** are α = 1 and *F* = 1 MiB, both configurable, and to be confirmed by G3. There is no delta-count cap.
+- **Defaults** are α = 1 and *F* = 1 MiB, both configurable. **Confirmed by G3** (T32, 2026-10-05; `docs/benchmarks/t32-scaling.md`): over four workloads to 10,000 commits, every replay stayed within its limit, *k* stayed below 1, and neither α = 1/2 nor α = 2 improved one cost without a larger loss in the other. There is no delta-count cap.
 - **Forced checkpoints** (the `checkpoint` command) reset the base.
 
 **Storage bound (conditional).**
@@ -1779,7 +1779,7 @@ Every mandatory checkpoint must fit within all of the limits above, so archive s
 - **D10.4** (2026-10-04). Introduction versus reference during replay, and its relation to §10.2 (Q18, Q26); unknown required feature versus unknown operation kind (Q19).
 - **D10.6** (2026-10-03 and 2026-10-04). Parent traversal offset versus base footer hint (Q17, Q23); one descriptor per segment (Q16).
 - **D12** (2026-10-04). Placement note tying the single descriptor to D10.6.
-- **B.2.3, B.2.4** (2026-10-05, from the T32 measurements). Storage-bound terms defined (ΣΔ, *B*₀, *B*_forced); measured catalog and decoded-CBOR memory; B.2.4's estimates replaced by measurements.
+- **B.2.3, B.2.4** (2026-10-05, from the T32 measurements). Storage-bound terms defined (ΣΔ, *B*₀, *B*_forced); α and *F* defaults confirmed; measured catalog and decoded-CBOR memory; B.2.4's estimates replaced by measurements.
 
 #### B.2.6 Evidence and release gates
 

@@ -978,42 +978,14 @@ fn replay_segment(
         }
     };
 
-    for pair in entries.windows(2) {
-        let (prev, e) = (&pair[0], &pair[1]);
-        let loaded;
-        let delta = if e.commit.seq == last.commit.seq {
-            head_manifest
-        } else {
-            loaded = read_bound_manifest(
-                src,
-                &e.commit,
-                &e.commit.delta_manifest,
-                e.commit_offset,
-                ManifestKind::Delta,
-                opts,
-            )?;
-            &loaded
-        };
-        check_delta_parent_link(delta, &prev.commit)?;
-        applier.apply(delta)?;
-        if let Some(map) = attributes.as_mut() {
-            // Versions are immutable and introduced once (the applier has
-            // just refused any reintroduction, D10.4): a delta's attributes
-            // are those of the versions it introduces, nothing else.
-            for v in &delta.file_versions {
-                if map.insert(v.version.id, v.attributes).is_some() {
-                    return Err(MochiError::new(
-                        ErrorCode::RecordInvalid,
-                        format!(
-                            "delta manifest {} introduces a version the base snapshot already \
-                             lists (D10.4)",
-                            delta.commit_seq
-                        ),
-                    ));
-                }
-            }
-        }
-    }
+    apply_segment_deltas(
+        src,
+        &entries,
+        Some(head_manifest),
+        &mut applier,
+        attributes.as_mut(),
+        opts,
+    )?;
 
     if applier.head() != last.commit.seq {
         return Err(MochiError::new(
@@ -1032,6 +1004,65 @@ fn replay_segment(
         catalog.make_query_only()?;
     }
     Ok((catalog, info, attributes))
+}
+
+/// Apply deltas *b*+1 … *h* (from `entries`, which [`walk_segment`] produced,
+/// *b* first) onto `applier`, which holds *b*. For each *j*: load delta *j*
+/// (stored hash, decode, D11 identity, parent sequence) unless *j* = *h* and
+/// `head_manifest` is given; check its parent link against commit *j* − 1's
+/// key 6 (Q22); apply it atomically; and, with `attributes`, add the versions
+/// it introduces (a reintroduction is `RECORD_INVALID`, D10.4). Stops at the
+/// first failure. Shared by opening ([`replay_segment`]) and baseline
+/// recovery ([`recover_baseline`]), so the replay rules exist once.
+fn apply_segment_deltas(
+    src: &dyn ReadStorage,
+    entries: &[HistoryEntry],
+    head_manifest: Option<&Manifest>,
+    applier: &mut SegmentApplier,
+    mut attributes: Option<&mut BTreeMap<FileVersionId, Attributes>>,
+    opts: &ReadOptions,
+) -> Result<()> {
+    let Some(last) = entries.last() else {
+        return Ok(());
+    };
+    for pair in entries.windows(2) {
+        let (prev, e) = (&pair[0], &pair[1]);
+        let loaded;
+        let delta = match head_manifest {
+            Some(m) if e.commit.seq == last.commit.seq => m,
+            _ => {
+                loaded = read_bound_manifest(
+                    src,
+                    &e.commit,
+                    &e.commit.delta_manifest,
+                    e.commit_offset,
+                    ManifestKind::Delta,
+                    opts,
+                )?;
+                &loaded
+            }
+        };
+        check_delta_parent_link(delta, &prev.commit)?;
+        applier.apply(delta)?;
+        if let Some(map) = attributes.as_deref_mut() {
+            // Versions are immutable and introduced once (the applier has
+            // just refused any reintroduction, D10.4): a delta's attributes
+            // are those of the versions it introduces, nothing else.
+            for v in &delta.file_versions {
+                if map.insert(v.version.id, v.attributes).is_some() {
+                    return Err(MochiError::new(
+                        ErrorCode::RecordInvalid,
+                        format!(
+                            "delta manifest {} introduces a version the base snapshot already \
+                             lists (D10.4)",
+                            delta.commit_seq
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// One commit in the published history.

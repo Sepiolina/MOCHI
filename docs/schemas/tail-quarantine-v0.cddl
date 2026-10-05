@@ -1,0 +1,32 @@
+; MOCHI tail-quarantine sidecar metadata, schema version 0 (DRAFT).
+; Decision: spec Annex B.2 D14. This is NOT part of the .mochi wire format.
+; The sidecar is a separate file written beside the archive before an
+; explicit tail truncation.
+;
+; Sidecar file layout:
+;   offset 0   8 bytes  magic "MOCHITQ\0" (4D 4F 43 48 49 54 51 00)
+;   offset 8   4 bytes  L = metadata length, u32 little-endian, 1 <= L <= 65536
+;   offset 12  L bytes  metadata: this map, deterministic CBOR (Annex B.1 D2)
+;   offset 12+L         the removed tail bytes, exactly key-5 bytes long
+; The file length MUST equal 12 + L + key 5.
+;
+; File name: "<archive file name>.tail-<offset in decimal>-<first 16 lowercase
+; hex digits of key 6>.mochiq", in the archive's directory, created
+; exclusively (never replacing an existing file).
+
+quarantine = {
+  0: 0,                       ; sidecar schema version
+  1: archive-id,
+  2: hash32,                  ; head commit ID at truncation time
+  3: uint,                    ; head commit sequence
+  4: uint,                    ; tail offset (= end of the head footer)
+  5: uint,                    ; tail length (> 0)
+  6: hash32,                  ; plain BLAKE3-256 of the tail bytes, read under the archive lock
+  7: [* uint],                ; frame magics of the complete frames in the tail, in order
+  8: bool,                    ; true if the tail ends in a frame cut short by end-of-file
+  9: tstr,                    ; tool name and version
+  10: tstr,                   ; time written, Annex B.2 D15 timestamp format
+}
+
+archive-id = bstr .size 32
+hash32 = bstr .size 32

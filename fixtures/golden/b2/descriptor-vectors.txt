@@ -1,0 +1,22 @@
+# MOCHI B.2 archive descriptor v0 vectors. DRAFT (R1, R2); spec Annex B.2 D12;
+# docs/schemas/archive-descriptor-v0.cddl. Built by mochi_testkit::golden.
+# Read as found at offset 0 with default limits.
+# <name> valid   |   <name> rejects <core error code>
+valid-descriptor-minimal valid
+valid-descriptor-declared-limits valid
+reject-descriptor-schema-version rejects UNSUPPORTED_FEATURE
+reject-descriptor-generation rejects UNSUPPORTED_FEATURE
+reject-descriptor-draft-null rejects UNSUPPORTED_FEATURE
+reject-descriptor-draft-2 rejects UNSUPPORTED_FEATURE
+reject-descriptor-draft-type rejects DESCRIPTOR_INVALID
+reject-descriptor-unknown-feature rejects UNSUPPORTED_FEATURE
+reject-descriptor-features-not-increasing rejects DESCRIPTOR_INVALID
+reject-descriptor-unknown-key rejects DESCRIPTOR_INVALID
+reject-descriptor-missing-key rejects DESCRIPTOR_INVALID
+reject-descriptor-short-archive-id rejects DESCRIPTOR_INVALID
+reject-descriptor-constraint-type rejects DESCRIPTOR_INVALID
+reject-descriptor-constraint-unknown-key rejects DESCRIPTOR_INVALID
+reject-descriptor-declared-limits-missing-key rejects DESCRIPTOR_INVALID
+reject-descriptor-noncanonical-cbor rejects DESCRIPTOR_INVALID
+reject-descriptor-wrong-frame-kind rejects DESCRIPTOR_INVALID
+reject-descriptor-trailing-frame rejects DESCRIPTOR_INVALID

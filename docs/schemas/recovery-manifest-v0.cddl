@@ -1,0 +1,63 @@
+; MOCHI recovery manifest, schema version 0 (DRAFT; ratification item R3).
+; Spec §11; encoding per Annex B.1 D2: the deterministic-CBOR subset
+; (integer map keys in increasing order, shortest forms, no floats, tags,
+; or indefinite lengths). A reader MUST reject input that does not re-encode
+; to identical bytes, and MUST reject unknown keys: a new field is a new
+; schema version.
+;
+; Stored as the payload of one skippable frame of kind RECOVERY_MANIFEST.
+; The manifest's hash is the stored-object hash (spec §9.2, plan O20) of
+; that whole frame; `parent.manifest-hash` links to the parent's.
+
+manifest = {
+  0: 0,                       ; schema version
+  1: bstr .size 32,           ; archive ID
+  2: uint,                    ; commit sequence
+  3: parent / null,           ; null only for a root delta (sequence 0) or a baseline snapshot
+  4: kind,
+  5: [* chunk],               ; delta: chunks new in this commit; snapshot: every chunk referenced
+  6: [* file-version],        ; delta: versions new in this commit; snapshot: every version referenced
+  7: [* op],                  ; delta: namespace operations in order; snapshot: empty
+  8: [* entry],               ; snapshot: complete namespace; delta: empty
+}
+; Arrays 5, 6, and 8 are sorted by their first field (bytewise), without
+; duplicates, so a logical manifest has exactly one encoding. Array 7 keeps
+; operation order.
+
+parent = { 0: uint, 1: bstr .size 32 }   ; parent commit sequence (< this one), parent manifest hash
+kind = 0 / 1                              ; 0 delta, 1 snapshot
+
+chunk = {
+  0: bstr .size 32,           ; object ID
+  1: 0,                       ; encoding: 0 = one Zstandard frame (plan O21)
+  2: 0 / 1,                   ; protection: 0 none, 1 AEAD
+  3: uint,                    ; stored length (> 0)
+  4: bstr .size 32,           ; stored-object hash
+  5: uint,                    ; decoded length
+  6: bstr .size 32,           ; chunk content hash
+  7: [* dependency],          ; sorted, no duplicates
+  8: uint / null,             ; stored offset in a monolithic archive; null = rediscover by scan + stored hash
+}
+dependency = [0 / 1, bstr .size 32]   ; 0 dictionary, 1 key envelope; object ID
+
+file-version = {
+  0: bstr .size 32,           ; file-version ID
+  1: 0 / 1,                   ; 0 file, 1 directory (2 = symbolic link: reserved until C6)
+  2: uint,                    ; logical length (0 for a directory)
+  3: bstr .size 32 / null,    ; file content hash, plain BLAKE3 (plan O20); null exactly for a directory
+  4: [* extent],              ; ordinal = position; must cover exactly [0, logical length) (spec §10.3)
+  5: attributes,
+}
+extent = [uint, uint, bstr .size 32 / null, uint]   ; logical offset, length (> 0), chunk ID or null for a hole, chunk offset (0 for a hole)
+
+; Promised attributes (spec Annex B.1 D6). Absent key = not recorded.
+attributes = {
+  ? 0: [uint, uint, uint],    ; POSIX: permission bits (<= 0o7777), uid, gid
+  ? 1: uint,                  ; Windows attributes, only READONLY | HIDDEN | SYSTEM | ARCHIVE (mask 0x27)
+  ? 2: [int, uint],           ; mtime: seconds since the Unix epoch, nanoseconds (< 10^9)
+}
+
+op = put / delete
+put = [0, bstr, bstr .size 32]   ; path (stored form, spec §10.4 / plan O24), file-version ID
+delete = [1, bstr]               ; path
+entry = [bstr, bstr .size 32]    ; path, file-version ID

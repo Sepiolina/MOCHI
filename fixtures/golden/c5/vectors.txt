@@ -1,0 +1,45 @@
+# MOCHI C5 commit-record vectors. DRAFT schema 1 (R3); docs/schemas/commit-record-v1.cddl.
+# Built by mochi_testkit::golden; do not edit by hand.
+# <name> valid <commit-id>   |   <name> rejects <core error code>
+valid-commit-root valid b4592ef9ac9cc216937605d9a2f5067c827e6f033bda0391a6fb10f7162ca692
+valid-commit-child valid d899e30833e2ee8dd89f07ab6f25eeb035894ee18af657d8ca196b9f37b25c56
+valid-commit-delta valid a7cf5aed31f4aaa2061c4002bd7a618d43781cf628602f777e02166de7e7d2b8
+reject-commit-id-mismatch rejects RECORD_INVALID
+reject-commit-unknown-key rejects RECORD_INVALID
+reject-commit-missing-key rejects RECORD_INVALID
+reject-commit-missing-descriptor rejects RECORD_INVALID
+reject-commit-schema-version rejects UNSUPPORTED_FEATURE
+reject-commit-legacy-v0 rejects UNSUPPORTED_FEATURE
+reject-commit-metadata-form rejects RECORD_INVALID
+reject-commit-checkpoint-missing-snapshot rejects RECORD_INVALID
+reject-commit-delta-with-snapshot rejects RECORD_INVALID
+reject-commit-root-delta rejects RECORD_INVALID
+reject-commit-base-not-before rejects RECORD_INVALID
+reject-commit-root-with-parent rejects RECORD_INVALID
+reject-commit-orphan rejects RECORD_INVALID
+reject-commit-parent-seq-gap rejects RECORD_INVALID
+reject-commit-descriptor-offset rejects RECORD_INVALID
+reject-commit-required-feature rejects UNSUPPORTED_FEATURE
+reject-commit-features-not-increasing rejects ENVELOPE_INVALID
+reject-commit-short-transaction-id rejects RECORD_INVALID
+reject-commit-noncanonical-cbor rejects RECORD_INVALID
+reject-commit-wrong-frame-kind rejects MALFORMED_FRAME
+reject-commit-trailing-frame rejects MALFORMED_FRAME
+# T11/T12 archive vectors (docs/t11-t12-acceptance.md). Frozen; checked by behaviour.
+# <name>.mochi opens   |   <name>.mochi rejects <core error code> (open_head)
+valid-archive-delta-segment.mochi opens
+valid-archive-wrong-base-hint.mochi opens
+reject-archive-base-id-tampered.mochi rejects RECORD_INVALID
+reject-archive-base-off-ancestry.mochi rejects RECORD_INVALID
+reject-archive-base-is-delta.mochi rejects RECORD_INVALID
+reject-archive-base-skips-checkpoint.mochi rejects RECORD_INVALID
+reject-archive-segment-inconsistent.mochi rejects RECORD_INVALID
+reject-archive-segment-descriptor-differs.mochi rejects DESCRIPTOR_INVALID
+reject-archive-parent-hint-wrong-footer.mochi rejects RECORD_INVALID
+reject-archive-link-to-snapshot.mochi rejects RECORD_INVALID
+reject-archive-link-to-other-delta.mochi rejects RECORD_INVALID
+reject-archive-link-wrong-seq.mochi rejects RECORD_INVALID
+reject-archive-link-missing.mochi rejects RECORD_INVALID
+reject-archive-duplicate-version.mochi rejects RECORD_INVALID
+reject-archive-unknown-feature.mochi rejects UNSUPPORTED_FEATURE
+reject-archive-parent-offset-no-footer.mochi rejects FOOTER_INVALID

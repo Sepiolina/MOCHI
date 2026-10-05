@@ -1,0 +1,29 @@
+[package]
+name = "mochi-core"
+description = "MOCHI archive operations: catalog, verification, repair, jobs, reports."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Test controls: fault injection in the segment applier, a logical catalog
+# dump, and (later) writer checkpoint policies. Off by default; enabled only
+# by mochi-testkit. Cargo features are additive, so this is not an isolation
+# boundary: anything in the build graph that enables it enables the controls
+# for every crate in that build (review decision 14).
+test-controls = []
+
+[dependencies]
+mochi-format.workspace = true
+serde.workspace = true
+getrandom.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

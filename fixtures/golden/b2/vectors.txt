@@ -1,0 +1,21 @@
+# MOCHI B.2 binary envelope v0 vectors. DRAFT (R2); spec Annex B.2.2, D11.
+# Built by mochi_testkit::golden; do not edit by hand.
+# Reader expectations: field expects METADATA_DELTA; known schema versions [0];
+# no known features; default limits; bind to archive ID a1*32, sequence 7,
+# transaction ID b2*16.
+# <name> valid   |   <name> rejects <error>
+valid-envelope-image valid
+reject-envelope-wrong-frame-kind rejects Envelope(KindHasNoEnvelope)
+reject-envelope-version rejects UnsupportedEnvelopeVersion { version: 1 }
+reject-envelope-schema-unknown rejects UnsupportedSchema { version: 1 }
+reject-envelope-schema-user-version rejects Envelope(SchemaVersionMismatch)
+reject-envelope-unknown-feature rejects UnsupportedRequiredFeature { feature: 1 }
+reject-envelope-features-not-increasing rejects Envelope(FeaturesNotIncreasing)
+reject-envelope-feature-count rejects Envelope(FeatureCountOutOfRange)
+reject-envelope-header-length rejects Envelope(HeaderLengthMismatch)
+reject-envelope-payload-encoding rejects Envelope(UnknownPayloadEncoding)
+reject-envelope-signature rejects Envelope(EncodingSignatureMismatch)
+reject-envelope-payload-length rejects Envelope(PayloadLengthMismatch)
+reject-envelope-archive-id rejects Envelope(ArchiveIdMismatch)
+reject-envelope-sequence rejects Envelope(SequenceMismatch)
+reject-envelope-transaction-id rejects Envelope(TransactionIdMismatch)

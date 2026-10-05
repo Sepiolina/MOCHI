@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 34d2aaf9c181b2b6e924b46ad15aeff76fd2bcf90deeb9563da6c73b4d1d6c1e # shrinks to commits = [[PutTree("a/a", false)], [Raw(false, "a", false)]]
+cc 2b85ae9aee0af5cf1c8f1fc52b363b1035c1f3826bc79253617b0803bd59355d # shrinks to commits = [[PutTree("c/a", false)], [PutTree("c", false)]]

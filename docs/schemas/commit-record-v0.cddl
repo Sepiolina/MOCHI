@@ -1,0 +1,68 @@
+; MOCHI commit record, schema version 0 (DRAFT; ratification item R3).
+; Spec §12.1 (contents), §9.2 (commit ID), §8.4 (footer), §10.6 (checkpoints).
+; Encoding per Annex B.1 D2: the same deterministic-CBOR subset as recovery
+; manifests (integer map keys in increasing order, shortest forms, no floats,
+; tags, or indefinite lengths). A reader MUST reject input that does not
+; re-encode to identical bytes, and MUST reject unknown keys: a new field is a
+; new schema version. Schema version 0 is the draft identifier that lets a 1.0
+; reader reject pre-1.0 archives explicitly (plan §4, spec §26).
+;
+; Stored as the payload of one skippable frame of kind COMMIT_RECORD. The
+; footer (§8.4) names that frame by offset and length and its digest covers
+; the frame's exact stored bytes.
+;
+; Commit ID (§9.2): BLAKE3-256 over the domain separator
+; "MOCHI2-COMMIT-ID" || 0x00 (draft, mochi-format digest.rs) followed by the
+; canonical encoding of the *body*: this map with key 9 removed (so a map of
+; one fewer entry, every other key and value unchanged). Key 9 carries the ID
+; so a reader can name the commit without recomputing it, and MUST reject a
+; record whose key 9 differs from the recomputed value.
+
+commit = {
+  0: 0,                       ; schema version (draft)
+  1: bstr .size 32,           ; archive ID
+  2: uint,                    ; commit sequence
+  3: bstr .size 16,           ; transaction ID: random 128-bit, written as an RFC 9562 version-4 UUID
+  4: parent / null,           ; null exactly for sequence 0
+  5: metadata-ref,            ; the catalog state this commit publishes
+  6: object-ref,              ; this commit's recovery manifest (spec §11)
+  7: [* uint],                ; required features, sorted, no duplicates; Core = []. A reader that
+                              ; does not know every listed feature MUST refuse the commit (fail closed)
+  ? 8: [int, uint],           ; informational time: seconds since the Unix epoch, nanoseconds (< 10^9).
+                              ; Never used for ordering (spec §12.1)
+  9: bstr .size 32,           ; commit ID (excluded from the body)
+}
+
+parent = {
+  0: bstr .size 32,           ; parent commit ID
+  1: uint,                    ; parent sequence (< this one)
+  2: uint,                    ; parent footer offset: a location hint (§12.1), never trusted;
+                              ; a reader validates the footer there and compares the commit ID
+}
+
+; Offset and length of a stored object in a monolithic archive, and its
+; stored-object hash (§9.2; for manifests and metadata objects these are the
+; recovery-manifest and metadata-object hashes, plan O20). The range MUST end
+; at or before the commit frame's offset: a commit may only reference bytes in
+; the prefix its footer publishes (§5.1; plan O17 for the footer itself).
+object-ref = {
+  0: uint,                    ; offset of the object's first byte (its frame magic)
+  1: uint,                    ; stored length, including the frame header (>= 8)
+  2: bstr .size 32,           ; stored-object hash
+}
+
+metadata-ref = {
+  0: 0,                       ; kind. 0 = checkpoint: a complete catalog image whose latest commit is
+                              ; this commit (§10.6). 1 = delta: RESERVED, undefined until the delta
+                              ; format is decided (plan §9, O26); readers report it as unsupported
+  1: uint,                    ; offset
+  2: uint,                    ; stored length
+  3: bstr .size 32,           ; stored-object hash, verified BEFORE the image is opened (plan C5)
+}
+
+; Not present in schema 0, with the reason:
+; * Writer fencing (§12.1 "when supported"): Core has none, and §12.5 says a
+;   recorded token is not fencing unless the backend enforces it.
+; * Dependency references beyond the manifest and metadata (§12.1 "required
+;   dependency references"): Core commits have none yet; dictionaries and key
+;   envelopes (C9, C11) will need a field, and therefore a new schema version.

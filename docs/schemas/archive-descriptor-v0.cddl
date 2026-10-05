@@ -1,0 +1,45 @@
+; MOCHI archive descriptor, schema version 0 (DRAFT; ratification items R1, R2).
+; Decision: spec Annex B.2 D12.
+;
+; Stored as the payload of one skippable frame of kind ARCHIVE_DESCRIPTOR
+; (0x184D2A57) at offset 0, written once at creation and never rewritten.
+; Every commit references it (commit v1 key 10). A descriptor frame at any
+; other offset is invalid. Encoding: the deterministic-CBOR subset of Annex
+; B.1 D2. The CBOR-native envelope (D11) is keys 0, 1, and 4, plus the frame
+; kind and frame length. Identity is the archive ID.
+;
+; The descriptor holds only creation-time facts. It never locates key
+; envelopes (§14.3: commits do), and it never changes. Changing a
+; creation-time constraint, including adopting the Encrypted profile, means
+; writing a new archive (D12).
+
+descriptor = {
+  0: 0,                       ; descriptor schema version
+  1: archive-id,
+  2: 2,                       ; wire generation: MOCHI2 (Annex B.1 D1)
+  3: draft,
+  4: features,                ; required features; Core = []; unknown entry => refuse
+  5: constraints,
+  ? 6: declared-limits,       ; present ONLY when the writer opted into limits above reader defaults (D10.8)
+}
+
+; Pre-1.0 draft identifier. 1 = the Annex B.2 wire batch. Null only in a
+; ratified 1.0 archive. Archives from before this batch carry no
+; descriptor and are rejected as legacy drafts (§26).
+draft = uint / null
+
+constraints = {
+  0: bool,                    ; TAR-compatible profile (Annex B.1 D4), fixed at creation
+}
+
+; Advisory only. Readers MUST NOT raise their own limits from these values.
+; A reader whose limits are lower reports LIMIT_EXCEEDED, naming the
+; declared value, and requires an explicit user setting to proceed.
+declared-limits = {
+  0: uint,                    ; max skippable payload the writer used
+  1: uint,                    ; max CBOR items per record
+  2: uint,                    ; max catalog image length
+}
+
+archive-id = bstr .size 32
+features = [* uint]           ; strictly increasing

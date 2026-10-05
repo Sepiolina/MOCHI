@@ -1,0 +1,85 @@
+[package]
+name = "mochi-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+mochi-testkit = { path = "../crates/mochi-testkit" }
+
+# Standalone workspace: cargo-fuzz needs nightly and must not affect the main build.
+[workspace]
+
+[[bin]]
+name = "frame_walker"
+path = "fuzz_targets/frame_walker.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "footer"
+path = "fuzz_targets/footer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "envelope"
+path = "fuzz_targets/envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "object_decode"
+path = "fuzz_targets/object_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "catalog_image"
+path = "fuzz_targets/catalog_image.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cbor_decode"
+path = "fuzz_targets/cbor_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "manifest_decode"
+path = "fuzz_targets/manifest_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "commit_decode"
+path = "fuzz_targets/commit_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "archive_open"
+path = "fuzz_targets/archive_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "descriptor_decode"
+path = "fuzz_targets/descriptor_decode.rs"
+test = false
+doc = false
+bench = false

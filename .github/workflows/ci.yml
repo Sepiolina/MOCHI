@@ -1,0 +1,108 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Supported platforms (plan O11): Ubuntu 22.04 is the floor (webkit2gtk 4.1,
+        # glibc for the .deb), 24.04 the current LTS. GitHub's Windows runners are
+        # Windows Server; client-only behaviour goes on the release checklist.
+        os: [ubuntu-22.04, ubuntu-24.04, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Tests
+        run: cargo test --workspace --locked
+      - name: AGENTS.md invariants
+        shell: bash
+        run: ci/check-invariants.sh
+
+  fuzz-smoke:
+    name: fuzz smoke (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # `seeds`: corpus directories, relative to fuzz/. `args`: extra
+        # libFuzzer flags. The first seven targets are unchanged.
+        include:
+          - { target: frame_walker,    seeds: "../fixtures/golden/c1 ../fixtures/golden/c2 ../fixtures/golden/c3 ../fixtures/golden/c4", args: "" }
+          - { target: footer,          seeds: "../fixtures/golden/c1 ../fixtures/golden/c2 ../fixtures/golden/c3 ../fixtures/golden/c4", args: "" }
+          - { target: envelope,        seeds: "../fixtures/golden/c1 ../fixtures/golden/c2 ../fixtures/golden/c3 ../fixtures/golden/c4", args: "" }
+          - { target: object_decode,   seeds: "../fixtures/golden/c1 ../fixtures/golden/c2 ../fixtures/golden/c3 ../fixtures/golden/c4", args: "" }
+          - { target: catalog_image,   seeds: "../fixtures/golden/c1 ../fixtures/golden/c2 ../fixtures/golden/c3 ../fixtures/golden/c4", args: "" }
+          - { target: cbor_decode,     seeds: "../fixtures/golden/c1 ../fixtures/golden/c2 ../fixtures/golden/c3 ../fixtures/golden/c4", args: "" }
+          - { target: manifest_decode, seeds: "../fixtures/golden/c1 ../fixtures/golden/c2 ../fixtures/golden/c3 ../fixtures/golden/c4", args: "" }
+          # T11/T12 (approved 2026-10-04): whole archives, including the
+          # delta-segment vectors whose heads exercise the segment
+          # assertions. Archives reach ~150 KB, above libFuzzer's default
+          # max_len.
+          - { target: archive_open,      seeds: "../fixtures/golden/c5", args: "-max_len=400000" }
+          # Their own vectors: commit records (c5/*.bin), descriptors (b2).
+          - { target: commit_decode,     seeds: "../fixtures/golden/c5", args: "" }
+          - { target: descriptor_decode, seeds: "../fixtures/golden/b2", args: "" }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly toolchain
+        run: rustup toolchain install nightly --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      # libFuzzer requires every corpus directory on its command line to
+      # exist, and corpus/ is gitignored, so a fresh checkout lacks it.
+      # Without this step every target fails at once with "The required
+      # directory ... does not exist" (exit 1); found 2026-10-04 by running
+      # the job's commands locally, and true of the original seven targets.
+      - name: Create the working corpus directory
+        working-directory: fuzz
+        run: mkdir -p corpus/${{ matrix.target }}
+      # Deterministic: every seed is executed once (-runs=0), so the
+      # exerciser's assertions run on every vector before any mutation.
+      # For archive_open that includes the two valid delta-head archives;
+      # the stable test job additionally asserts those come back
+      # `OpenedDelta` (c5_golden, fuzz_smoke_over_mutated_inputs), proving
+      # the segment assertions are reached, not just built.
+      - name: Execute every seed once
+        working-directory: fuzz
+        run: cargo +nightly fuzz run ${{ matrix.target }} corpus/${{ matrix.target }} ${{ matrix.seeds }} -- -runs=0 ${{ matrix.args }}
+      - name: Fuzz 60 seconds, seeded from the golden vectors
+        working-directory: fuzz
+        run: cargo +nightly fuzz run ${{ matrix.target }} corpus/${{ matrix.target }} ${{ matrix.seeds }} -- -max_total_time=60 ${{ matrix.args }}
+
+  doc-nightly:
+    # Stable rustdoc ignores the error code in `compile_fail,E0308`; nightly
+    # enforces it. The C2 representation-type guarantees (repr.rs) depend on
+    # each block failing for the *intended* reason.
+    name: compile_fail doctests (codes enforced)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly toolchain
+        run: rustup toolchain install nightly --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Doctests with error codes checked
+        run: cargo +nightly test --doc -p mochi-format
+
+  # Added as their phases land (plan §5, §8.1). Not present yet, on purpose:
+  #   tar-interop  - C10: one job per pinned tool (GNU tar, bsdtar, zstd CLI)
+  #   e2e          - D0+: tauri-driver + WebdriverIO on Windows and Ubuntu (all supported platforms)
+  #   ui           - D0+: pnpm install --frozen-lockfile, eslint, tsc --noEmit, vitest, ts-rs types fresh

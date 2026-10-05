@@ -1,0 +1,13 @@
+# Line endings (added 2026-10-04 [delegated]). Git on Windows, including
+# GitHub's windows-latest runners, converts text to CRLF on checkout unless
+# told otherwise. Golden fixtures are compared byte for byte, so they must
+# never be converted, and the tree hash used to identify a tested revision
+# must not depend on the machine that committed it.
+
+# Everything: LF in the repository and in every working tree.
+* text=auto eol=lf
+
+# Golden fixtures: byte-exact, never converted (overrides the line above).
+fixtures/** -text
+*.mochi binary
+*.bin binary

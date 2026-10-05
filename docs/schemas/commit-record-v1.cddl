@@ -1,0 +1,98 @@
+; MOCHI commit record, schema version 1 (DRAFT; ratification item R3).
+; Decisions: spec Annex B.2 D10, D11, D12. Supersedes commit-record-v0.cddl
+; for new archives; a v0 commit is a pre-batch draft and is rejected (§26).
+;
+; Encoding: the deterministic-CBOR subset of Annex B.1 D2. A reader MUST
+; reject input that does not re-encode to identical bytes, and MUST reject
+; unknown keys. Stored as the payload of one skippable frame of kind
+; COMMIT_RECORD (0x184D2A51). The CBOR-native envelope (D11) is keys 0, 1,
+; 3, and 7, plus the frame kind and frame length.
+;
+; Commit ID (§9.2): BLAKE3-256 over the draft domain separator
+; "MOCHI2-COMMIT-ID" || 0x00 (mochi-format digest.rs), followed by the
+; canonical encoding of this map with key 9 removed. Key 9 MUST equal the
+; recomputed value.
+;
+; Hash acyclicity: every object-ref names bytes written before this frame
+; (descriptor, delta manifest, catalog image, snapshot manifest). None of
+; those objects contains this commit's ID. They carry only the archive ID,
+; sequence, and transaction ID, all of which are known before they are
+; written. The footer (§8.4) covers this frame's stored bytes.
+;
+; CDDL note: type choices used as array elements are written as named rules.
+; This is equivalent under RFC 8610, and works around a validator defect
+; that fails inline choices in array positions.
+
+commit = root-commit / child-commit
+
+; Sequence 0: no parent, and the metadata MUST be a checkpoint.
+root-commit = {
+  0: 1,                       ; schema version
+  1: archive-id,
+  2: 0,                       ; sequence
+  3: txid,                    ; random 128-bit; written as an RFC 9562 version-4 UUID
+  4: null,                    ; no parent
+  5: checkpoint,
+  6: object-ref,              ; this commit's DELTA manifest (kind 0), always present (§11)
+  7: features,                ; required features; Core = []; unknown entry => refuse
+  ? 8: info-time,             ; informational; never used for ordering (§12.1)
+  9: hash32,                  ; commit ID (excluded from the body)
+  10: object-ref,             ; archive descriptor (D12); offset MUST be 0
+}
+
+child-commit = {
+  0: 1,
+  1: archive-id,
+  2: uint .ge 1,
+  3: txid,
+  4: parent,
+  5: metadata,
+  6: object-ref,
+  7: features,
+  ? 8: info-time,
+  9: hash32,
+  10: object-ref,
+}
+
+parent = {
+  0: hash32,                  ; parent commit ID
+  1: seq,                     ; parent sequence; MUST equal this sequence - 1
+  2: uint,                    ; parent footer offset: the traversal offset (D10.6);
+                              ; must resolve to the parent's valid footer
+}
+
+; Exactly one of the two forms.
+metadata = checkpoint / delta-on-base
+checkpoint = {
+  0: 0,
+  1: object-ref,              ; catalog image: METADATA_DELTA frame, binary envelope v0, encoding 0
+  2: object-ref,              ; snapshot manifest: RECOVERY_MANIFEST frame, kind 1
+}
+delta-on-base = {
+  0: 1,
+  1: base-ref,
+}
+; Base rule (deterministic): if the parent is a checkpoint, base = parent;
+; otherwise base = the parent's base. A reader MUST check equality, and
+; MUST NOT search for any other checkpoint.
+base-ref = {
+  0: hash32,                  ; base checkpoint commit ID
+  1: seq,                     ; its sequence (< this sequence)
+  2: uint,                    ; its footer offset: non-authoritative hint (D10.6)
+}
+
+; A stored object in a monolithic archive. The range MUST end at or before
+; this commit frame's offset (§5.1).
+object-ref = {
+  0: uint,                    ; offset of the frame's first byte
+  1: uint,                    ; stored length including the frame header (>= 8)
+  2: hash32,                  ; stored-object hash; verified BEFORE parsing
+}
+
+archive-id = bstr .size 32
+txid = bstr .size 16
+hash32 = bstr .size 32
+seq = uint
+features = [* uint]           ; strictly increasing (no duplicates)
+info-time = [int, nanos]
+nanos = uint .lt 1000000000

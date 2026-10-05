@@ -1,0 +1,25 @@
+[package]
+name = "mochi-cli"
+description = "The `mochi` command-line tool."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "mochi_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mochi"
+path = "src/main.rs"
+
+[dependencies]
+mochi-core.workspace = true
+mochi-format.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

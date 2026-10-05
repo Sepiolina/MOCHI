@@ -1,0 +1,110 @@
+; MOCHI recovery manifest, schema version 1 (DRAFT; ratification item R3).
+; Decisions: spec Annex B.2 D10, D11. Supersedes recovery-manifest-v0.cddl.
+; Changes from v0: keys 9 (required features) and 10 (transaction ID) are
+; added, and the parent-link and snapshot rules below are made exact.
+;
+; Encoding: the deterministic-CBOR subset of Annex B.1 D2. Unknown keys and
+; non-canonical input are rejected. Stored as the payload of exactly ONE
+; skippable frame of kind RECOVERY_MANIFEST (0x184D2A58). 1.0 never splits a
+; manifest across frames; an oversized one is rejected (D10.8). The
+; manifest's hash is the stored-object hash of the whole frame (plan O20).
+; The CBOR-native envelope (D11) is keys 0, 1, 2, 9, and 10.
+;
+; Kind 0 (delta): the logical transition of commit `2`.
+;   * parent is null exactly when sequence = 0.
+;   * parent.1 is the stored-object hash of the PARENT COMMIT's delta
+;     manifest (that commit's key 6), never of a snapshot manifest. A
+;     baseline recovery that starts from snapshot S(b) checks the next
+;     delta's parent.1 against commit b's key 6 hash, without reading
+;     delta(b).
+;   * Arrays 5 and 6 hold what is new in this commit, array 7 holds the
+;     namespace operations in order, and array 8 is empty.
+; Kind 1 (snapshot): the complete authoritative state after commit `2`.
+;   * parent MUST be null. A snapshot is a self-contained baseline: recovery
+;     from it needs neither SQLite nor any other manifest.
+;   * Arrays 5, 6, and 8 are complete, and array 7 is empty. Every chunk ID
+;     in an extent, and every file-version ID in an entry, appears in 5 or 6.
+;   * Keys 2 and 10 equal the checkpoint commit's sequence and transaction ID.
+; Arrays 5, 6, and 8 are sorted by their first field (bytewise) without
+; duplicates. Array 7 keeps operation order.
+
+manifest = delta-manifest / snapshot-manifest
+
+delta-manifest = {
+  0: 1,                       ; schema version
+  1: archive-id,
+  2: seq,
+  3: opt-parent,              ; null exactly when sequence = 0 (checked in code)
+  4: 0,                       ; kind: delta
+  5: [* chunk],               ; chunks new in this commit
+  6: [* file-version],        ; file versions new in this commit
+  7: [* op],                  ; namespace operations, in order
+  8: [],                      ; empty for a delta
+  9: features,                ; required features; unknown entry => refuse
+  10: txid,                   ; transaction ID of commit `2`
+}
+
+snapshot-manifest = {
+  0: 1,
+  1: archive-id,
+  2: seq,
+  3: null,                    ; a snapshot is a self-contained baseline
+  4: 1,                       ; kind: snapshot
+  5: [* chunk],               ; every chunk referenced
+  6: [* file-version],        ; every file version referenced
+  7: [],                      ; empty for a snapshot
+  8: [* entry],               ; the complete namespace
+  9: features,
+  10: txid,
+}
+
+opt-parent = parent / null
+parent = { 0: seq, 1: hash32 }   ; parent sequence (= this - 1), parent commit's delta-manifest hash
+
+chunk = {
+  0: hash32,                  ; object ID
+  1: 0,                       ; encoding: one Zstandard frame (plan O21)
+  2: protection,
+  3: uint,                    ; stored length (> 0)
+  4: hash32,                  ; stored-object hash
+  5: uint,                    ; decoded length
+  6: hash32,                  ; chunk content hash
+  7: [* dependency],          ; sorted, no duplicates
+  8: opt-offset,              ; stored offset in a monolithic archive; null = rediscover by scan + stored hash
+}
+protection = 0 / 1            ; 0 none, 1 AEAD
+opt-offset = uint / null
+dependency = [dep-kind, hash32]
+dep-kind = 0 / 1              ; 0 dictionary, 1 key envelope; object ID
+
+file-version = {
+  0: hash32,                  ; file-version ID
+  1: fv-kind,
+  2: uint,                    ; logical length (0 for a directory)
+  3: opt-hash,                ; plain BLAKE3 file-content hash (plan O20); null exactly for a directory
+  4: [* extent],              ; must cover exactly [0, logical length) (§10.3)
+  5: attributes,
+}
+fv-kind = 0 / 1               ; 0 file, 1 directory (2 = symbolic link: reserved until C6)
+opt-hash = hash32 / null
+extent = [uint, uint, opt-chunk, uint]   ; logical offset, length (> 0), chunk ID or null for a hole, chunk offset (0 for a hole)
+opt-chunk = hash32 / null
+
+attributes = {
+  ? 0: [uint, uint, uint],    ; POSIX: permission bits (<= 0o7777), uid, gid
+  ? 1: uint,                  ; Windows attributes, mask 0x27 only
+  ? 2: [int, nanos],          ; mtime
+}
+
+op = put / delete
+put = [0, bstr, hash32]       ; path (stored form, §10.4 / plan O24), file-version ID
+delete = [1, bstr]            ; path
+entry = [bstr, hash32]        ; path, file-version ID
+
+archive-id = bstr .size 32
+txid = bstr .size 16
+hash32 = bstr .size 32
+seq = uint
+features = [* feature]        ; strictly increasing
+feature = uint
+nanos = uint .lt 1000000000

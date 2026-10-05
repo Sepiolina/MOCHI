@@ -1,0 +1,29 @@
+# MOCHI C4 recovery-manifest vectors. DRAFT schema 1 (R3); docs/schemas/recovery-manifest-v1.cddl.
+# Built by mochi_testkit::golden; do not edit by hand.
+# <name> valid <stored-object-hash>   |   <name> rejects <core error code>
+valid-manifest-root-delta valid 29d41d20c6e3cd3540d5087f8bbfbd2c2898ac99db69b5d5dfc1d877faff54d4
+valid-manifest-child-delta valid cbb1a56efce7fbc69f1b8839dc0851dd4172812aa7282a190bbad6dcf78d5b1e
+valid-manifest-snapshot valid 1fd2700bee81a5e0afa3103567f7e82ff876118971eeffa1a3ec6caeae5de0fb
+reject-manifest-unknown-key rejects RECORD_INVALID
+reject-manifest-missing-key rejects RECORD_INVALID
+reject-manifest-missing-transaction-id rejects RECORD_INVALID
+reject-manifest-short-transaction-id rejects RECORD_INVALID
+reject-manifest-schema-version rejects UNSUPPORTED_FEATURE
+reject-manifest-legacy-v0 rejects UNSUPPORTED_FEATURE
+reject-manifest-required-feature rejects UNSUPPORTED_FEATURE
+reject-manifest-features-not-increasing rejects ENVELOPE_INVALID
+reject-manifest-symlink-kind rejects UNSUPPORTED_FEATURE
+reject-manifest-windows-bits rejects RECORD_INVALID
+reject-manifest-mode-bits rejects RECORD_INVALID
+reject-manifest-unsorted-versions rejects RECORD_INVALID
+reject-manifest-traversal-path rejects PATH_INVALID
+reject-manifest-orphan-delta rejects RECORD_INVALID
+reject-manifest-root-delta-with-parent rejects RECORD_INVALID
+reject-manifest-parent-seq-gap rejects RECORD_INVALID
+reject-manifest-delta-with-entries rejects RECORD_INVALID
+reject-manifest-snapshot-with-parent rejects RECORD_INVALID
+reject-manifest-snapshot-with-ops rejects RECORD_INVALID
+reject-manifest-snapshot-not-self-contained rejects RECORD_INVALID
+reject-manifest-noncanonical-cbor rejects RECORD_INVALID
+reject-manifest-wrong-frame-kind rejects MALFORMED_FRAME
+reject-manifest-trailing-frame rejects MALFORMED_FRAME

@@ -28,6 +28,7 @@
 //! (extents, commit chain, operation sequence, full namespace replay).
 
 mod apply;
+pub mod bounds;
 pub mod extent;
 pub mod namespace;
 pub mod path;

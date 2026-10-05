@@ -83,6 +83,9 @@ pub struct SegmentApplier {
     namespace: Snapshot,
     head: u64,
     faults: Faults,
+    /// Namespace work of the last `apply` (D10.5; `super::bounds`).
+    namespace_probes: Cell<u64>,
+    namespace_mutations: u64,
 }
 
 impl SegmentApplier {
@@ -102,6 +105,8 @@ impl SegmentApplier {
             namespace,
             head,
             faults: Faults::default(),
+            namespace_probes: Cell::new(0),
+            namespace_mutations: 0,
         })
     }
 
@@ -126,6 +131,8 @@ impl SegmentApplier {
     /// Apply delta manifest `head + 1`. On error, nothing changed.
     pub fn apply(&mut self, delta: &Manifest) -> Result<()> {
         self.faults.reached.set(0);
+        self.namespace_probes.set(0);
+        self.namespace_mutations = 0;
         self.check_shape(delta)?;
         self.check_introductions(delta)?;
 
@@ -194,7 +201,11 @@ impl SegmentApplier {
         // Namespace, staged: validated against the completed commit state.
         let undo = self
             .namespace
-            .apply_commit_staged(&delta.ops, |v| kinds.get(v).copied())
+            .apply_commit_staged(
+                &delta.ops,
+                |v| kinds.get(v).copied(),
+                &self.namespace_probes,
+            )
             .map_err(|f| {
                 let e = MochiError::from(f);
                 MochiError::new(
@@ -202,6 +213,7 @@ impl SegmentApplier {
                     format!("replaying commit {}: {}", delta.commit_seq, e.message),
                 )
             })?;
+        self.namespace_mutations = undo.mutations() as u64;
 
         let finished = self.faults.point().and_then(|()| tx.commit().map_err(sql));
         match finished {
@@ -306,6 +318,17 @@ impl SegmentApplier {
     /// Fault points the last `apply` reached.
     pub fn fault_points_reached(&self) -> usize {
         self.faults.reached.get()
+    }
+
+    /// Namespace probes made by the last `apply` (see `super::bounds`).
+    pub fn last_namespace_probes(&self) -> u64 {
+        self.namespace_probes.get()
+    }
+
+    /// Namespace entries set or removed by the last `apply`, counted from
+    /// its undo log; 0 if the namespace refused the commit.
+    pub fn last_namespace_mutations(&self) -> u64 {
+        self.namespace_mutations
     }
 }
 
@@ -467,6 +490,9 @@ mod tests {
             ],
         )
     }
+
+    /// T13: declared work bounds (`super::super::bounds`).
+    mod work_bounds;
 
     #[test]
     fn applies_in_order_and_matches_a_from_scratch_replay() {

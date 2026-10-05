@@ -19,6 +19,7 @@
 //!   is fine.
 //! * An invalid commit leaves the snapshot exactly as it was.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::ops::Bound;
@@ -114,6 +115,13 @@ pub struct Entry {
 #[must_use = "dropping the undo log makes a staged commit permanent"]
 pub(crate) struct NamespaceUndo(Vec<(ArchivePath, Option<Entry>)>);
 
+impl NamespaceUndo {
+    /// Entries the staged commit set or removed: one per operation.
+    pub(crate) fn mutations(&self) -> usize {
+        self.0.len()
+    }
+}
+
 /// The complete namespace at one commit.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Snapshot {
@@ -153,7 +161,8 @@ impl Snapshot {
         self.entries.iter()
     }
 
-    fn has_descendants(&self, dir: &ArchivePath) -> bool {
+    fn has_descendants(&self, dir: &ArchivePath, probes: &Cell<u64>) -> bool {
+        bump(probes);
         // Paths are keyed by ArchivePath, which orders by stored bytes; probe
         // with byte bounds via a stored-form scan of the smallest candidate.
         let (lo, hi) = descendant_range(dir);
@@ -166,16 +175,17 @@ impl Snapshot {
             .is_some()
     }
 
-    fn check_parent(&self, path: &ArchivePath) -> Result<(), NamespaceFault> {
-        match path.parent() {
-            None => Ok(()),
-            Some(parent) => match self.entries.get(&parent) {
-                None => Err(NamespaceFault::MissingParent { path: path.clone() }),
-                Some(e) if e.kind != EntryKind::Directory => {
-                    Err(NamespaceFault::ParentNotDirectory { path: path.clone() })
-                }
-                Some(_) => Ok(()),
-            },
+    fn check_parent(&self, path: &ArchivePath, probes: &Cell<u64>) -> Result<(), NamespaceFault> {
+        let Some(parent) = path.parent() else {
+            return Ok(());
+        };
+        bump(probes);
+        match self.entries.get(&parent) {
+            None => Err(NamespaceFault::MissingParent { path: path.clone() }),
+            Some(e) if e.kind != EntryKind::Directory => {
+                Err(NamespaceFault::ParentNotDirectory { path: path.clone() })
+            }
+            Some(_) => Ok(()),
         }
     }
 
@@ -193,7 +203,8 @@ impl Snapshot {
         ops: &[NamespaceOp],
         kind_of: impl Fn(&FileVersionId) -> Option<EntryKind>,
     ) -> Result<(), NamespaceFault> {
-        self.apply_commit_staged(ops, kind_of).map(drop)
+        self.apply_commit_staged(ops, kind_of, &Cell::new(0))
+            .map(drop)
     }
 
     /// As [`Snapshot::apply_commit`], but on success also returns the undo
@@ -203,26 +214,32 @@ impl Snapshot {
     /// proportional to the commit's operations, never to the namespace, so
     /// staging needs no copy of the snapshot (T12 atomicity; review
     /// 2026-10-02 amendment 1).
+    ///
+    /// `probes` is incremented once per lookup in the snapshot (a point
+    /// lookup or a descendant-range probe): the namespace half of the
+    /// declared per-operation work (`super::bounds`, D10.5).
     pub(crate) fn apply_commit_staged(
         &mut self,
         ops: &[NamespaceOp],
         kind_of: impl Fn(&FileVersionId) -> Option<EntryKind>,
+        probes: &Cell<u64>,
     ) -> Result<NamespaceUndo, NamespaceFault> {
         let mut undo: Vec<(ArchivePath, Option<Entry>)> = Vec::with_capacity(ops.len());
         let result = self
             .apply_ops(ops, &kind_of, &mut undo)
             .and_then(|touched| {
                 for path in &touched {
+                    bump(probes);
                     match self.entries.get(path) {
                         Some(entry) => {
-                            self.check_parent(path)?;
-                            if entry.kind == EntryKind::File && self.has_descendants(path) {
-                                return Err(self.first_orphan(path));
+                            self.check_parent(path, probes)?;
+                            if entry.kind == EntryKind::File && self.has_descendants(path, probes) {
+                                return Err(self.first_orphan(path, probes));
                             }
                         }
                         None => {
-                            if self.has_descendants(path) {
-                                return Err(self.first_orphan(path));
+                            if self.has_descendants(path, probes) {
+                                return Err(self.first_orphan(path, probes));
                             }
                         }
                     }
@@ -248,7 +265,8 @@ impl Snapshot {
         }
     }
 
-    fn first_orphan(&self, dir: &ArchivePath) -> NamespaceFault {
+    fn first_orphan(&self, dir: &ArchivePath, probes: &Cell<u64>) -> NamespaceFault {
+        probes.set(probes.get() + 2); // the range probe and `contains_key`
         let (lo, hi) = descendant_range(dir);
         let (Bound::Excluded(lo), Bound::Excluded(hi)) = (lo, hi) else {
             return NamespaceFault::MissingParent { path: dir.clone() };
@@ -303,11 +321,16 @@ impl Snapshot {
     /// Full re-validation of every entry. O(n log n); used by verification
     /// and as the reference for the incremental check.
     pub fn validate_all(&self) -> Result<(), NamespaceFault> {
+        let probes = Cell::new(0);
         for path in self.entries.keys() {
-            self.check_parent(path)?;
+            self.check_parent(path, &probes)?;
         }
         Ok(())
     }
+}
+
+fn bump(probes: &Cell<u64>) {
+    probes.set(probes.get().saturating_add(1));
 }
 
 #[cfg(test)]

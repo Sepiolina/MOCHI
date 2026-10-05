@@ -22,6 +22,9 @@ getrandom.workspace = true
 rusqlite.workspace = true
 
 [dev-dependencies]
+# `trace`: the T13 work-bound tests count SQL statements and full-scan steps
+# with SQLite's own profiler, independently of the code under test.
+rusqlite = { workspace = true, features = ["trace"] }
 serde_json.workspace = true
 tempfile.workspace = true
 

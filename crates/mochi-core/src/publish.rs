@@ -6,7 +6,8 @@
 //! EOF if it validates (§8.4), otherwise the last valid footer found by a
 //! forward structural scan, because "a previous valid footer may lie before
 //! an incomplete tail" (§12.2). Bytes after that footer are the *tail*;
-//! [`TailState`] says whether they are provably uncommitted. [`open_head`]
+//! [`TailState`] says whether they are *eligible* for explicit truncation
+//! (Annex B.2 D14: a conservative screen, not proof). [`open_head`]
 //! then follows footer → commit record → archive descriptor, delta manifest,
 //! and catalog image, **verifying each referenced object's stored-object hash
 //! before parsing it**; the image's binary envelope is then bound to the
@@ -361,9 +362,13 @@ pub enum HeadSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TailState {
     Clean,
-    /// Provably uncommitted (an interrupted write): complete frames other
-    /// than footers, then at most one frame cut short by end of file, and no
-    /// footer pattern anywhere in its bytes.
+    /// Eligible for explicit truncation (Annex B.2 D14): complete frames
+    /// other than footers and descriptors, then at most one frame cut short
+    /// by end of file, no footer marker where a complete footer could fit,
+    /// and no unrecognised bytes. This is what an interrupted write leaves,
+    /// but it is a conservative screen, **not proof**: one corruption event
+    /// can erase both footer markers of a later commit. (The variant keeps
+    /// its C5 name; the error code `UNCOMMITTED_TAIL` is stable.)
     Uncommitted {
         len: u64,
         frames: Vec<FrameKind>,
@@ -459,19 +464,26 @@ pub fn locate_head(src: &dyn ReadStorage, limits: &Limits) -> Result<HeadLocatio
     })
 }
 
-/// Decide whether `src[from..]` is provably uncommitted.
+/// Decide whether `src[from..]` is *eligible* for explicit truncation
+/// (Annex B.2 D14). Eligibility is a conservative screen, not proof that the
+/// tail is uncommitted.
 ///
-/// Conservative by design, because a wrong "uncommitted" verdict licenses
-/// destroying a commit. A crash under the §12.2 protocol leaves complete
-/// frames followed by at most one frame cut short at EOF, and never a
-/// *complete* footer (the footer is written last, after a sync). So the tail
-/// is `Uncommitted` only if:
+/// Conservative by design, because a wrong verdict licenses destroying a
+/// commit. A crash under the §12.2 protocol leaves complete frames followed
+/// by at most one frame cut short at EOF, and never a *complete* footer (the
+/// footer is written last, after a sync). So the tail is eligible
+/// (`Uncommitted`) only if (the D14 conditions):
 ///
-/// (a) it walks as complete non-footer frames, optionally ending in one frame
-///     that runs past EOF; and
+/// (a) it walks as complete frames that are neither footers nor descriptors,
+///     optionally ending in one frame that runs past EOF, and contains no
+///     unrecognised bytes;
 /// (b) no *complete* footer could be hiding in it: neither the footer's
 ///     skippable header nor its payload magic occurs at any byte position
-///     from which a whole 72-byte footer would still fit before EOF.
+///     from which a whole 72-byte footer would still fit before EOF; and
+/// (c) it contains no descriptor frame. The only descriptor is at offset 0
+///     (D12), so one in the tail is damage or a forgery, and a footer whose
+///     header was flipped to the descriptor kind (`0x57`) must not make the
+///     tail look like ordinary frames.
 ///
 /// Rule (b) catches a later, damaged commit whose footer the walk cannot
 /// reach (for example after a bit flip in an earlier frame's length field).
@@ -524,8 +536,29 @@ fn classify_tail(r: &StorageReader<'_>, from: u64, limits: &Limits) -> Result<Ta
                     span.offset
                 ));
             }
+            // D14 (c). The walker already refuses a descriptor away from
+            // offset 0 (below); this arm keeps the rule if that ever changes.
+            Ok(span) if span.kind == FrameKind::ArchiveDescriptor => {
+                return unresolved(descriptor_in_tail(span.offset));
+            }
+            Err(FormatError::MisplacedFrame { offset, magic })
+                if magic == registry::ARCHIVE_DESCRIPTOR =>
+            {
+                return unresolved(descriptor_in_tail(offset));
+            }
             Ok(span) => frames.push(span.kind),
             Err(FormatError::Truncated { .. }) => {
+                // D14 (c) for the frame cut short by EOF too: no commit writes
+                // a descriptor after offset 0, so a cut-short one is not a torn
+                // write. (The walker refuses it first today; checked here so
+                // the rule does not rest on that.)
+                let at = walker.position();
+                let mut magic = [0u8; 4];
+                if mochi_format::ReadAt::read_at(r, at, &mut magic).is_ok()
+                    && u32::from_le_bytes(magic) == registry::ARCHIVE_DESCRIPTOR
+                {
+                    return unresolved(descriptor_in_tail(at));
+                }
                 return Ok(TailState::Uncommitted {
                     len,
                     frames,
@@ -548,6 +581,13 @@ fn classify_tail(r: &StorageReader<'_>, from: u64, limits: &Limits) -> Result<Ta
         frames,
         incomplete_final_frame: false,
     })
+}
+
+fn descriptor_in_tail(offset: u64) -> String {
+    format!(
+        "a descriptor frame at offset {offset} follows the last valid commit; a tail \
+         containing one is never eligible for truncation (D14)"
+    )
 }
 
 /// First offset `p` with `from <= p` and `p + pat.len() <= end` where `pat`
@@ -1622,8 +1662,9 @@ pub fn recover_with_trusted_head(
 pub enum TailPolicy {
     /// Refuse with [`ErrorCode::UncommittedTail`].
     Refuse,
-    /// Truncate a *provably* uncommitted tail and return an audit record. An
-    /// unresolved tail is still refused ([`ErrorCode::TailUnresolved`]).
+    /// Truncate a tail that is *eligible* (D14; [`TailState::Uncommitted`])
+    /// and return an audit record. An unresolved tail is still refused
+    /// ([`ErrorCode::TailUnresolved`]). Eligibility is not proof.
     TruncateUncommitted,
 }
 
@@ -2088,8 +2129,9 @@ impl<S: Storage> ArchiveWriter<S> {
                 return Err(MochiError::new(
                     ErrorCode::UncommittedTail,
                     format!(
-                        "{len} uncommitted bytes follow the last valid commit (an interrupted \
-                         write); appending needs them removed first"
+                        "{len} bytes follow the last valid commit; they look like an interrupted \
+                         write (eligible for explicit truncation, D14), and appending needs them \
+                         removed first"
                     ),
                 ));
             }

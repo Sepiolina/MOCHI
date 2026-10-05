@@ -75,12 +75,13 @@ pub enum ErrorCode {
     /// §8.4, §12.2): it was never committed, or every footer is damaged.
     /// Added in C5.
     NoValidHead,
-    /// Bytes follow the last valid commit and are provably uncommitted (an
-    /// interrupted write, spec §12.2). Appending is refused until they are
+    /// Bytes follow the last valid commit and are *eligible* for truncation
+    /// (Annex B.2 D14: they look like an interrupted write; a conservative
+    /// screen, not proof). Appending is refused until they are
     /// removed by an explicit, audited truncation. Added in C5.
     UncommittedTail,
-    /// Bytes follow the last valid commit and cannot be proven uncommitted:
-    /// they may hold a damaged later commit (spec §12.2, §22). Truncation is
+    /// Bytes follow the last valid commit and are not eligible for
+    /// truncation (Annex B.2 D14): they may hold a damaged later commit (spec §12.2, §22). Truncation is
     /// refused; this needs the repair workflow. Added in C5.
     TailUnresolved,
     /// A failure after the footer was appended (spec §12.2 steps 7–9): the

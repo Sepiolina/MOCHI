@@ -385,7 +385,7 @@ fn truncation_at_every_byte_accepts_no_invalid_commit() {
                 assert_eq!(loc.committed_len, ends[k], "len {l}");
                 let exact = l == ends[k];
                 assert_eq!(loc.source == HeadSource::Eof, exact, "len {l}");
-                // A cut-short commit is always provably uncommitted.
+                // A cut-short commit is always eligible (D14).
                 if !exact {
                     assert!(
                         matches!(loc.tail, TailState::Uncommitted { .. }),

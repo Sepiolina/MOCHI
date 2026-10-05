@@ -805,6 +805,75 @@ pub fn open_at_footer(
     Ok(open_at(src, location, opts, OpenMode::Read)?.head)
 }
 
+/// The promised attributes (spec §10.4.1, D6) of every version reachable in
+/// an opened commit, for restoration (plan C6).
+///
+/// The catalog does not hold attributes (B.2 checklist question 6); the
+/// manifests do. They are rebuilt as appending rebuilds them: the segment
+/// base's snapshot manifest S(*b*), then each delta of the segment in order,
+/// every manifest hash-verified against its commit before it is decoded. A
+/// version introduced twice is `RECORD_INVALID` (D10.4), and a reachable
+/// version without attributes is `RECORD_INVALID` (D10.3). A damaged S(*b*)
+/// is an error here, although the commit's files remain readable (Q31):
+/// the caller reports attributes as unavailable rather than guessing them.
+pub fn promised_attributes(
+    src: &dyn ReadStorage,
+    head: &OpenedHead,
+    opts: &ReadOptions,
+) -> Result<BTreeMap<FileVersionId, Attributes>> {
+    let head_entry = HistoryEntry {
+        footer_offset: head.location.footer.footer_offset,
+        commit_offset: head.location.footer.fields.commit_offset,
+        commit: head.commit.clone(),
+        commit_id: head.commit_id,
+    };
+    let (entries, _) = walk_segment(src, head_entry, opts)?;
+    let Some(base) = entries.first() else {
+        return Err(MochiError::new(
+            ErrorCode::InvalidArgument,
+            "internal: an empty replay segment",
+        ));
+    };
+    let s_b = read_bound_manifest(
+        src,
+        &base.commit,
+        &checkpoint_snapshot_ref(&base.commit)?,
+        base.commit_offset,
+        ManifestKind::Snapshot,
+        opts,
+    )?;
+    let mut map: BTreeMap<FileVersionId, Attributes> = s_b
+        .file_versions
+        .iter()
+        .map(|v| (v.version.id, v.attributes))
+        .collect();
+    for pair in entries.windows(2) {
+        let (prev, e) = (&pair[0], &pair[1]);
+        let delta = read_bound_manifest(
+            src,
+            &e.commit,
+            &e.commit.delta_manifest,
+            e.commit_offset,
+            ManifestKind::Delta,
+            opts,
+        )?;
+        check_delta_parent_link(&delta, &prev.commit)?;
+        for v in &delta.file_versions {
+            if map.insert(v.version.id, v.attributes).is_some() {
+                return Err(MochiError::new(
+                    ErrorCode::RecordInvalid,
+                    format!(
+                        "delta manifest {} introduces a version the base snapshot already \
+                         lists (D10.4)",
+                        delta.commit_seq
+                    ),
+                ));
+            }
+        }
+    }
+    reachable_attributes(&head.catalog.replay(None)?, map)
+}
+
 /// D12: a descriptor that cannot be loaded, hash-verified, or decoded, or
 /// that names another archive, is `DESCRIPTOR_INVALID`. Refusals
 /// (`UNSUPPORTED_FEATURE`), reader limits, and I/O keep their codes.

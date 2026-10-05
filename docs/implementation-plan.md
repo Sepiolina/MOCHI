@@ -196,10 +196,18 @@ Each phase ends with a working, tested artifact. "Fault-matrix rows" refers to t
     - the real filesystem, restored twice: the second run collides everywhere and keeps a locally edited file. On Windows the hostile fixture name is reported as unsupported.
   - **Mutations:** 15, all killed (two after adding the nested-subtree and directory-cancellation tests).
   - **Open:**
-    - Attributes (O6) are not restored yet; the report says so, with a warning finding. They need the snapshot manifest's per-version attributes exposed (B.2 checklist question 6).
     - `OsRestoreDir` is path-based. A local process that swaps a just-created directory for a symbolic link could redirect later writes; descriptor-relative operations (`openat` with `O_NOFOLLOW` on Linux) are the remedy.
     - Up-front case-insensitivity detection (collisions are already caught as they happen).
     - The §27 decomposed read benchmarks.
+- **Status (C6 attributes, 2026-10-05).** `publish::promised_attributes` rebuilds an opened commit's promised attributes as appending does: the segment base's snapshot manifest, then each delta in order, each manifest hash-verified against its commit. A reintroduced version or a reachable version without attributes is `RECORD_INVALID`.
+  - **How restore applies them:** files right after they are published; directories at the end, deepest first, so creating children neither disturbs a directory's time nor needs write permission it no longer has. Every attribute not applied is an `ATTRIBUTE_NOT_RESTORED` exception (new code), summarised as one finding per kind with a count and the first path.
+  - **If attributes cannot be reconstructed** (for example a damaged snapshot manifest), content is still restored and verified, nothing is guessed, and the report says the attributes were unavailable.
+  - **Rules (O6; the platform mappings are delegated decisions):**
+    - Setuid and setgid are removed unless `RestoreOptions::restore_setid` is set, and the removal is reported. The sticky bit is kept.
+    - **Unix:** the time (nanoseconds), then the owner (attempted; a refusal is reported, which is the unprivileged case), then the mode. The Windows read-only bit clears the write bits. Hidden and system are reported. The archive bit is ignored.
+    - **Windows:** the time and the read-only bit (from the Windows bits, or from POSIX write bits). Hidden and system are reported, because they need `SetFileAttributesW` and `mochi-core` has no `unsafe` (Q63). A POSIX owner and the POSIX bits Windows cannot hold are reported.
+  - **Tests:** `c6_restore_attributes.rs` (8) covers exact attributes for every entry, directory order (nested), setuid and setgid with and without the request, a refused owner summarised once, attributes unavailable after a damaged snapshot manifest, attributes from delta manifests, and on the real filesystem the time to the nanosecond, the mode, ownership both privileged and unprivileged, and Windows-authored bits on Unix. All restore tests also pass as an unprivileged user here.
+  - **Mutations:** 11 run; 10 killed (one only when unprivileged, as CI runs). One is equivalent: an empty map instead of none applies nothing either way.
 
 ### C7 — Verification, health, and reports
 - Levels: structural, referential, stored integrity, content integrity, restoration (§20.1). Inventory, search, and disaster-recovery levels return `UNSUPPORTED` in 1.0 unless implemented.

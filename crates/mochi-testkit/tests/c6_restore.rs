@@ -7,7 +7,7 @@ use mochi_core::job::{CancellationToken, JobContext, NullProgress};
 use mochi_core::manifest::Attributes;
 use mochi_core::publish::{open_head, ArchiveWriter, ReadOptions, Transaction};
 use mochi_core::report::Severity;
-use mochi_core::restore::{restore, ExceptionKind, RestoreReport};
+use mochi_core::restore::{restore, ExceptionKind, RestoreOptions, RestoreReport};
 use mochi_core::storage::os::OsRestoreDir;
 use mochi_core::storage::{DirectoryDurability, NameIssue, RestoreDir};
 use mochi_core::ErrorCode;
@@ -42,7 +42,16 @@ fn scripted() -> SimStorage {
 fn run<D: RestoreDir>(s: &SimStorage, under: Option<&str>, root: D) -> RestoreReport {
     let head = open_head(s, &opts()).unwrap();
     let under = under.map(path);
-    restore(s, &head, under.as_ref(), root, &opts(), &Job::new().ctx()).unwrap()
+    restore(
+        s,
+        &head,
+        under.as_ref(),
+        root,
+        &RestoreOptions::default(),
+        &opts(),
+        &Job::new().ctx(),
+    )
+    .unwrap()
 }
 
 fn exception(r: &RestoreReport, p: &str) -> Option<ExceptionKind> {
@@ -82,13 +91,8 @@ fn c6_restore_the_head() {
     assert_eq!(r.directories, (model.len() - files as usize) as u64);
     assert_eq!(tree.paths().len(), model.len());
     assert_eq!(r.directory_durability, DirectoryDurability::Confirmed);
-    assert!(!r.attributes_restored);
-    let f = r.findings();
-    assert_eq!(f.len(), 1);
-    assert_eq!(
-        (f[0].code, f[0].severity),
-        (ErrorCode::UnsupportedFeature, Severity::Warning)
-    );
+    assert!(r.attributes_complete(), "{:?}", r.attribute_exceptions);
+    assert!(r.findings().is_empty());
 }
 
 /// **C6 exit (naming collision).** On a case-insensitive destination, the
@@ -249,6 +253,7 @@ fn c6_restore_a_subtree() {
         &head,
         Some(&path("missing")),
         SimTree::new(),
+        &RestoreOptions::default(),
         &opts(),
         &Job::new().ctx(),
     )
@@ -268,7 +273,16 @@ fn c6_restore_cancellation() {
         cancel: &cancel,
     };
     let tree = SimTree::new();
-    let e = restore(&s, &head, None, tree.clone(), &opts(), &ctx).unwrap_err();
+    let e = restore(
+        &s,
+        &head,
+        None,
+        tree.clone(),
+        &RestoreOptions::default(),
+        &opts(),
+        &ctx,
+    )
+    .unwrap_err();
     assert_eq!(e.code, ErrorCode::Cancelled);
     assert!(tree.paths().is_empty());
 }
@@ -363,7 +377,16 @@ fn c6_restore_cancellation_before_a_directory() {
         cancel: &cancel,
     };
     let tree = SimTree::new();
-    let e = restore(&s, &head, None, tree.clone(), &opts(), &ctx).unwrap_err();
+    let e = restore(
+        &s,
+        &head,
+        None,
+        tree.clone(),
+        &RestoreOptions::default(),
+        &opts(),
+        &ctx,
+    )
+    .unwrap_err();
     assert_eq!(e.code, ErrorCode::Cancelled);
     assert!(tree.paths().is_empty(), "{:?}", tree.paths());
 }

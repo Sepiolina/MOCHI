@@ -132,6 +132,11 @@ pub enum ErrorCode {
     /// not altered; the entry was skipped (spec §10.4, §23.3 #7). A report
     /// finding; exit 3 if ever returned as an error. Added in C6.
     NameUnsupported,
+    /// Restoration: a promised attribute (mode, owner, time, Windows bits:
+    /// plan O6) could not be applied, or attributes were unavailable. The
+    /// file's content was restored. Spec §10.4.1. A report finding; exit 3 if
+    /// ever returned as an error. Added in C6.
+    AttributeNotRestored,
 }
 
 impl ErrorCode {
@@ -173,6 +178,7 @@ impl ErrorCode {
         ErrorCode::ProfileChangeUnsupported,
         ErrorCode::NameCollision,
         ErrorCode::NameUnsupported,
+        ErrorCode::AttributeNotRestored,
     ];
 
     /// The stable string form. Independent of serde so it cannot drift silently;
@@ -215,6 +221,7 @@ impl ErrorCode {
             ErrorCode::ProfileChangeUnsupported => "PROFILE_CHANGE_UNSUPPORTED",
             ErrorCode::NameCollision => "NAME_COLLISION",
             ErrorCode::NameUnsupported => "NAME_UNSUPPORTED",
+            ErrorCode::AttributeNotRestored => "ATTRIBUTE_NOT_RESTORED",
         }
     }
 }
@@ -339,6 +346,7 @@ mod tests {
         "PROFILE_CHANGE_UNSUPPORTED",
         "NAME_COLLISION",
         "NAME_UNSUPPORTED",
+        "ATTRIBUTE_NOT_RESTORED",
     ];
 
     #[test]

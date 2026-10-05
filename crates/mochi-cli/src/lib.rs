@@ -78,7 +78,8 @@ pub fn exit_code_for(code: ErrorCode) -> u8 {
         | ErrorCode::QuarantineFailed
         | ErrorCode::DurabilityUnconfirmed
         | ErrorCode::NameCollision
-        | ErrorCode::NameUnsupported => exit::ERROR,
+        | ErrorCode::NameUnsupported
+        | ErrorCode::AttributeNotRestored => exit::ERROR,
     }
 }
 

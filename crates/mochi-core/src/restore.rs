@@ -26,20 +26,32 @@
 //!   and code ([`RestoreReport`]). Only cancellation and failures of the
 //!   destination itself end the job early.
 //!
-//! **Not restored yet:** attributes (mode, ownership, times, Windows
-//! attribute bits: plan O6). The report says so (`attributes_restored:
-//! false`), and its findings include a warning that names them.
+//! * **Attributes** (plan O6, spec §10.4.1) come from the manifests
+//!   ([`crate::publish::promised_attributes`]). They are applied after a
+//!   file is published, and to directories at the end, deepest first, so
+//!   creating children does not disturb a directory's time or need write
+//!   permission it no longer has. Setuid and setgid are removed unless
+//!   [`RestoreOptions::restore_setid`] asks for them. Whatever the
+//!   destination cannot apply is an `ATTRIBUTE_NOT_RESTORED` exception
+//!   ([`RestoreReport::attribute_exceptions`]). If the attributes cannot be
+//!   reconstructed at all (a damaged snapshot manifest), content is still
+//!   restored and the report says the attributes were unavailable.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 
-use crate::catalog::namespace::EntryKind;
+use crate::catalog::namespace::{EntryKind, FileVersionId};
 use crate::catalog::path::ArchivePath;
 use crate::error::{ErrorCode, MochiError, Result};
 use crate::job::JobContext;
-use crate::publish::{OpenedHead, ReadOptions};
+use crate::manifest::Attributes;
+use crate::publish::{promised_attributes, OpenedHead, ReadOptions};
 use crate::read::read_file_in;
 use crate::report::{Finding, Severity};
-use crate::storage::{DirectoryDurability, NameIssue, RestoreDir, Storage, StorageError};
+use crate::storage::{
+    AttributeIssue, AttributeKind, DirectoryDurability, NameIssue, RestoreDir, Storage,
+    StorageError,
+};
 
 /// Progress phase of [`restore`]: `completed` is entries handled.
 pub const RESTORE_PHASE: &str = "restore";
@@ -47,6 +59,17 @@ pub const RESTORE_PHASE: &str = "restore";
 /// How many temporary names are tried in one directory before giving up
 /// (each collides only with an archive name of the same form).
 const TEMP_ATTEMPTS: u32 = 64;
+
+/// What the caller asks of a restoration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RestoreOptions {
+    /// Restore setuid and setgid bits (plan O6: only on explicit request;
+    /// from an untrusted archive they are a privilege-escalation risk).
+    pub restore_setid: bool,
+}
+
+/// The setuid and setgid bits.
+const SETID_BITS: u32 = 0o6000;
 
 /// Why one entry was not restored.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +108,13 @@ pub struct RestoreException {
     pub kind: ExceptionKind,
 }
 
+/// One attribute that was not applied to a restored entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttributeException {
+    pub path: ArchivePath,
+    pub issue: AttributeIssue,
+}
+
 /// What a restoration did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestoreReport {
@@ -95,19 +125,28 @@ pub struct RestoreReport {
     pub exceptions: Vec<RestoreException>,
     /// The weakest directory flush: `Unconfirmed` if any flush was.
     pub directory_durability: DirectoryDurability,
-    /// Always `false` until attribute restoration lands (plan O6).
-    pub attributes_restored: bool,
+    /// `None` if the promised attributes were reconstructed and applied;
+    /// otherwise why they were unavailable (nothing was applied).
+    pub attributes_unavailable: Option<String>,
+    /// Attributes that were not applied to restored entries.
+    pub attribute_exceptions: Vec<AttributeException>,
 }
 
 impl RestoreReport {
-    /// Every selected entry was restored, verified, with no exception.
-    /// Attributes are reported separately ([`Self::attributes_restored`]).
+    /// Every selected entry was restored and verified, with no exception.
+    /// Attributes are reported separately ([`Self::attributes_complete`]).
     pub fn complete(&self) -> bool {
         self.exceptions.is_empty()
     }
 
-    /// The report findings: one per exception, plus a warning that
-    /// attributes were not restored.
+    /// Every restored entry received all its promised attributes.
+    pub fn attributes_complete(&self) -> bool {
+        self.attributes_unavailable.is_none() && self.attribute_exceptions.is_empty()
+    }
+
+    /// The report findings: one per entry exception; one per kind of
+    /// attribute that was not applied, with a count and the first path; and
+    /// one if attributes were unavailable.
     pub fn findings(&self) -> Vec<Finding> {
         let mut out: Vec<Finding> = self
             .exceptions
@@ -143,19 +182,30 @@ impl RestoreReport {
                 }
             })
             .collect();
-        if !self.attributes_restored {
-            out.push(Finding {
-                code: ErrorCode::UnsupportedFeature,
-                severity: Severity::Warning,
-                message: Some(
-                    "attributes (permissions, ownership, times, Windows attribute bits) were \
-                     not restored: not implemented in this build"
-                        .into(),
-                ),
-                expected: None,
-                observed: None,
-                affected: None,
-            });
+        let warn = |message: String| Finding {
+            code: ErrorCode::AttributeNotRestored,
+            severity: Severity::Warning,
+            message: Some(message),
+            expected: None,
+            observed: None,
+            affected: None,
+        };
+        if let Some(why) = &self.attributes_unavailable {
+            out.push(warn(format!(
+                "no attributes were restored: they could not be reconstructed ({why})"
+            )));
+        }
+        let mut by_kind: BTreeMap<AttributeKind, (u64, &AttributeException)> = BTreeMap::new();
+        for e in &self.attribute_exceptions {
+            by_kind.entry(e.issue.attribute).or_insert((0, e)).0 += 1;
+        }
+        for (kind, (count, first)) in by_kind {
+            out.push(warn(format!(
+                "{kind:?} was not restored on {count} entr{}, first {:?}: {}",
+                if count == 1 { "y" } else { "ies" },
+                String::from_utf8_lossy(first.path.as_stored()),
+                first.issue.reason
+            )));
         }
         out
     }
@@ -208,6 +258,7 @@ pub fn restore<D: RestoreDir>(
     head: &OpenedHead,
     under: Option<&ArchivePath>,
     root: D,
+    options: &RestoreOptions,
     opts: &ReadOptions,
     ctx: &JobContext<'_>,
 ) -> Result<RestoreReport> {
@@ -225,13 +276,13 @@ pub fn restore<D: RestoreDir>(
             ));
         }
     }
-    let selected: Vec<(ArchivePath, EntryKind)> = snapshot
+    let selected: Vec<(ArchivePath, EntryKind, FileVersionId)> = snapshot
         .iter()
         .filter(|(p, _)| match under {
             None => true,
             Some(u) => p.is_descendant_of(u) || *p == u || u.is_descendant_of(p),
         })
-        .map(|(p, e)| (p.clone(), e.kind))
+        .map(|(p, e)| (p.clone(), e.kind, e.version))
         .collect();
     let total = selected.len() as u64;
 
@@ -241,8 +292,37 @@ pub fn restore<D: RestoreDir>(
         bytes: 0,
         exceptions: Vec::new(),
         directory_durability: DirectoryDurability::Confirmed,
-        attributes_restored: false,
+        attributes_unavailable: None,
+        attribute_exceptions: Vec::new(),
     };
+    let attributes: Option<BTreeMap<FileVersionId, Attributes>> =
+        match promised_attributes(src, head, opts) {
+            Ok(a) => Some(a),
+            Err(e) => {
+                report.attributes_unavailable = Some(e.to_string());
+                None
+            }
+        };
+    // The attributes to apply, setuid and setgid removed unless requested.
+    let effective = |version: &FileVersionId, path: &ArchivePath| {
+        let mut a = *attributes.as_ref()?.get(version)?;
+        let mut issue = None;
+        if let Some(p) = a.posix.as_mut() {
+            if p.mode & SETID_BITS != 0 && !options.restore_setid {
+                p.mode &= !SETID_BITS;
+                issue = Some(AttributeException {
+                    path: path.clone(),
+                    issue: AttributeIssue {
+                        attribute: AttributeKind::SetId,
+                        reason: "setuid/setgid are restored only on request".into(),
+                    },
+                });
+            }
+        }
+        Some((a, issue))
+    };
+    // Restored directories, for their attributes at the end.
+    let mut restored_dirs: Vec<(ArchivePath, FileVersionId)> = Vec::new();
     // Directories this restoration created, by archive path. `None` key is
     // the root.
     let mut dirs: std::collections::HashMap<Option<ArchivePath>, D> =
@@ -254,7 +334,7 @@ pub fn restore<D: RestoreDir>(
     let mut temp_seq = 0u64;
 
     ctx.report(RESTORE_PHASE, 0, Some(total));
-    for (done, (path, kind)) in selected.iter().enumerate() {
+    for (done, (path, kind, version)) in selected.iter().enumerate() {
         ctx.check_cancelled()?;
         let is_dir = *kind == EntryKind::Directory;
         let parent_path = path.parent();
@@ -287,6 +367,7 @@ pub fn restore<D: RestoreDir>(
                 Ok(child) => {
                     report.directories += 1;
                     dirs.insert(Some(path.clone()), child);
+                    restored_dirs.push((path.clone(), *version));
                 }
                 Err(StorageError::Exists { .. }) => except(ExceptionKind::Collision),
                 Err(e) => {
@@ -330,6 +411,16 @@ pub fn restore<D: RestoreDir>(
                             drop(file);
                             report.files += 1;
                             report.bytes += r.logical_len;
+                            if let Some((a, setid)) = effective(version, path) {
+                                report.attribute_exceptions.extend(setid);
+                                let issues = parent.apply_attributes(name, EntryKind::File, &a);
+                                report.attribute_exceptions.extend(issues.into_iter().map(
+                                    |issue| AttributeException {
+                                        path: path.clone(),
+                                        issue,
+                                    },
+                                ));
+                            }
                         }
                         Err(StorageError::Exists { .. }) => {
                             parent.discard(file, &temp)?;
@@ -362,6 +453,24 @@ pub fn restore<D: RestoreDir>(
             }
         }
         ctx.report(RESTORE_PHASE, done as u64 + 1, Some(total));
+    }
+
+    // Directory attributes last, deepest first (reverse byte order puts
+    // every descendant before its ancestors).
+    for (path, version) in restored_dirs.iter().rev() {
+        let Some((a, setid)) = effective(version, path) else {
+            continue;
+        };
+        report.attribute_exceptions.extend(setid);
+        if let Some(parent) = dirs.get_mut(&path.parent()) {
+            let issues = parent.apply_attributes(last_component(path), EntryKind::Directory, &a);
+            report
+                .attribute_exceptions
+                .extend(issues.into_iter().map(|issue| AttributeException {
+                    path: path.clone(),
+                    issue,
+                }));
+        }
     }
 
     // Persist every directory's entries, the root's included.

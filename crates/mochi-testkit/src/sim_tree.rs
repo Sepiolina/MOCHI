@@ -6,8 +6,11 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use mochi_core::catalog::namespace::EntryKind;
+use mochi_core::manifest::Attributes;
 use mochi_core::storage::{
-    windows_name_issue, DirectoryDurability, NameIssue, RestoreDir, StorageError,
+    windows_name_issue, AttributeIssue, AttributeKind, DirectoryDurability, NameIssue, RestoreDir,
+    StorageError,
 };
 
 use crate::SimStorage;
@@ -23,8 +26,12 @@ struct Tree {
     /// Full path (components) → node. The root is the empty path and is
     /// implicit.
     nodes: BTreeMap<Vec<Vec<u8>>, Node>,
+    /// Attributes applied to each path, in the order applied.
+    attributes: BTreeMap<Vec<Vec<u8>>, Attributes>,
+    applied: Vec<Vec<Vec<u8>>>,
     case_insensitive: bool,
     windows_rules: bool,
+    unprivileged: bool,
 }
 
 impl Tree {
@@ -75,6 +82,34 @@ impl SimTree {
     pub fn case_insensitive(self) -> Self {
         self.tree.lock().unwrap().case_insensitive = true;
         self
+    }
+
+    /// Refuse ownership changes, as an unprivileged process is refused.
+    pub fn unprivileged(self) -> Self {
+        self.tree.lock().unwrap().unprivileged = true;
+        self
+    }
+
+    /// The attributes applied to `path` (components joined by `/`).
+    pub fn attributes(&self, path: &[u8]) -> Option<Attributes> {
+        let p: Vec<Vec<u8>> = path.split(|b| *b == b'/').map(<[u8]>::to_vec).collect();
+        self.tree.lock().unwrap().attributes.get(&p).copied()
+    }
+
+    /// The paths attributes were applied to, in order.
+    pub fn applied_order(&self) -> Vec<String> {
+        self.tree
+            .lock()
+            .unwrap()
+            .applied
+            .iter()
+            .map(|k| {
+                k.iter()
+                    .map(|c| String::from_utf8_lossy(c).into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            })
+            .collect()
     }
 
     /// Apply Windows naming rules (`windows_name_issue`).
@@ -187,5 +222,30 @@ impl RestoreDir for SimTree {
 
     fn sync_directory(&mut self) -> Result<DirectoryDurability, StorageError> {
         Ok(DirectoryDurability::Confirmed)
+    }
+
+    fn apply_attributes(
+        &mut self,
+        name: &[u8],
+        _kind: EntryKind,
+        attributes: &Attributes,
+    ) -> Vec<AttributeIssue> {
+        let mut t = self.tree.lock().unwrap();
+        let p = self.child(name);
+        let mut applied = *attributes;
+        let mut issues = Vec::new();
+        if t.unprivileged && attributes.posix.is_some() {
+            issues.push(AttributeIssue {
+                attribute: AttributeKind::Ownership,
+                reason: "operation not permitted".into(),
+            });
+            if let Some(posix) = applied.posix.as_mut() {
+                posix.uid = u32::MAX;
+                posix.gid = u32::MAX;
+            }
+        }
+        t.attributes.insert(p.clone(), applied);
+        t.applied.push(p);
+        issues
     }
 }

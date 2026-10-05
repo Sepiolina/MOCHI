@@ -322,6 +322,42 @@ pub trait RestoreDir: Sized {
 
     /// Persist this directory's entries.
     fn sync_directory(&mut self) -> Result<DirectoryDurability, StorageError>;
+
+    /// Apply promised attributes (plan O6) to the entry `name`, which this
+    /// restoration created. Returns what could not be applied; never fails
+    /// the restoration. The engine has already removed setuid and setgid
+    /// unless they were requested.
+    fn apply_attributes(
+        &mut self,
+        name: &[u8],
+        kind: crate::catalog::namespace::EntryKind,
+        attributes: &crate::manifest::Attributes,
+    ) -> Vec<AttributeIssue>;
+}
+
+/// An attribute restoration could not apply (spec §10.4.1: "Restoration
+/// MUST report unrestorable attributes as exceptions").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum AttributeKind {
+    /// The modification time.
+    Mtime,
+    /// POSIX permission bits.
+    Mode,
+    /// Setuid or setgid, not restored because it was not requested (O6).
+    SetId,
+    /// Numeric owner and group (needs privilege, O6).
+    Ownership,
+    /// The Windows read-only bit.
+    ReadOnly,
+    /// The Windows hidden or system bit.
+    HiddenOrSystem,
+}
+
+/// One attribute that was not applied, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttributeIssue {
+    pub attribute: AttributeKind,
+    pub reason: String,
 }
 
 /// Adapts a [`ReadStorage`] to `mochi_format`'s [`ReadAt`] so the pure frame

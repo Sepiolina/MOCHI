@@ -131,7 +131,8 @@ snapshot and streams a file out of it, verifying every chunk and the whole
 file's content hash. `mochi_core::restore` writes a snapshot or subtree into
 a directory. It never overwrites or merges, reports collisions and
 unsupported names (Windows rules included) instead of renaming, and
-publishes a file only after it verifies. Attributes are not restored yet.
+publishes a file only after it verifies. Promised attributes (O6) are
+restored where the platform allows, and every one that is not is reported.
 The CLI does not expose reading yet (C14).
 
 The phase after the batch is **C6: read path and extraction**. D0 (desktop shell) and D2 (create and add) can start. Until later phases land,

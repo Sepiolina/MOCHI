@@ -58,9 +58,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::{
-    check_file_name, windows_name_issue, DirectoryDurability, NameIssue, ReadStorage,
-    RemoveOutcome, RestoreDir, Storage, StorageDir, StorageError,
+    check_file_name, windows_name_issue, AttributeIssue, AttributeKind, DirectoryDurability,
+    NameIssue, ReadStorage, RemoveOutcome, RestoreDir, Storage, StorageDir, StorageError,
 };
+use crate::catalog::namespace::EntryKind;
+use crate::manifest::{Attributes, Mtime, WINDOWS_HIDDEN, WINDOWS_READONLY, WINDOWS_SYSTEM};
 
 #[cfg(not(any(unix, windows)))]
 compile_error!("mochi-core storage supports only Unix and Windows targets");
@@ -589,6 +591,169 @@ impl RestoreDir for OsRestoreDir {
 
     fn sync_directory(&mut self) -> Result<DirectoryDurability, StorageError> {
         sync_dir(&self.path)
+    }
+
+    fn apply_attributes(
+        &mut self,
+        name: &[u8],
+        kind: EntryKind,
+        attributes: &Attributes,
+    ) -> Vec<AttributeIssue> {
+        let mut issues = Vec::new();
+        match self.entry(name) {
+            Ok(path) => apply_os_attributes(&path, kind, attributes, &mut issues),
+            Err(e) => issues.push(AttributeIssue {
+                attribute: AttributeKind::Mtime,
+                reason: e.to_string(),
+            }),
+        }
+        issues
+    }
+}
+
+fn issue(issues: &mut Vec<AttributeIssue>, attribute: AttributeKind, reason: impl ToString) {
+    issues.push(AttributeIssue {
+        attribute,
+        reason: reason.to_string(),
+    });
+}
+
+/// An archive time as a `SystemTime`, or `None` if it is out of range.
+fn system_time(m: Mtime) -> Option<std::time::SystemTime> {
+    use std::time::{Duration, UNIX_EPOCH};
+    if m.nanos >= 1_000_000_000 {
+        return None;
+    }
+    let nanos = Duration::from_nanos(u64::from(m.nanos));
+    if m.secs >= 0 {
+        UNIX_EPOCH
+            .checked_add(Duration::from_secs(m.secs.unsigned_abs()))?
+            .checked_add(nanos)
+    } else {
+        UNIX_EPOCH
+            .checked_sub(Duration::from_secs(m.secs.unsigned_abs()))?
+            .checked_add(nanos)
+    }
+}
+
+/// Set the modification time through a handle (files and directories).
+fn set_mtime(path: &Path, m: Mtime) -> Result<(), String> {
+    let t = system_time(m).ok_or("the time is out of this platform's range")?;
+    #[cfg(unix)]
+    let handle = File::open(path);
+    #[cfg(windows)]
+    let handle = {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+    };
+    handle
+        .and_then(|f| f.set_modified(t))
+        .map_err(|e| e.to_string())
+}
+
+/// POSIX (plan O6): the time first, then the owner (which clears setuid and
+/// setgid), then the mode. The Windows read-only bit clears the write bits;
+/// hidden and system have no POSIX equivalent and are reported. The
+/// Windows archive bit is a backup marker with no meaning here and is
+/// ignored.
+#[cfg(unix)]
+fn apply_os_attributes(
+    path: &Path,
+    _kind: EntryKind,
+    a: &Attributes,
+    issues: &mut Vec<AttributeIssue>,
+) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(m) = a.mtime {
+        if let Err(e) = set_mtime(path, m) {
+            issue(issues, AttributeKind::Mtime, e);
+        }
+    }
+    let readonly = a.windows.is_some_and(|w| w & WINDOWS_READONLY != 0);
+    if let Some(w) = a.windows {
+        if w & (WINDOWS_HIDDEN | WINDOWS_SYSTEM) != 0 {
+            issue(issues, AttributeKind::HiddenOrSystem, "no POSIX equivalent");
+        }
+    }
+    let mode = match a.posix {
+        Some(p) => {
+            if let Err(e) = std::os::unix::fs::chown(path, Some(p.uid), Some(p.gid)) {
+                issue(issues, AttributeKind::Ownership, e);
+            }
+            Some(p.mode & 0o7777)
+        }
+        None => std::fs::metadata(path)
+            .ok()
+            .map(|m| m.permissions().mode() & 0o7777),
+    };
+    if let Some(mut mode) = mode {
+        if readonly {
+            mode &= !0o222;
+        }
+        if a.posix.is_some() || readonly {
+            if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) {
+                issue(issues, AttributeKind::Mode, e);
+            }
+        }
+    }
+}
+
+/// Windows (plan O6): the time, then the read-only bit (from the Windows
+/// bits, or from POSIX write bits when the entry was authored on POSIX).
+/// Hidden and system need `SetFileAttributesW`, which `mochi-core` does
+/// not call (no `unsafe`, T21's decision), so they are reported; so are a
+/// POSIX owner and the POSIX bits Windows cannot hold.
+#[cfg(windows)]
+fn apply_os_attributes(
+    path: &Path,
+    kind: EntryKind,
+    a: &Attributes,
+    issues: &mut Vec<AttributeIssue>,
+) {
+    if let Some(m) = a.mtime {
+        if let Err(e) = set_mtime(path, m) {
+            issue(issues, AttributeKind::Mtime, e);
+        }
+    }
+    let readonly = match (a.windows, a.posix) {
+        (Some(w), _) => w & WINDOWS_READONLY != 0,
+        (None, Some(p)) => p.mode & 0o222 == 0,
+        (None, None) => false,
+    };
+    if let Some(w) = a.windows {
+        if w & (WINDOWS_HIDDEN | WINDOWS_SYSTEM) != 0 {
+            issue(
+                issues,
+                AttributeKind::HiddenOrSystem,
+                "not restored: setting them needs the Windows API, which this build does not call",
+            );
+        }
+    }
+    if a.posix.is_some() {
+        issue(
+            issues,
+            AttributeKind::Ownership,
+            "Windows has no numeric owner or group",
+        );
+        issue(
+            issues,
+            AttributeKind::Mode,
+            "only the write bits map to Windows (the read-only attribute)",
+        );
+    }
+    if readonly && kind == EntryKind::File {
+        let set = std::fs::metadata(path).and_then(|m| {
+            let mut p = m.permissions();
+            p.set_readonly(true);
+            std::fs::set_permissions(path, p)
+        });
+        if let Err(e) = set {
+            issue(issues, AttributeKind::ReadOnly, e);
+        }
     }
 }
 

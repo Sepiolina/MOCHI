@@ -32,6 +32,7 @@ pub mod publish;
 pub mod recovery;
 pub mod report;
 pub mod segment;
+pub mod state;
 pub mod status;
 pub mod storage;
 

@@ -29,6 +29,7 @@
 //! | 2 head + tail | `open_append` locates and fully opens the head; an uncommitted tail is refused, or truncated only on explicit request with an audit record ([`TailPolicy`]); each commit re-checks the file length |
 //! | 3 content | the archive descriptor at offset 0 (first commit only, D12), then data objects, one Zstandard frame per chunk |
 //! | 4 recovery + metadata | delta manifest, snapshot manifest, then the catalog image in its binary envelope ([`crate::image`]) |
+//! | 4b adopt | D10.7: re-read the snapshot manifest and the image from storage, hash-verify, decode, and compare each with the source state; on a mismatch roll back, no new head ([`ErrorCode::CheckpointMismatch`]) |
 //! | 5 commit | the commit record (schema 1) |
 //! | 6 persist | `sync_data` |
 //! | 7 footer | appended directly after the commit frame |
@@ -129,6 +130,7 @@ use crate::recovery::{
     catalog_from_snapshot, recover_from_manifests, ManifestRecovery, RecoveryScope,
 };
 use crate::segment::{check_delta_parent_link, walk_segment, SegmentInfo};
+use crate::state::AuthoritativeState;
 use crate::storage::{DirectoryDurability, ReadStorage, Storage, StorageError, StorageReader};
 
 pub use crate::catalog::META_ARCHIVE_ID;
@@ -1718,6 +1720,8 @@ pub mod phase {
     pub const MANIFEST: &str = "manifest";
     /// The snapshot manifest and the catalog image.
     pub const CHECKPOINT: &str = "checkpoint";
+    /// Re-reading and checking both checkpoint representations (D10.7).
+    pub const ADOPT: &str = "adopt";
     pub const COMMIT_RECORD: &str = "commit-record";
     pub const SYNC_CONTENT: &str = "sync-content";
     pub const FOOTER: &str = "footer";
@@ -1753,6 +1757,10 @@ pub struct ArchiveWriter<S: Storage> {
     new_descriptor: Option<Descriptor>,
     /// `EveryCommit` unless a test changed it (see [`CheckpointPolicy`]).
     policy: CheckpointPolicy,
+    /// Test control: damage what a checkpoint serializes (see
+    /// [`CheckpointTamper`]).
+    #[cfg(any(test, feature = "test-controls"))]
+    tamper: Option<CheckpointTamper>,
     needs_directory_sync: bool,
     poisoned: Option<String>,
     audit: Vec<AuditEvent>,
@@ -1822,6 +1830,8 @@ impl<S: Storage> ArchiveWriter<S> {
             // TAR compatibility at creation arrives with that profile.
             new_descriptor: Some(Descriptor::new(archive_id, false)),
             policy: CheckpointPolicy::EveryCommit,
+            #[cfg(any(test, feature = "test-controls"))]
+            tamper: None,
             needs_directory_sync: true,
             poisoned: None,
             audit: Vec::new(),
@@ -1863,6 +1873,8 @@ impl<S: Storage> ArchiveWriter<S> {
                         attributes,
                         new_descriptor: None,
                         policy: CheckpointPolicy::EveryCommit,
+                        #[cfg(any(test, feature = "test-controls"))]
+                        tamper: None,
                         needs_directory_sync: false,
                         poisoned: None,
                         audit,
@@ -2392,41 +2404,73 @@ impl<S: Storage> ArchiveWriter<S> {
         };
         let (metadata, attributes) = if checkpoint {
             ctx.report(phase::CHECKPOINT, 0, None);
-            let snapshot = Manifest::snapshot_from_catalog(
+            #[allow(unused_mut)]
+            let mut snapshot = Manifest::snapshot_from_catalog(
                 &cat,
                 self.archive_id,
                 seq,
                 transaction_id,
                 &attributes,
             )?;
-            // Keep attributes only for versions still reachable.
-            let attributes: BTreeMap<FileVersionId, Attributes> = snapshot
-                .file_versions
-                .iter()
-                .map(|v| (v.version.id, v.attributes))
-                .collect();
+            // The source of truth for adoption (D10.7): the writer's own
+            // state, never re-derived from what is about to be serialized.
+            // Attributes are kept only for versions still reachable.
+            let reachable = reachable_attributes(&after, attributes.clone())?;
+            let source =
+                AuthoritativeState::from_catalog(&cat, seq)?.with_attributes(reachable.clone());
+            #[cfg(any(test, feature = "test-controls"))]
+            if let Some(t) = self.tamper {
+                t.apply_to_snapshot(&mut snapshot)?;
+            }
             let snapshot_ref = self.append_object(&snapshot.to_stored()?)?;
             ctx.check_cancelled()?;
 
             // Binary envelope v0 (B.2.2, T10), bounded by the reader defaults
             // (B.2.3 writer default rule), not by self.read: an image over the
             // S − 592 budget is CAPACITY_EXCEEDED and nothing is published.
+            #[cfg(any(test, feature = "test-controls"))]
+            let tampered_cat = match self.tamper {
+                Some(CheckpointTamper::ImageOmitsLastOp) => {
+                    Some(self.catalog_without_last_op(&manifest, seq)?)
+                }
+                _ => None,
+            };
+            #[cfg(any(test, feature = "test-controls"))]
+            let image = tampered_cat.as_ref().unwrap_or(&cat).publish()?;
+            #[cfg(not(any(test, feature = "test-controls")))]
             let image = cat.publish()?;
-            let image_ref = self.append_object(&encode_image_record(
-                image.as_bytes(),
-                RecordIdentity {
-                    archive_id: *self.archive_id.as_bytes(),
-                    commit_sequence: seq,
-                    transaction_id,
-                },
-            )?)?;
+            let identity = RecordIdentity {
+                archive_id: *self.archive_id.as_bytes(),
+                commit_sequence: seq,
+                transaction_id,
+            };
+            let image_ref =
+                self.append_object(&encode_image_record(image.as_bytes(), identity)?)?;
+            ctx.check_cancelled()?;
+
+            // D10.7 adoption (§18.1): re-read both representations from the
+            // storage they were just written to, check their hashes, decode
+            // them, and compare each with the source. Any mismatch fails the
+            // commit before the commit record: no new head, and the existing
+            // roll-back removes the unpublished bytes. The writer is not
+            // poisoned (nothing was published, no sync failed; Q40).
+            ctx.report(phase::ADOPT, 0, None);
+            adopt_checkpoint(
+                &self.storage,
+                &source,
+                &snapshot_ref,
+                &image_ref,
+                &identity,
+                self.archive_id,
+                &self.params.encode()?,
+            )?;
             ctx.check_cancelled()?;
             (
                 Metadata::Checkpoint {
                     image: image_ref,
                     snapshot: snapshot_ref,
                 },
-                attributes,
+                reachable,
             )
         } else {
             // A delta on the base the D10.6 rule derives. No snapshot and
@@ -2509,6 +2553,168 @@ impl<S: Storage> ArchiveWriter<S> {
     }
 }
 
+/// D10.7, §18.1: re-read the two checkpoint representations from `storage`,
+/// check their hashes against the references just written, decode them, and
+/// compare each with `source`. The snapshot is decoded without SQLite and
+/// compared **with** attributes; the image is opened as a reader opens it and
+/// compared without them (the image holds none until C6, checklist Q6, Q38).
+///
+/// Bounds are the writer defaults (B.2.3), not the writer's own read limits:
+/// the writer bounded its output by those, and a lower user limit must not
+/// make it reject its own valid output.
+///
+/// A semantic disagreement is `CHECKPOINT_MISMATCH` (Q37). A decoder
+/// rejecting hash-valid bytes the writer just produced is also a mismatch
+/// (the writer wrote something its own reader refuses). A hash failure or a
+/// failed read is a storage fault and keeps its code.
+fn adopt_checkpoint(
+    storage: &dyn ReadStorage,
+    source: &AuthoritativeState,
+    snapshot_ref: &ObjectRef,
+    image_ref: &ObjectRef,
+    identity: &RecordIdentity,
+    archive_id: ArchiveId,
+    writer_params: &[u8],
+) -> Result<()> {
+    let seq = source.seq;
+    let max = Limits::WRITER_DEFAULT.max_frame_len;
+    let mismatch = |what: &str, detail: String| {
+        MochiError::new(
+            ErrorCode::CheckpointMismatch,
+            format!("the {what} of commit {seq} disagrees with the source state: {detail}"),
+        )
+    };
+    let remap = |what: &str, e: MochiError| match e.code {
+        ErrorCode::StoredIntegrityFailed | ErrorCode::IoError | ErrorCode::OutOfBounds => e,
+        _ => mismatch(
+            what,
+            format!("it could not be read back ({}: {})", e.code, e.message),
+        ),
+    };
+
+    // Snapshot: hash, canonical-CBOR decode, identity; no SQLite.
+    let stored = load_verified(
+        storage,
+        snapshot_ref,
+        snapshot_ref.end()?,
+        max,
+        "snapshot manifest",
+    )?;
+    let (manifest, _) =
+        Manifest::from_stored(&stored, &Limits::WRITER_DEFAULT, &CborLimits::default())
+            .map_err(|e| remap("snapshot manifest", e))?;
+    if manifest.kind != ManifestKind::Snapshot || manifest.identity().check(identity).is_err() {
+        return Err(mismatch(
+            "snapshot manifest",
+            "it is not the snapshot bound to this commit".to_string(),
+        ));
+    }
+    let got =
+        AuthoritativeState::from_snapshot(&manifest).map_err(|e| remap("snapshot manifest", e))?;
+    if got != *source {
+        return Err(mismatch(
+            "snapshot manifest",
+            got.differences(source, 8).join("; "),
+        ));
+    }
+
+    // Image: hash, envelope bound to this commit, then SQLite exactly as a
+    // reader opens it (integrity, foreign keys, extents, namespace).
+    let stored = load_verified(storage, image_ref, image_ref.end()?, max, "catalog image")?;
+    let bytes = decode_image_record(&stored, identity, &Limits::WRITER_DEFAULT)
+        .map_err(|e| remap("catalog image", e))?;
+    let img = Catalog::open_image(bytes, &CatalogLimits::default())
+        .map_err(|e| remap("catalog image", e))?;
+    let head = img.head_commit().map_err(|e| remap("catalog image", e))?;
+    if head != Some(seq) {
+        return Err(mismatch(
+            "catalog image",
+            format!("it materializes commit {head:?}"),
+        ));
+    }
+    if img
+        .meta(META_ARCHIVE_ID)
+        .map_err(|e| remap("catalog image", e))?
+        .as_deref()
+        != Some(&archive_id.as_bytes()[..])
+    {
+        return Err(mismatch(
+            "catalog image",
+            "it names another archive".to_string(),
+        ));
+    }
+    if img
+        .meta(META_WRITER_PARAMS)
+        .map_err(|e| remap("catalog image", e))?
+        .as_deref()
+        != Some(writer_params)
+    {
+        return Err(mismatch(
+            "catalog image",
+            "its writer parameters differ".to_string(),
+        ));
+    }
+    let got = AuthoritativeState::from_catalog(&img, seq).map_err(|e| remap("catalog image", e))?;
+    // C6: include attributes once the image stores them (Q6, Q38).
+    let want = source.clone().without_attributes();
+    if got != want {
+        return Err(mismatch(
+            "catalog image",
+            got.differences(&want, 8).join("; "),
+        ));
+    }
+    Ok(())
+}
+
+/// D10.7 for a published checkpoint, as `verify` repeats it: both
+/// representations hash-verified and decoded, then compared without
+/// attributes (the image holds none, Q38). A disagreement is
+/// `CHECKPOINT_MISMATCH`. A representation that fails to load returns that
+/// failure unchanged ([`crate::damage`] reports it as object damage).
+pub fn check_checkpoint_representations(
+    src: &dyn ReadStorage,
+    cp: &HistoryEntry,
+    opts: &ReadOptions,
+) -> Result<()> {
+    let Metadata::Checkpoint { image, snapshot } = cp.commit.metadata else {
+        return Err(MochiError::new(
+            ErrorCode::InvalidArgument,
+            "this commit is not a checkpoint",
+        ));
+    };
+    let snap = read_bound_manifest(
+        src,
+        &cp.commit,
+        &snapshot,
+        cp.commit_offset,
+        ManifestKind::Snapshot,
+        opts,
+    )?;
+    let img = check_image(src, cp, &image, opts, false)?;
+    compare_representations(&snap, &img, cp.commit.seq)
+}
+
+/// The shared comparison: snapshot (decoded, without SQLite) against image
+/// (as a reader opened it), without attributes.
+pub(crate) fn compare_representations(
+    snapshot: &Manifest,
+    image: &Catalog,
+    seq: u64,
+) -> Result<()> {
+    let from_snapshot = AuthoritativeState::from_snapshot(snapshot)?.without_attributes();
+    let from_image = AuthoritativeState::from_catalog(image, seq)?;
+    if from_snapshot != from_image {
+        return Err(MochiError::new(
+            ErrorCode::CheckpointMismatch,
+            format!(
+                "the snapshot manifest and the catalog image of commit {seq} disagree: {}",
+                from_snapshot.differences(&from_image, 8).join("; ")
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// The base a delta written after `head` names (D10.6 base rule).
 fn next_base_after(head: &OpenedHead) -> CommitLink {
     match head.commit.metadata {
@@ -2563,6 +2769,111 @@ impl<S: Storage> ArchiveWriter<S> {
     /// this; it writes `EveryCommit` until the T14 trigger exists.
     pub fn set_checkpoint_policy(&mut self, policy: CheckpointPolicy) -> Result<()> {
         self.policy = policy.validate()?;
+        Ok(())
+    }
+
+    /// Damage what the next checkpoints *serialize* (never the writer's own
+    /// state), to show that adoption blocks the head (D10.7). `None` turns it
+    /// off. Needs a commit with at least one namespace operation for
+    /// [`CheckpointTamper::ImageOmitsLastOp`] and at least one entry for
+    /// [`CheckpointTamper::SnapshotOmitsEntry`]; otherwise it changes nothing.
+    pub fn set_checkpoint_tamper(&mut self, t: Option<CheckpointTamper>) {
+        self.tamper = t;
+    }
+
+    /// A catalog like the one about to be published, except that commit `seq`
+    /// omits the transaction's last namespace operation.
+    fn catalog_without_last_op(&self, manifest: &Manifest, seq: u64) -> Result<Catalog> {
+        let mut c = match self.head {
+            None => {
+                let mut c = Catalog::new_working()?;
+                c.set_meta(META_ARCHIVE_ID, self.archive_id.as_bytes())?;
+                c.set_meta(META_WRITER_PARAMS, &self.params.encode()?)?;
+                c
+            }
+            Some(_) => self.catalog.duplicate()?,
+        };
+        for ch in &manifest.chunks {
+            c.insert_object(&ch.record, ch.location)?;
+        }
+        for v in &manifest.file_versions {
+            c.insert_file_version(&v.version, &v.extents)?;
+        }
+        let keep = manifest.ops.len().saturating_sub(1);
+        c.append_commit(&Commit {
+            seq,
+            parent: self.head.map(|h| h.seq),
+            ops: manifest.ops[..keep].to_vec(),
+        })?;
+        Ok(c)
+    }
+}
+
+/// How [`ArchiveWriter::set_checkpoint_tamper`] damages a checkpoint's
+/// serialized form (test controls only).
+#[cfg(any(test, feature = "test-controls"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointTamper {
+    /// XOR the POSIX mode of the first file version (by ID) that has POSIX
+    /// attributes, in the serialized snapshot only.
+    SnapshotAttributes,
+    /// Drop the last namespace entry (by path) from the serialized snapshot,
+    /// and its version and chunks when nothing else uses them. The result
+    /// still passes the manifest's structure checks: the divergence is
+    /// semantic, not a decode error.
+    SnapshotOmitsEntry,
+    /// Serialize an image whose head commit omits the transaction's last
+    /// namespace operation.
+    ImageOmitsLastOp,
+}
+
+#[cfg(any(test, feature = "test-controls"))]
+impl CheckpointTamper {
+    fn apply_to_snapshot(self, snapshot: &mut Manifest) -> Result<()> {
+        match self {
+            CheckpointTamper::SnapshotAttributes => {
+                if let Some(p) = snapshot
+                    .file_versions
+                    .iter_mut()
+                    .find_map(|v| v.attributes.posix.as_mut())
+                {
+                    p.mode ^= 0o7;
+                }
+            }
+            CheckpointTamper::SnapshotOmitsEntry => {
+                if let Some((_, version)) = snapshot.entries.pop() {
+                    if !snapshot.entries.iter().any(|(_, v)| *v == version) {
+                        if let Some(pos) = snapshot
+                            .file_versions
+                            .iter()
+                            .position(|v| v.version.id == version)
+                        {
+                            let dropped = snapshot.file_versions.remove(pos);
+                            let used = |id: &crate::object::ObjectId| {
+                                snapshot.file_versions.iter().any(|v| {
+                                    v.extents.iter().any(|e| {
+                                        matches!(e.source, ExtentSource::Chunk { chunk, .. } if chunk == *id)
+                                    })
+                                })
+                            };
+                            let gone: Vec<_> = dropped
+                                .extents
+                                .iter()
+                                .filter_map(|e| match e.source {
+                                    ExtentSource::Chunk { chunk, .. } if !used(&chunk) => {
+                                        Some(chunk)
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            snapshot.chunks.retain(|c| !gone.contains(&c.record.id));
+                        }
+                    }
+                }
+                snapshot.canonicalize();
+            }
+            CheckpointTamper::ImageOmitsLastOp => {}
+        }
         Ok(())
     }
 }

@@ -24,6 +24,9 @@
 //!   failure, or with the snapshot unusable too: unreadable. Never an earlier
 //!   checkpoint.
 //! * Snapshot *c* failing with an intact image: reads continue, `DEGRADED`.
+//! * Image and snapshot both load but disagree (D10.7, `CHECKPOINT_MISMATCH`):
+//!   reads use the image, and the redundancy D10.2 relies on is gone, so
+//!   `DEGRADED` (review decision Q33).
 //! * Recoverability per commit: `FAIL` when unreadable; `DEGRADED` when it is
 //!   readable but its base checkpoint lost one of its two representations;
 //!   `PASS` otherwise. The archive's status is the worst over all commits.
@@ -39,8 +42,8 @@ use crate::error::{ErrorCode, MochiError, Result};
 use crate::job::JobContext;
 use crate::manifest::{Manifest, ManifestKind};
 use crate::publish::{
-    check_image, checkpoint_snapshot_ref, commit_history, is_stored_damage, read_bound_manifest,
-    HistoryEntry, ReadOptions,
+    check_image, checkpoint_snapshot_ref, commit_history, compare_representations,
+    is_stored_damage, read_bound_manifest, HistoryEntry, ReadOptions,
 };
 use crate::recovery::catalog_from_snapshot;
 use crate::report::{Finding, SeqRange, Severity};
@@ -53,6 +56,9 @@ pub enum ObjectRole {
     DeltaManifest,
     SnapshotManifest,
     CatalogImage,
+    /// Both representations load, and they disagree (D10.7,
+    /// `CHECKPOINT_MISMATCH`).
+    CheckpointPair,
 }
 
 impl ObjectRole {
@@ -61,6 +67,7 @@ impl ObjectRole {
             ObjectRole::DeltaManifest => "delta manifest",
             ObjectRole::SnapshotManifest => "snapshot manifest",
             ObjectRole::CatalogImage => "catalog image",
+            ObjectRole::CheckpointPair => "checkpoint representations",
         }
     }
 }
@@ -210,6 +217,7 @@ fn internal(msg: impl Into<String>) -> MochiError {
 struct CheckpointChecks {
     image: Option<MochiError>,
     snapshot: Option<MochiError>,
+    pair: Option<MochiError>,
 }
 
 /// Assess the whole published history. Read-only; a job.
@@ -227,6 +235,7 @@ pub fn assess_damage(
     let mut delta_obj: Vec<Option<usize>> = vec![None; n];
     let mut snap_obj: Vec<Option<usize>> = vec![None; n];
     let mut image_obj: Vec<Option<usize>> = vec![None; n];
+    let mut pair_obj: Vec<Option<usize>> = vec![None; n];
     let mut checked = 0u64;
 
     for (i, e) in history.iter().enumerate() {
@@ -271,6 +280,15 @@ pub fn assess_damage(
                     error,
                 });
             }
+            if let Some(error) = checks.pair {
+                pair_obj[i] = Some(objects.len());
+                objects.push(ObjectDamage {
+                    seq,
+                    role: ObjectRole::CheckpointPair,
+                    offset: image_ref.offset,
+                    error,
+                });
+            }
         }
         ctx.report("damage", (i + 1) as u64, Some(n as u64));
     }
@@ -305,7 +323,7 @@ pub fn assess_damage(
         } else if image_obj[b].is_none() {
             // Image intact: reads use it. A lost snapshot manifest removes
             // the second representation (DEGRADED, D10.9).
-            match snap_obj[b] {
+            match snap_obj[b].or(pair_obj[b]) {
                 Some(k) => {
                     causes.push(k);
                     (Readability::Image, Status::Degraded)
@@ -356,6 +374,9 @@ pub fn assess_damage(
                 (c, seg_end, Effect::Degraded)
             }
             ObjectRole::SnapshotManifest => (c, seg_end, Effect::Unreadable),
+            // Both representations load, so reads work; the pair is
+            // inconsistent.
+            ObjectRole::CheckpointPair => (c, seg_end, Effect::Degraded),
         };
         ranges.push(AffectedRange {
             first: first as u64,
@@ -428,6 +449,7 @@ fn check_checkpoint(
     let mut out = CheckpointChecks {
         image: None,
         snapshot: None,
+        pair: None,
     };
     match (&snapshot, &image) {
         (Ok(s), Err(ie)) if is_stored_damage(ie) => {
@@ -437,12 +459,17 @@ fn check_checkpoint(
         }
         _ => {}
     }
+    if let (Ok(s), Ok(i)) = (&snapshot, &image) {
+        if let Err(pe) = compare_representations(s, i, e.commit.seq) {
+            out.pair = Some(pe);
+        }
+    }
     if let Err(se) = snapshot {
         out.snapshot = Some(se);
     }
     if let Err(ie) = image {
         out.image = Some(ie);
     }
-    // T15: when both loaded, compare their authoritative state here.
+    // D10.7: when both loaded, they must agree (verify repeats adoption).
     Ok(out)
 }

@@ -1,6 +1,6 @@
 # T16, T17, T15: implementation plan
 
-**Status: T16, T17, and T15 implemented (see the checklist); CI outstanding.** Written 2026-10-05; revised the same day with
+**Status: T16, T17, and T15 implemented (see the checklist); CI green (run 37266111706).** Written 2026-10-05; revised the same day with
 the open decisions taken (section 1). Work order is **T16 → T17 → T15**
 (checklist, "What G2 still needs"). Each task builds on the previous one:
 

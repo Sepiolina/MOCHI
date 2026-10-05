@@ -243,6 +243,9 @@ impl From<StorageError> for MochiError {
             StorageError::OutOfBounds { .. } => ErrorCode::OutOfBounds,
             StorageError::LockHeld => ErrorCode::LockConflict,
             StorageError::Unsupported(_) => ErrorCode::UnsupportedFeature,
+            // D13: a destination is never replaced.
+            StorageError::Exists { .. } => ErrorCode::DestinationExists,
+            StorageError::InvalidName { .. } => ErrorCode::InvalidArgument,
         };
         MochiError::new(code, err.to_string())
     }

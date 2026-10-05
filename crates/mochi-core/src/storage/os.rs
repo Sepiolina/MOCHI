@@ -56,7 +56,10 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::{DirectoryDurability, ReadStorage, Storage, StorageError};
+use super::{
+    check_file_name, DirectoryDurability, ReadStorage, RemoveOutcome, Storage, StorageDir,
+    StorageError,
+};
 
 #[cfg(not(any(unix, windows)))]
 compile_error!("mochi-core storage supports only Unix and Windows targets");
@@ -106,6 +109,29 @@ fn parent_dir(path: &Path) -> &Path {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
     }
+}
+
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> Result<DirectoryDurability, StorageError> {
+    File::open(dir)?.sync_all()?;
+    Ok(DirectoryDurability::Confirmed)
+}
+
+#[cfg(windows)]
+fn sync_dir(dir: &Path) -> Result<DirectoryDurability, StorageError> {
+    // Best effort only (module docs, plan O12): never Confirmed.
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let flushed = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(dir)
+        .and_then(|d| d.sync_all());
+    Ok(DirectoryDurability::Unconfirmed(match flushed {
+        Ok(()) => "directory flush ran, but Windows does not document it as durable".into(),
+        Err(e) => format!("best-effort directory flush failed: {e}"),
+    }))
 }
 
 /// Read-only handle. There is no write API on this type, and the file is opened
@@ -188,27 +214,8 @@ impl Storage for OsStorage {
         Ok(self.file.sync_data()?)
     }
 
-    #[cfg(unix)]
     fn sync_directory(&mut self) -> Result<DirectoryDurability, StorageError> {
-        File::open(parent_dir(&self.path))?.sync_all()?;
-        Ok(DirectoryDurability::Confirmed)
-    }
-
-    #[cfg(windows)]
-    fn sync_directory(&mut self) -> Result<DirectoryDurability, StorageError> {
-        // Best effort only (module docs, plan O12): never Confirmed.
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-        let flushed = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-            .open(parent_dir(&self.path))
-            .and_then(|dir| dir.sync_all());
-        Ok(DirectoryDurability::Unconfirmed(match flushed {
-            Ok(()) => "directory flush ran, but Windows does not document it as durable".into(),
-            Err(e) => format!("best-effort directory flush failed: {e}"),
-        }))
+        sync_dir(parent_dir(&self.path))
     }
 
     fn try_lock_exclusive(&mut self) -> Result<(), StorageError> {
@@ -233,6 +240,112 @@ impl Storage for OsStorage {
             });
         }
         Ok(self.file.set_len(new_len)?)
+    }
+}
+
+/// The directory that holds an archive (plan T19; Annex B.2 D13, D14).
+///
+/// **Publication without replacing** is a hard link to the new name followed
+/// by removing the old one: `link(2)` / `CreateHardLinkW` fail if the new name
+/// exists, so an existing file is never replaced, on every filesystem that
+/// supports hard links. A crash between the two steps leaves both names on
+/// the same bytes; cleanup removes the temporary name once its lock is free.
+/// Plan T20 puts `renameat2(RENAME_NOREPLACE)` first on Linux, keeping this as
+/// its fallback, and T21 uses `MoveFileExW` with `MOVEFILE_WRITE_THROUGH` on
+/// Windows. A filesystem without hard links refuses publication with an I/O
+/// error rather than falling back to a replacing rename.
+#[derive(Debug)]
+pub struct OsDir {
+    path: PathBuf,
+}
+
+impl OsDir {
+    /// The directory at `path`, which must exist.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
+        let path = path.as_ref().to_path_buf();
+        if !std::fs::metadata(&path)?.is_dir() {
+            return Err(StorageError::Io(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                format!("{} is not a directory", path.display()),
+            )));
+        }
+        Ok(Self { path })
+    }
+
+    /// The directory that contains `file`.
+    pub fn containing(file: impl AsRef<Path>) -> Result<Self, StorageError> {
+        Self::open(parent_dir(file.as_ref()))
+    }
+
+    fn entry(&self, name: &str) -> Result<PathBuf, StorageError> {
+        check_file_name(name)?;
+        Ok(self.path.join(name))
+    }
+}
+
+fn exists_as(name: &str) -> impl Fn(io::Error) -> StorageError + '_ {
+    move |e| {
+        if e.kind() == io::ErrorKind::AlreadyExists {
+            StorageError::Exists {
+                name: name.to_string(),
+            }
+        } else {
+            StorageError::Io(e)
+        }
+    }
+}
+
+impl StorageDir for OsDir {
+    type File = OsStorage;
+
+    fn create_exclusive(&mut self, name: &str) -> Result<OsStorage, StorageError> {
+        let path = self.entry(name)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(exists_as(name))?;
+        let mut s = OsStorage { file, path };
+        s.try_lock_exclusive()?;
+        Ok(s)
+    }
+
+    fn publish_no_replace(&mut self, from: &str, to: &str) -> Result<(), StorageError> {
+        let (src, dst) = (self.entry(from)?, self.entry(to)?);
+        std::fs::hard_link(&src, &dst).map_err(exists_as(to))?;
+        std::fs::remove_file(&src)?;
+        Ok(())
+    }
+
+    fn discard(&mut self, file: OsStorage, name: &str) -> Result<(), StorageError> {
+        let path = self.entry(name)?;
+        // Removed while still held: no other process can take the name's
+        // lock in between and see a half-removed file.
+        let removed = std::fs::remove_file(&path);
+        drop(file);
+        Ok(removed?)
+    }
+
+    fn remove_if_unlocked(&mut self, name: &str) -> Result<RemoveOutcome, StorageError> {
+        let path = self.entry(name)?;
+        let file = match OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(RemoveOutcome::Missing),
+            Err(e) => return Err(e.into()),
+        };
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(RemoveOutcome::Locked),
+            Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+        }
+        std::fs::remove_file(&path)?;
+        drop(file);
+        Ok(RemoveOutcome::Removed)
+    }
+
+    fn sync_directory(&mut self) -> Result<DirectoryDurability, StorageError> {
+        sync_dir(&self.path)
     }
 }
 

@@ -228,6 +228,16 @@ pub fn assess_damage(
 ) -> Result<DamageReport> {
     let history = commit_history(src, opts)?;
     let n = history.len();
+    // Every index below is a commit sequence: `commit_history` returns
+    // 0 ..= head in order. Checked, not assumed (no panic on archive input).
+    if n == 0
+        || history
+            .iter()
+            .enumerate()
+            .any(|(i, e)| e.commit.seq != i as u64)
+    {
+        return Err(internal("the history is not commits 0 ..= head in order"));
+    }
     ctx.report("damage", 0, Some(n as u64));
 
     let mut objects: Vec<ObjectDamage> = Vec::new();

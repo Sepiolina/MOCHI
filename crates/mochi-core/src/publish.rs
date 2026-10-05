@@ -848,7 +848,14 @@ fn open_at(
     };
     let (catalog, segment, attributes, catalog_source) = match commit.metadata {
         Metadata::Checkpoint { image, .. } => {
-            let (catalog, source) = base_catalog(src, &head_entry, &image, opts, mode, false)?;
+            let (catalog, source) = base_catalog(
+                src,
+                &head_entry,
+                &image,
+                opts,
+                mode,
+                mode == OpenMode::Append,
+            )?;
             if mode == OpenMode::Read {
                 // A catalog rebuilt from S(b) is writable; a reader's never is.
                 catalog.make_query_only()?;

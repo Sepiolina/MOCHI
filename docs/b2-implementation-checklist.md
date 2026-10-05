@@ -102,6 +102,13 @@ These are recorded, not resolved; each has a provisional choice in code.
 
 The project owner delegated review decisions to the implementer ("review and make the call by yourself; choose best practice", 2026-10-04). Decisions taken under this delegation are marked **[delegated]** with their rationale. Two limits apply. A self-review is recorded as a self-review, never as independent review. Evidence gates that need resources the implementer lacks (GitHub CI, native Windows) stay open: delegation changes who decides, not what evidence exists.
 
+### Review of the T16/T17/T15 implementation (2026-10-05, self-review [delegated])
+
+A second pass over the core diff (`publish.rs`, `damage.rs`, `state.rs`, `recovery.rs`, `report.rs`), checked against D10.3–D10.9 and the Q29–Q40 decisions. A self-review, not independent review. Decisions confirmed as implemented: the fallback to S(*b*) is Read-only and only on `STORED_INTEGRITY_FAILED`; a catalog rebuilt from S(*b*) holds only commits *b* … *h*, and `Catalog::replay` refuses an earlier commit (`commit N is not in the catalog`) rather than returning an empty namespace; adoption compares against the writer's own state, never against the serialized form; Q33's `PASS` for damage limited to a checkpoint's own delta manifest stands, because every checkpoint still has both D10.2 representations and the integrity dimension reports `FAIL`. Two changes:
+
+* `open_at` again opens a checkpoint head's image as **writable in append mode**. The T17 refactor had passed `writable = false` for every checkpoint head. That was harmless today, because the writer always `duplicate()`s before it writes, but it silently changed `OpenedHead::catalog` for append. The flag is now `mode == OpenMode::Append`, as before T17. No test observes it through the public API.
+* `assess_damage` uses commit sequences as indices, so it now checks that the history is non-empty and is exactly 0 … head in order, returning an `internal:` error otherwise. `commit_history` guarantees this today; the check keeps archive-derived input from reaching an index panic if that ever changes.
+
 ### Line endings (2026-10-04 [delegated])
 
 The repository had no `.gitattributes`. Git on Windows, including GitHub's `windows-latest` runners, converts text files to CRLF on checkout by default, which would alter byte-compared golden fixtures (for example `vectors.txt`) and make the `windows-latest` job fail for a reason unrelated to the code. Added `.gitattributes`: everything LF (`* text=auto eol=lf`), and `fixtures/**` plus `*.mochi` and `*.bin` never converted. Verified by simulating a commit and checkout with `core.autocrlf=true`: every fixture byte-identical.

@@ -40,8 +40,11 @@ const FILE_BYTES: usize = 256;
 const IMPORT_FILES: u64 = 10_000;
 /// Files the repeated-updates workload rewrites in turn.
 const UPDATE_SET: u64 = 100;
-/// The forced run requests a checkpoint every this many commits.
-const FORCE_EVERY: u64 = 10;
+/// The forced run requests this many checkpoints per run, evenly spaced
+/// (every N/10 commits). A fixed short interval would make Σ*B*_forced
+/// quadratic in N by construction (1,000 full checkpoints of a growing
+/// catalog at N = 10,000), which measures nothing the shorter runs do not.
+const FORCED_PER_RUN: u64 = 10;
 const OPEN_SAMPLES: usize = 5;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -61,7 +64,7 @@ impl Workload {
             Workload::Tiny => "tiny commits (empty transactions)",
             Workload::Import => "large import (10,000 files at commit 0, then one file per commit)",
             Workload::Forced => {
-                "forced checkpoints (growing catalog, `checkpoint` every 10 commits)"
+                "forced checkpoints (growing catalog, `checkpoint` every N/10 commits)"
             }
         }
     }
@@ -152,7 +155,8 @@ fn run(w: Workload, n: u64, t: CheckpointTrigger) -> String {
     let mut wr = ArchiveWriter::create(s.clone(), Box::new(SeqIds::new(7)), opts).unwrap();
     let mut forced = Vec::new();
     for i in 0..n {
-        if w == Workload::Forced && i > 0 && i % FORCE_EVERY == 0 {
+        let every = (n / FORCED_PER_RUN).max(1);
+        if w == Workload::Forced && i > 0 && i % every == 0 {
             wr.request_checkpoint();
             forced.push(i);
         }
@@ -263,6 +267,8 @@ fn run(w: Workload, n: u64, t: CheckpointTrigger) -> String {
 }
 
 fn main() {
+    // Optional: MOCHI_T32_ONLY=growing|updates|tiny|import|forced runs one.
+    let only = std::env::var("MOCHI_T32_ONLY").ok();
     let args: Vec<String> = std::env::args().collect();
     let max_n: u64 = args.get(1).map_or(10_000, |a| a.parse().unwrap());
     let t = match args.get(2) {
@@ -288,6 +294,12 @@ fn main() {
         Workload::Import,
         Workload::Forced,
     ] {
+        if only
+            .as_deref()
+            .is_some_and(|o| !format!("{w:?}").eq_ignore_ascii_case(o))
+        {
+            continue;
+        }
         println!();
         println!("### {}", w.name());
         println!();

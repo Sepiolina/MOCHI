@@ -23,10 +23,11 @@ use mochi_core::job::{CancellationToken, JobContext, ProgressEvent, ProgressSink
 use mochi_core::object::IdSource;
 use mochi_core::publish::{
     commit_history, locate_head, open_at_footer, open_head, read_commit, recover_with_trusted_head,
-    ArchiveWriter, AuditEvent, CommitStatus, HeadSource, PublishDurability, ReadOptions,
-    TailPolicy, TailState, Transaction,
+    ArchiveWriter, AuditEvent, CatalogSource, CommitStatus, HeadSource, PublishDurability,
+    ReadOptions, TailPolicy, TailState, Transaction,
 };
 use mochi_core::recovery::{recover_from_manifests, RecoveryScope};
+use mochi_core::state::AuthoritativeState;
 use mochi_core::storage::{ReadStorage, Storage};
 use mochi_core::ErrorCode;
 use mochi_format::footer::encode_footer_frame;
@@ -588,8 +589,38 @@ fn a_value_level_bit_flip_in_the_catalog_image_is_refused() {
         Some(needle)
     );
 
-    // The reader refuses it before SQLite sees it.
-    let e = open_head(&SimStorage::from_bytes(bytes), &opts()).unwrap_err();
+    // The reader refuses the image before SQLite sees it (annex B.2 D10.9
+    // changed what happens next: the same commit's snapshot manifest, which
+    // is intact, stands in for the image, so the head still opens). The
+    // flipped value never reaches the reader: the file's content hash is the
+    // original one.
+    let damaged = SimStorage::from_bytes(bytes.clone());
+    let opened = open_head(&damaged, &opts()).unwrap();
+    match &opened.catalog_source {
+        CatalogSource::SnapshotManifest { image_error } => {
+            assert_eq!(image_error.code, ErrorCode::StoredIntegrityFailed);
+        }
+        other => panic!("expected the snapshot manifest to stand in, got {other:?}"),
+    }
+    assert_eq!(
+        opened
+            .catalog
+            .file_version(&entry.version)
+            .unwrap()
+            .unwrap()
+            .0
+            .content_hash,
+        Some(needle)
+    );
+
+    // With the snapshot manifest damaged too there is nothing to stand in:
+    // refused, and no earlier state is returned.
+    let Metadata::Checkpoint { snapshot, .. } = head.commit.metadata else {
+        unreachable!()
+    };
+    let mut both = bytes;
+    both[(snapshot.offset + snapshot.stored_len / 2) as usize] ^= 1;
+    let e = open_head(&SimStorage::from_bytes(both), &opts()).unwrap_err();
     assert_eq!(e.code, ErrorCode::StoredIntegrityFailed);
 }
 
@@ -672,8 +703,23 @@ fn a_damaged_manifest_is_refused() {
     let m = head.commit.delta_manifest;
     let mut bytes = s.contents();
     bytes[(m.offset + m.stored_len - 1) as usize] ^= 1;
-    let e = open_head(&SimStorage::from_bytes(bytes), &opts()).unwrap_err();
+    let damaged = SimStorage::from_bytes(bytes.clone());
+    // A checkpoint head does not need its own delta manifest to be read
+    // (annex B.2 D10.9, review decision Q31): it opens, and the damage is
+    // recorded, not hidden.
+    let opened = open_head(&damaged, &opts()).unwrap();
+    assert!(opened.manifest.is_none());
+    assert_eq!(
+        opened.manifest_error.as_ref().map(|e| e.code),
+        Some(ErrorCode::StoredIntegrityFailed)
+    );
+    // The writer is not so tolerant: append refuses, and nothing is written.
+    let e =
+        ArchiveWriter::open_append(damaged.clone(), ids(98), test_options(), TailPolicy::Refuse)
+            .map(|_| ())
+            .unwrap_err();
     assert_eq!(e.code, ErrorCode::StoredIntegrityFailed);
+    assert_eq!(damaged.contents(), bytes);
 }
 
 fn manifests_in(bytes: &[u8]) -> Vec<StoredObject> {
@@ -702,14 +748,79 @@ fn a_destroyed_catalog_is_recovered_through_the_footer_verified_head() {
         bytes[(f.offset as usize + SKIPPABLE_HEADER_LEN)..f.end() as usize].fill(0);
     }
     let damaged = SimStorage::from_bytes(bytes);
+    // Annex B.2 D10.9: with every image destroyed and the snapshot manifests
+    // intact, reads rebuild the catalog from the same commit's snapshot
+    // manifest. (Before D10.9 this open failed.)
+    let opened = open_head(&damaged, &opts()).unwrap();
+    match &opened.catalog_source {
+        CatalogSource::SnapshotManifest { image_error } => {
+            assert_eq!(image_error.code, ErrorCode::StoredIntegrityFailed);
+        }
+        other => panic!("expected the snapshot manifest to stand in, got {other:?}"),
+    }
+    assert_eq!(
+        AuthoritativeState::from_catalog(&opened.catalog, 2).unwrap(),
+        AuthoritativeState::from_catalog(&original.catalog, 2).unwrap()
+    );
+    let rec = recover_with_trusted_head(&damaged, &opts()).unwrap();
+    assert!(
+        rec.baseline.is_none(),
+        "the manifest chain reaches the head"
+    );
+    assert_eq!(rec.scope_for(2), RecoveryScope::SnapshotRecovery);
+    assert_eq!(rec.scope_for(0), RecoveryScope::HistoricalRecovery);
+    let cat = rec.head_catalog().unwrap();
+    for seq in 0..=2 {
+        assert_eq!(
+            cat.replay(Some(seq)).unwrap(),
+            original.catalog.replay(Some(seq)).unwrap()
+        );
+    }
+}
+
+/// The case the old assertion protected: with every image **and** every
+/// snapshot manifest destroyed there is no catalog to open and no earlier
+/// state is offered, while the delta chain still recovers every commit.
+#[test]
+fn a_destroyed_catalog_and_snapshot_fail_to_open() {
+    let steps = scripted_history();
+    let s = SimStorage::new();
+    build(s.clone(), 7, &steps).unwrap();
+    let original = open_head(&s, &opts()).unwrap();
+    let mut bytes = s.contents();
+    let spans: Vec<_> = Frames::new(&bytes[..], 0, Limits::default())
+        .map(|f| f.unwrap())
+        .filter(|f| f.kind == FrameKind::MetadataDelta)
+        .collect();
+    for f in spans {
+        bytes[(f.offset as usize + SKIPPABLE_HEADER_LEN)..f.end() as usize].fill(0);
+    }
+    for h in commit_history(&s, &opts()).unwrap() {
+        let Metadata::Checkpoint { snapshot, .. } = h.commit.metadata else {
+            panic!("this writer emits checkpoints")
+        };
+        let from = snapshot.offset as usize + SKIPPABLE_HEADER_LEN;
+        bytes[from..(snapshot.offset + snapshot.stored_len) as usize].fill(0);
+    }
+    let damaged = SimStorage::from_bytes(bytes);
     assert_eq!(
         open_head(&damaged, &opts()).unwrap_err().code,
         ErrorCode::StoredIntegrityFailed
     );
+    for h in commit_history(&damaged, &opts()).unwrap() {
+        assert_eq!(
+            open_at_footer(&damaged, h.footer_offset, &opts())
+                .unwrap_err()
+                .code,
+            ErrorCode::StoredIntegrityFailed,
+            "commit {}",
+            h.commit.seq
+        );
+    }
     let rec = recover_with_trusted_head(&damaged, &opts()).unwrap();
+    assert!(rec.baseline.is_none());
     assert_eq!(rec.scope_for(2), RecoveryScope::SnapshotRecovery);
-    assert_eq!(rec.scope_for(0), RecoveryScope::HistoricalRecovery);
-    let cat = rec.catalog.as_ref().unwrap();
+    let cat = rec.head_catalog().unwrap();
     for seq in 0..=2 {
         assert_eq!(
             cat.replay(Some(seq)).unwrap(),

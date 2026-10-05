@@ -29,6 +29,7 @@
 //! | 2 head + tail | `open_append` locates and fully opens the head; an uncommitted tail is refused, or truncated only on explicit request with an audit record ([`TailPolicy`]); each commit re-checks the file length |
 //! | 3 content | the archive descriptor at offset 0 (first commit only, D12), then data objects, one Zstandard frame per chunk |
 //! | 4 recovery + metadata | delta manifest, snapshot manifest, then the catalog image in its binary envelope ([`crate::image`]) |
+//! | 4b adopt | D10.7: re-read the snapshot manifest and the image from storage, hash-verify, decode, and compare each with the source state; on a mismatch roll back, no new head ([`ErrorCode::CheckpointMismatch`]) |
 //! | 5 commit | the commit record (schema 1) |
 //! | 6 persist | `sync_data` |
 //! | 7 footer | appended directly after the commit frame |
@@ -67,10 +68,20 @@
 //! * **Physical order** of a checkpoint's objects is delta manifest,
 //!   snapshot manifest, image (spec §8.1: recovery records, then metadata;
 //!   "physical ordering MAY vary"). Not a wire rule; readers use the refs.
-//! * **The snapshot manifest is not read when opening.** D10.9: a damaged
+//! * **The snapshot manifest is not read when opening, unless the image's
+//!   stored bytes are damaged** (D10.9, review decisions Q31, Q32). A damaged
 //!   snapshot with an intact image leaves reads working (recoverability
-//!   `DEGRADED`, reported by T17). [`read_snapshot`] reads it on demand.
-//!   Appending does read it, for promised attributes (below).
+//!   `DEGRADED`, [`crate::damage`]). A reader whose base image fails with
+//!   [`is_stored_damage`] rebuilds the catalog from the same commit's
+//!   snapshot manifest, hash-verified and identity-bound, without SQLite
+//!   ([`CatalogSource::SnapshotManifest`]); it never uses an earlier
+//!   checkpoint, and any other failure (an invalid record, an unsupported
+//!   envelope, a limit, I/O) is refused as before. A checkpoint head
+//!   likewise tolerates stored damage to its own delta manifest, which no
+//!   read needs ([`OpenedHead::manifest_error`]). [`read_snapshot`] reads
+//!   the snapshot on demand. Appending does read it, for promised
+//!   attributes (below), and refuses on any failure rather than falling
+//!   back (Q34).
 //! * **Promised attributes** are not in the catalog until C6, so the image
 //!   cannot carry them, but a snapshot must (D10.3). The writer keeps them
 //!   per reachable version. On `open_append` it takes them from the base
@@ -115,12 +126,14 @@ use crate::manifest::{
     Attributes, ChunkEntry, FileVersionEntry, Manifest, ManifestKind, Mtime, ParentLink,
 };
 use crate::object::{build_object, ArchiveId, IdSource};
-use crate::recovery::{recover_from_manifests, ManifestRecovery};
+use crate::recovery::{
+    catalog_from_snapshot, recover_from_manifests, ManifestRecovery, RecoveryScope,
+};
 use crate::segment::{check_delta_parent_link, walk_segment, SegmentInfo};
+use crate::state::AuthoritativeState;
 use crate::storage::{DirectoryDurability, ReadStorage, Storage, StorageError, StorageReader};
 
-/// `archive_meta` key holding the archive ID (32 bytes).
-pub const META_ARCHIVE_ID: &str = "archive_id";
+pub use crate::catalog::META_ARCHIVE_ID;
 /// `archive_meta` key holding the writer parameters recorded at creation
 /// (spec §13: chunking parameters must be recorded per archive). Canonical
 /// CBOR `{0: 0 (fixed-size chunking), 1: max chunk bytes, 2: zstd level}`.
@@ -575,6 +588,30 @@ pub(crate) fn skippable_payload<'a>(
     }
 }
 
+/// The only failure treated as damage to stored bytes (review decisions
+/// Q31, Q32). Every object is hash-checked before it is parsed, so any change
+/// to its stored bytes (a flipped bit, zeroed bytes, a deleted payload) is
+/// this code, before any decoder runs. An object that passes its hash and
+/// then fails to decode or validate carries exactly the bytes its commit was
+/// published with: an invalid record, which D10.4 refuses, not damage that a
+/// twin representation may stand in for. `IO_ERROR` and `OUT_OF_BOUNDS` are
+/// operational; `LIMIT_EXCEEDED` and `UNSUPPORTED_FEATURE` are "cannot", not
+/// "damaged".
+pub fn is_stored_damage(e: &MochiError) -> bool {
+    e.code == ErrorCode::StoredIntegrityFailed
+}
+
+/// Where an opened commit's catalog came from (D10.9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogSource {
+    /// The base checkpoint's catalog image: the normal path.
+    Image,
+    /// Rebuilt from the base checkpoint's snapshot manifest because the
+    /// image's stored bytes are damaged. The same commit's state, never an
+    /// earlier one.
+    SnapshotManifest { image_error: MochiError },
+}
+
 /// A fully verified head: its commit, descriptor, delta manifest, and
 /// catalog. The snapshot manifest of a checkpoint is not loaded (see
 /// [`read_snapshot`]).
@@ -584,12 +621,22 @@ pub struct OpenedHead {
     pub commit: CommitRecord,
     pub commit_id: CommitId,
     pub descriptor: Descriptor,
-    /// This commit's delta manifest (commit key 6).
-    pub manifest: Manifest,
+    /// This commit's delta manifest (commit key 6). `None` only for a
+    /// checkpoint opened for reading whose delta manifest's stored bytes are
+    /// damaged (review decision Q31, D10.9: nothing reads it, so the
+    /// commit's reads are unaffected). A delta head always has it: it is in
+    /// its own replay segment.
+    pub manifest: Option<Manifest>,
+    /// Why `manifest` is `None`.
+    pub manifest_error: Option<MochiError>,
     /// The catalog at this commit: the checkpoint's image, or for a delta
     /// commit its base checkpoint's image with the segment's delta
-    /// manifests replayed onto it (D10.4).
+    /// manifests replayed onto it (D10.4); if the image's stored bytes are
+    /// damaged, the same commit's snapshot manifest stands in for it
+    /// ([`CatalogSource`]).
     pub catalog: Catalog,
+    /// Where `catalog`'s base came from.
+    pub catalog_source: CatalogSource,
     /// The replay segment this commit was opened through. For a checkpoint
     /// it is the commit itself. `base_hint_mismatch` is a diagnostic only
     /// (review decision 17).
@@ -675,7 +722,7 @@ fn read_descriptor(
 /// that it is of `kind` and carries the commit's D11 identity
 /// (`ENVELOPE_INVALID` on a mismatch, the same fault codes as the binary
 /// envelope).
-fn read_bound_manifest(
+pub(crate) fn read_bound_manifest(
     src: &dyn ReadStorage,
     commit: &CommitRecord,
     r: &ObjectRef,
@@ -748,6 +795,7 @@ type Replayed = (
     Catalog,
     SegmentInfo,
     Option<BTreeMap<FileVersionId, Attributes>>,
+    CatalogSource,
 );
 
 struct Opened {
@@ -768,14 +816,29 @@ fn open_at(
     // D12: interpretation needs a valid descriptor bound to this commit.
     let descriptor = read_descriptor(src, &commit, limit, opts)?;
 
-    let manifest = read_bound_manifest(
+    // Q31: a checkpoint opened for reading does not need its own delta
+    // manifest (the snapshot's base is the checkpoint itself, D10.9), so
+    // damage to its stored bytes is recorded, not fatal. Any other failure
+    // (an invalid record, a limit, I/O) is refused as before, and so is every
+    // failure on a delta head or in append mode.
+    let (manifest, manifest_error) = match read_bound_manifest(
         src,
         &commit,
         &commit.delta_manifest,
         limit,
         ManifestKind::Delta,
         opts,
-    )?;
+    ) {
+        Ok(m) => (Some(m), None),
+        Err(e)
+            if mode == OpenMode::Read
+                && commit.metadata.is_checkpoint()
+                && is_stored_damage(&e) =>
+        {
+            (None, Some(e))
+        }
+        Err(e) => return Err(e),
+    };
 
     let head_entry = HistoryEntry {
         footer_offset: location.footer.footer_offset,
@@ -783,9 +846,20 @@ fn open_at(
         commit: commit.clone(),
         commit_id,
     };
-    let (catalog, segment, attributes) = match commit.metadata {
+    let (catalog, segment, attributes, catalog_source) = match commit.metadata {
         Metadata::Checkpoint { image, .. } => {
-            let catalog = open_checkpoint_catalog(src, &head_entry, &image, opts, mode)?;
+            let (catalog, source) = base_catalog(
+                src,
+                &head_entry,
+                &image,
+                opts,
+                mode,
+                mode == OpenMode::Append,
+            )?;
+            if mode == OpenMode::Read {
+                // A catalog rebuilt from S(b) is writable; a reader's never is.
+                catalog.make_query_only()?;
+            }
             let segment = SegmentInfo {
                 base_seq: commit.seq,
                 base_commit_id: commit_id,
@@ -816,9 +890,19 @@ fn open_at(
                     Some(reachable_attributes(&reachable, map).map_err(attributes_incomplete)?)
                 }
             };
-            (catalog, segment, attributes)
+            (catalog, segment, attributes, source)
         }
-        Metadata::Delta { .. } => replay_segment(src, head_entry, &manifest, opts, mode)?,
+        Metadata::Delta { .. } => {
+            // A delta head's own delta manifest is in its segment, so the
+            // tolerance above never applies to it.
+            let own = manifest.as_ref().ok_or_else(|| {
+                MochiError::new(
+                    ErrorCode::InvalidArgument,
+                    "internal: a delta head without its delta manifest",
+                )
+            })?;
+            replay_segment(src, head_entry, own, opts, mode)?
+        }
     };
 
     if catalog.head_commit()? != Some(commit.seq) {
@@ -834,14 +918,16 @@ fn open_at(
             commit_id,
             descriptor,
             manifest,
+            manifest_error,
             catalog,
+            catalog_source,
             segment,
         },
         attributes,
     })
 }
 
-fn checkpoint_snapshot_ref(commit: &CommitRecord) -> Result<ObjectRef> {
+pub(crate) fn checkpoint_snapshot_ref(commit: &CommitRecord) -> Result<ObjectRef> {
     match commit.metadata {
         Metadata::Checkpoint { snapshot, .. } => Ok(snapshot),
         Metadata::Delta { .. } => Err(MochiError::new(
@@ -875,15 +961,16 @@ fn attributes_incomplete(e: MochiError) -> MochiError {
     )
 }
 
-/// Open checkpoint `cp`'s catalog image: stored hash first, then the binary
+/// Checkpoint `cp`'s catalog image: stored hash first, then the binary
 /// envelope bound to `cp` (D11), and only then SQLite (plan C5). The catalog
-/// must materialize `cp` and belong to its archive.
-fn open_checkpoint_catalog(
+/// must materialize `cp` and belong to its archive. `writable` selects a
+/// catalog that accepts writes (replay and append) over a query-only one.
+pub(crate) fn check_image(
     src: &dyn ReadStorage,
     cp: &HistoryEntry,
     image_ref: &ObjectRef,
     opts: &ReadOptions,
-    mode: OpenMode,
+    writable: bool,
 ) -> Result<Catalog> {
     let stored = load_verified(
         src,
@@ -893,9 +980,10 @@ fn open_checkpoint_catalog(
         "catalog checkpoint",
     )?;
     let image = decode_image_record(&stored, &cp.commit.identity(), &opts.limits)?;
-    let catalog = match mode {
-        OpenMode::Read => Catalog::open_image(image, &opts.catalog)?,
-        OpenMode::Append => Catalog::open_image_writable(image, &opts.catalog)?,
+    let catalog = if writable {
+        Catalog::open_image_writable(image, &opts.catalog)?
+    } else {
+        Catalog::open_image(image, &opts.catalog)?
     };
     if catalog.head_commit()? != Some(cp.commit.seq) {
         return Err(MochiError::new(
@@ -910,6 +998,57 @@ fn open_checkpoint_catalog(
         ));
     }
     Ok(catalog)
+}
+
+/// Base checkpoint `base`'s catalog (D10.9).
+///
+/// * The image is used when it is intact: `(catalog, Image)`. The snapshot
+///   manifest is **not** read.
+/// * A reader ([`OpenMode::Read`]) whose image fails with stored damage
+///   ([`is_stored_damage`]) rebuilds the catalog from the same commit's
+///   snapshot manifest, hash-verified and identity-bound, without SQLite
+///   ([`catalog_from_snapshot`]). If that fails too, the image's error is
+///   returned with the snapshot's failure named. Never an earlier
+///   checkpoint (D10.4, D10.6).
+/// * Any other image failure, and every failure when appending, is
+///   returned as it is (review decision Q34): the writer needs the image's
+///   writer parameters, and repair is plan-then-apply (§22.2).
+///
+/// `writable` as for [`check_image`]. A catalog rebuilt from the snapshot is
+/// always writable; a reader makes it query-only afterwards.
+fn base_catalog(
+    src: &dyn ReadStorage,
+    base: &HistoryEntry,
+    image_ref: &ObjectRef,
+    opts: &ReadOptions,
+    mode: OpenMode,
+    writable: bool,
+) -> Result<(Catalog, CatalogSource)> {
+    match check_image(src, base, image_ref, opts, writable) {
+        Ok(c) => Ok((c, CatalogSource::Image)),
+        Err(image_error) if mode == OpenMode::Read && is_stored_damage(&image_error) => {
+            let rebuilt = read_bound_manifest(
+                src,
+                &base.commit,
+                &checkpoint_snapshot_ref(&base.commit)?,
+                base.commit_offset,
+                ManifestKind::Snapshot,
+                opts,
+            )
+            .and_then(|s_b| catalog_from_snapshot(&s_b));
+            match rebuilt {
+                Ok(c) => Ok((c, CatalogSource::SnapshotManifest { image_error })),
+                Err(snapshot_error) => Err(MochiError::new(
+                    image_error.code,
+                    format!(
+                        "{}; the snapshot manifest could not stand in for it: {}",
+                        image_error.message, snapshot_error.message
+                    ),
+                )),
+            }
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// T11 + T12: open a delta commit through its segment.
@@ -953,8 +1092,8 @@ fn replay_segment(
     };
     // Replay needs a writable connection; a reader's is made query-only
     // once replay is done.
-    let base_catalog = open_checkpoint_catalog(src, base, &image, opts, OpenMode::Append)?;
-    let mut applier = SegmentApplier::new(base_catalog)?;
+    let (base_cat, catalog_source) = base_catalog(src, base, &image, opts, mode, true)?;
+    let mut applier = SegmentApplier::new(base_cat)?;
 
     // Attributes, append only: S(b) first, before any delta is applied, so
     // a damaged S(b) refuses append without doing the replay work.
@@ -979,42 +1118,14 @@ fn replay_segment(
         }
     };
 
-    for pair in entries.windows(2) {
-        let (prev, e) = (&pair[0], &pair[1]);
-        let loaded;
-        let delta = if e.commit.seq == last.commit.seq {
-            head_manifest
-        } else {
-            loaded = read_bound_manifest(
-                src,
-                &e.commit,
-                &e.commit.delta_manifest,
-                e.commit_offset,
-                ManifestKind::Delta,
-                opts,
-            )?;
-            &loaded
-        };
-        check_delta_parent_link(delta, &prev.commit)?;
-        applier.apply(delta)?;
-        if let Some(map) = attributes.as_mut() {
-            // Versions are immutable and introduced once (the applier has
-            // just refused any reintroduction, D10.4): a delta's attributes
-            // are those of the versions it introduces, nothing else.
-            for v in &delta.file_versions {
-                if map.insert(v.version.id, v.attributes).is_some() {
-                    return Err(MochiError::new(
-                        ErrorCode::RecordInvalid,
-                        format!(
-                            "delta manifest {} introduces a version the base snapshot already \
-                             lists (D10.4)",
-                            delta.commit_seq
-                        ),
-                    ));
-                }
-            }
-        }
-    }
+    apply_segment_deltas(
+        src,
+        &entries,
+        Some(head_manifest),
+        &mut applier,
+        attributes.as_mut(),
+        opts,
+    )?;
 
     if applier.head() != last.commit.seq {
         return Err(MochiError::new(
@@ -1032,7 +1143,66 @@ fn replay_segment(
     if mode == OpenMode::Read {
         catalog.make_query_only()?;
     }
-    Ok((catalog, info, attributes))
+    Ok((catalog, info, attributes, catalog_source))
+}
+
+/// Apply deltas *b*+1 … *h* (from `entries`, which [`walk_segment`] produced,
+/// *b* first) onto `applier`, which holds *b*. For each *j*: load delta *j*
+/// (stored hash, decode, D11 identity, parent sequence) unless *j* = *h* and
+/// `head_manifest` is given; check its parent link against commit *j* − 1's
+/// key 6 (Q22); apply it atomically; and, with `attributes`, add the versions
+/// it introduces (a reintroduction is `RECORD_INVALID`, D10.4). Stops at the
+/// first failure. Shared by opening ([`replay_segment`]) and baseline
+/// recovery ([`recover_baseline`]), so the replay rules exist once.
+fn apply_segment_deltas(
+    src: &dyn ReadStorage,
+    entries: &[HistoryEntry],
+    head_manifest: Option<&Manifest>,
+    applier: &mut SegmentApplier,
+    mut attributes: Option<&mut BTreeMap<FileVersionId, Attributes>>,
+    opts: &ReadOptions,
+) -> Result<()> {
+    let Some(last) = entries.last() else {
+        return Ok(());
+    };
+    for pair in entries.windows(2) {
+        let (prev, e) = (&pair[0], &pair[1]);
+        let loaded;
+        let delta = match head_manifest {
+            Some(m) if e.commit.seq == last.commit.seq => m,
+            _ => {
+                loaded = read_bound_manifest(
+                    src,
+                    &e.commit,
+                    &e.commit.delta_manifest,
+                    e.commit_offset,
+                    ManifestKind::Delta,
+                    opts,
+                )?;
+                &loaded
+            }
+        };
+        check_delta_parent_link(delta, &prev.commit)?;
+        applier.apply(delta)?;
+        if let Some(map) = attributes.as_deref_mut() {
+            // Versions are immutable and introduced once (the applier has
+            // just refused any reintroduction, D10.4): a delta's attributes
+            // are those of the versions it introduces, nothing else.
+            for v in &delta.file_versions {
+                if map.insert(v.version.id, v.attributes).is_some() {
+                    return Err(MochiError::new(
+                        ErrorCode::RecordInvalid,
+                        format!(
+                            "delta manifest {} introduces a version the base snapshot already \
+                             lists (D10.4)",
+                            delta.commit_seq
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// One commit in the published history.
@@ -1122,21 +1292,210 @@ pub(crate) fn walk_back(
     Ok(out)
 }
 
-/// Rebuild the catalog from recovery manifests, trusting only the chain that
-/// ends at the manifest the **footer-verified head commit** names (plan C5,
-/// closing the gap found in C4). Use when the catalog checkpoint is damaged.
+/// Result of baseline recovery (Annex B.2 D10.8) for one head.
+#[derive(Debug)]
+pub struct BaselineRecovery {
+    pub head_seq: u64,
+    pub head_commit_id: CommitId,
+    /// The replay segment the head belongs to; `segment.base_seq` is *b*.
+    pub segment: SegmentInfo,
+    /// Query-only. Materializes commits *b* … *h*: `replay(Some(s))` works for
+    /// those, not for earlier commits. It was built from S(*b*), not from an
+    /// image, so it carries `META_ARCHIVE_ID` but no writer parameters
+    /// (review decision Q29).
+    pub catalog: Catalog,
+    /// Promised attributes of every version reachable at the head.
+    pub attributes: BTreeMap<FileVersionId, Attributes>,
+}
+
+/// Baseline recovery for the commit whose footer is at `footer_offset`
+/// (D10.8). Same footer checks as [`open_at_footer`]; the tail is not
+/// classified.
+pub fn recover_baseline_at_footer(
+    src: &dyn ReadStorage,
+    footer_offset: u64,
+    opts: &ReadOptions,
+) -> Result<BaselineRecovery> {
+    let r = reader(src)?;
+    let footer = validate_footer(&r, footer_offset, &opts.limits)?;
+    if !footer_names_commit(&footer) {
+        return Err(MochiError::new(
+            ErrorCode::FooterInvalid,
+            "the footer does not name a commit record",
+        ));
+    }
+    let (commit, commit_id) = read_commit(src, &footer, opts)?;
+    let head = HistoryEntry {
+        footer_offset: footer.footer_offset,
+        commit_offset: footer.fields.commit_offset,
+        commit,
+        commit_id,
+    };
+    recover_baseline(src, head, opts)
+}
+
+/// D10.8: recover the state of `head` from S(*b*) plus the delta manifests
+/// after *b*. Needs commit *b*'s record (the first later delta's parent link
+/// is checked against the delta-manifest hash it holds) and **neither SQLite,
+/// nor delta manifest *b*, nor any earlier manifest**.
 ///
-/// What this does and does not establish: manifests that disagree with the
-/// published commit chain (substituted, forged, or from another archive) are
-/// ignored. A forger who rewrites the commit records and footers as well
-/// produces a different, self-consistent file; only an external anchor (spec
-/// §5.7, D8) detects that.
+/// Reads, in order: the descriptor (D12: this is interpretation, so a bad
+/// descriptor is `DESCRIPTOR_INVALID`); the footers and commit records of the
+/// segment *b* … *h*; S(*b*); delta manifests *b*+1 … *h*. Any failure is
+/// returned as it is: no partial result, no earlier checkpoint, no search
+/// (D10.4, D10.6).
+fn recover_baseline(
+    src: &dyn ReadStorage,
+    head: HistoryEntry,
+    opts: &ReadOptions,
+) -> Result<BaselineRecovery> {
+    let head_seq = head.commit.seq;
+    let head_commit_id = head.commit_id;
+    read_descriptor(src, &head.commit, head.commit_offset, opts)?;
+    let (entries, segment) = walk_segment(src, head, opts)?;
+    let (Some(base), Some(last)) = (entries.first(), entries.last()) else {
+        return Err(MochiError::new(
+            ErrorCode::InvalidArgument,
+            "internal: an empty replay segment",
+        ));
+    };
+    let s_b = read_bound_manifest(
+        src,
+        &base.commit,
+        &checkpoint_snapshot_ref(&base.commit)?,
+        base.commit_offset,
+        ManifestKind::Snapshot,
+        opts,
+    )?;
+    let catalog = catalog_from_snapshot(&s_b)?;
+    let mut attributes: BTreeMap<FileVersionId, Attributes> = s_b
+        .file_versions
+        .iter()
+        .map(|v| (v.version.id, v.attributes))
+        .collect();
+    let mut applier = SegmentApplier::new(catalog)?;
+    apply_segment_deltas(
+        src,
+        &entries,
+        None,
+        &mut applier,
+        Some(&mut attributes),
+        opts,
+    )?;
+    if applier.head() != last.commit.seq {
+        return Err(MochiError::new(
+            ErrorCode::RecordInvalid,
+            "replay did not reach the head commit",
+        ));
+    }
+    // §11.1: snapshot recovery includes promised attributes, so a version
+    // with none is not a partial success (same code as checklist Q24).
+    let attributes = reachable_attributes(applier.namespace(), attributes).map_err(|e| {
+        MochiError::new(
+            e.code,
+            format!(
+                "cannot recover: promised attributes could not be reconstructed from the \
+                 base snapshot and the segment's deltas ({})",
+                e.message
+            ),
+        )
+    })?;
+    let catalog = applier.into_catalog();
+    catalog.make_query_only()?;
+    Ok(BaselineRecovery {
+        head_seq,
+        head_commit_id,
+        segment,
+        catalog,
+        attributes,
+    })
+}
+
+/// What [`recover_with_trusted_head`] found for the footer-verified head.
+#[derive(Debug)]
+pub struct TrustedRecovery {
+    pub head_seq: u64,
+    pub head_commit_id: CommitId,
+    /// Manifest-chain recovery (C4/C5), anchored on the head commit's key-6
+    /// hash. `Err` when it could not run at all (for example the head's delta
+    /// manifest is gone, or no manifest frame could be scanned).
+    pub chain: std::result::Result<ManifestRecovery, MochiError>,
+    /// D10.8 baseline recovery, attempted only when `chain` does not reach
+    /// the head (review decision Q30). `None`: not attempted.
+    pub baseline: Option<std::result::Result<BaselineRecovery, MochiError>>,
+}
+
+impl TrustedRecovery {
+    /// The §11.1 scope the metadata supports for commit `seq`: from the
+    /// baseline if it covers `seq` (snapshot recovery at the head, historical
+    /// below it), else from the chain, else payload salvage.
+    pub fn scope_for(&self, seq: u64) -> RecoveryScope {
+        if let Some(Ok(b)) = &self.baseline {
+            if (b.segment.base_seq..=b.head_seq).contains(&seq) {
+                return if seq == b.head_seq {
+                    RecoveryScope::SnapshotRecovery
+                } else {
+                    RecoveryScope::HistoricalRecovery
+                };
+            }
+        }
+        match &self.chain {
+            Ok(c) => c.scope_for(seq),
+            Err(_) => RecoveryScope::PayloadSalvage,
+        }
+    }
+
+    /// The catalog that reaches the head: the baseline's, else the chain's if
+    /// its rebuilt range ends at the head.
+    pub fn head_catalog(&self) -> Option<&Catalog> {
+        if let Some(Ok(b)) = &self.baseline {
+            return Some(&b.catalog);
+        }
+        match &self.chain {
+            Ok(c) if c.snapshot_range.map(|(_, last)| last) == Some(self.head_seq) => {
+                c.catalog.as_ref()
+            }
+            _ => None,
+        }
+    }
+
+    /// Promised attributes at the head, from the same source as
+    /// [`TrustedRecovery::head_catalog`]. (The chain's map covers every
+    /// version it saw, not only the reachable ones.)
+    pub fn head_attributes(&self) -> Option<&BTreeMap<FileVersionId, Attributes>> {
+        if let Some(Ok(b)) = &self.baseline {
+            return Some(&b.attributes);
+        }
+        match &self.chain {
+            Ok(c) if c.snapshot_range.map(|(_, last)| last) == Some(self.head_seq) => {
+                Some(&c.attributes)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Recover what the footer-verified head makes recoverable, when the catalog
+/// checkpoint cannot be used (plan C5, T16).
+///
+/// 1. Manifest-chain recovery, trusting only the chain that ends at the
+///    manifest the head commit names (closing the gap found in C4): manifests
+///    that disagree with the published commit chain (substituted, forged, or
+///    from another archive) are ignored. It is the only path that recovers
+///    history before the head's base.
+/// 2. If that chain does not reach the head, baseline recovery (D10.8):
+///    S(*b*) plus the later deltas, from the head's own segment only.
+///
+/// A forger who rewrites the commit records and footers as well produces a
+/// different, self-consistent file; only an external anchor (spec §5.7, D8)
+/// detects that. This function fails only when the head itself cannot be
+/// located or its commit record cannot be read.
 pub fn recover_with_trusted_head(
     src: &dyn ReadStorage,
     opts: &ReadOptions,
-) -> Result<ManifestRecovery> {
+) -> Result<TrustedRecovery> {
     let loc = locate_head(src, &opts.limits)?;
-    let (commit, _) = read_commit(src, &loc.footer, opts)?;
+    let (commit, commit_id) = read_commit(src, &loc.footer, opts)?;
     let r = StorageReader::prefix(src, loc.committed_len)?;
     let mut found = Vec::new();
     for span in Frames::new(&r, 0, opts.limits) {
@@ -1150,11 +1509,29 @@ pub fn recover_with_trusted_head(
             found.push(StoredObject::from_loaded(buf));
         }
     }
-    recover_from_manifests(
+    let head_seq = commit.seq;
+    let head = HistoryEntry {
+        footer_offset: loc.footer.footer_offset,
+        commit_offset: loc.footer.fields.commit_offset,
+        commit: commit.clone(),
+        commit_id,
+    };
+    let chain = recover_from_manifests(
         &found,
         Some(commit.delta_manifest.stored_hash),
         &opts.limits,
-    )
+    );
+    let reached = matches!(
+        &chain,
+        Ok(c) if c.snapshot_range.map(|(_, last)| last) == Some(head_seq)
+    );
+    let baseline = (!reached).then(|| recover_baseline(src, head, opts));
+    Ok(TrustedRecovery {
+        head_seq,
+        head_commit_id: commit_id,
+        chain,
+        baseline,
+    })
 }
 
 // ---- writing ---------------------------------------------------------------------
@@ -1350,6 +1727,8 @@ pub mod phase {
     pub const MANIFEST: &str = "manifest";
     /// The snapshot manifest and the catalog image.
     pub const CHECKPOINT: &str = "checkpoint";
+    /// Re-reading and checking both checkpoint representations (D10.7).
+    pub const ADOPT: &str = "adopt";
     pub const COMMIT_RECORD: &str = "commit-record";
     pub const SYNC_CONTENT: &str = "sync-content";
     pub const FOOTER: &str = "footer";
@@ -1385,6 +1764,10 @@ pub struct ArchiveWriter<S: Storage> {
     new_descriptor: Option<Descriptor>,
     /// `EveryCommit` unless a test changed it (see [`CheckpointPolicy`]).
     policy: CheckpointPolicy,
+    /// Test control: damage what a checkpoint serializes (see
+    /// [`CheckpointTamper`]).
+    #[cfg(any(test, feature = "test-controls"))]
+    tamper: Option<CheckpointTamper>,
     needs_directory_sync: bool,
     poisoned: Option<String>,
     audit: Vec<AuditEvent>,
@@ -1454,6 +1837,8 @@ impl<S: Storage> ArchiveWriter<S> {
             // TAR compatibility at creation arrives with that profile.
             new_descriptor: Some(Descriptor::new(archive_id, false)),
             policy: CheckpointPolicy::EveryCommit,
+            #[cfg(any(test, feature = "test-controls"))]
+            tamper: None,
             needs_directory_sync: true,
             poisoned: None,
             audit: Vec::new(),
@@ -1495,6 +1880,8 @@ impl<S: Storage> ArchiveWriter<S> {
                         attributes,
                         new_descriptor: None,
                         policy: CheckpointPolicy::EveryCommit,
+                        #[cfg(any(test, feature = "test-controls"))]
+                        tamper: None,
                         needs_directory_sync: false,
                         poisoned: None,
                         audit,
@@ -2024,41 +2411,73 @@ impl<S: Storage> ArchiveWriter<S> {
         };
         let (metadata, attributes) = if checkpoint {
             ctx.report(phase::CHECKPOINT, 0, None);
-            let snapshot = Manifest::snapshot_from_catalog(
+            #[allow(unused_mut)]
+            let mut snapshot = Manifest::snapshot_from_catalog(
                 &cat,
                 self.archive_id,
                 seq,
                 transaction_id,
                 &attributes,
             )?;
-            // Keep attributes only for versions still reachable.
-            let attributes: BTreeMap<FileVersionId, Attributes> = snapshot
-                .file_versions
-                .iter()
-                .map(|v| (v.version.id, v.attributes))
-                .collect();
+            // The source of truth for adoption (D10.7): the writer's own
+            // state, never re-derived from what is about to be serialized.
+            // Attributes are kept only for versions still reachable.
+            let reachable = reachable_attributes(&after, attributes.clone())?;
+            let source =
+                AuthoritativeState::from_catalog(&cat, seq)?.with_attributes(reachable.clone());
+            #[cfg(any(test, feature = "test-controls"))]
+            if let Some(t) = self.tamper {
+                t.apply_to_snapshot(&mut snapshot)?;
+            }
             let snapshot_ref = self.append_object(&snapshot.to_stored()?)?;
             ctx.check_cancelled()?;
 
             // Binary envelope v0 (B.2.2, T10), bounded by the reader defaults
             // (B.2.3 writer default rule), not by self.read: an image over the
             // S − 592 budget is CAPACITY_EXCEEDED and nothing is published.
+            #[cfg(any(test, feature = "test-controls"))]
+            let tampered_cat = match self.tamper {
+                Some(CheckpointTamper::ImageOmitsLastOp) => {
+                    Some(self.catalog_without_last_op(&manifest, seq)?)
+                }
+                _ => None,
+            };
+            #[cfg(any(test, feature = "test-controls"))]
+            let image = tampered_cat.as_ref().unwrap_or(&cat).publish()?;
+            #[cfg(not(any(test, feature = "test-controls")))]
             let image = cat.publish()?;
-            let image_ref = self.append_object(&encode_image_record(
-                image.as_bytes(),
-                RecordIdentity {
-                    archive_id: *self.archive_id.as_bytes(),
-                    commit_sequence: seq,
-                    transaction_id,
-                },
-            )?)?;
+            let identity = RecordIdentity {
+                archive_id: *self.archive_id.as_bytes(),
+                commit_sequence: seq,
+                transaction_id,
+            };
+            let image_ref =
+                self.append_object(&encode_image_record(image.as_bytes(), identity)?)?;
+            ctx.check_cancelled()?;
+
+            // D10.7 adoption (§18.1): re-read both representations from the
+            // storage they were just written to, check their hashes, decode
+            // them, and compare each with the source. Any mismatch fails the
+            // commit before the commit record: no new head, and the existing
+            // roll-back removes the unpublished bytes. The writer is not
+            // poisoned (nothing was published, no sync failed; Q40).
+            ctx.report(phase::ADOPT, 0, None);
+            adopt_checkpoint(
+                &self.storage,
+                &source,
+                &snapshot_ref,
+                &image_ref,
+                &identity,
+                self.archive_id,
+                &self.params.encode()?,
+            )?;
             ctx.check_cancelled()?;
             (
                 Metadata::Checkpoint {
                     image: image_ref,
                     snapshot: snapshot_ref,
                 },
-                attributes,
+                reachable,
             )
         } else {
             // A delta on the base the D10.6 rule derives. No snapshot and
@@ -2141,6 +2560,168 @@ impl<S: Storage> ArchiveWriter<S> {
     }
 }
 
+/// D10.7, §18.1: re-read the two checkpoint representations from `storage`,
+/// check their hashes against the references just written, decode them, and
+/// compare each with `source`. The snapshot is decoded without SQLite and
+/// compared **with** attributes; the image is opened as a reader opens it and
+/// compared without them (the image holds none until C6, checklist Q6, Q38).
+///
+/// Bounds are the writer defaults (B.2.3), not the writer's own read limits:
+/// the writer bounded its output by those, and a lower user limit must not
+/// make it reject its own valid output.
+///
+/// A semantic disagreement is `CHECKPOINT_MISMATCH` (Q37). A decoder
+/// rejecting hash-valid bytes the writer just produced is also a mismatch
+/// (the writer wrote something its own reader refuses). A hash failure or a
+/// failed read is a storage fault and keeps its code.
+fn adopt_checkpoint(
+    storage: &dyn ReadStorage,
+    source: &AuthoritativeState,
+    snapshot_ref: &ObjectRef,
+    image_ref: &ObjectRef,
+    identity: &RecordIdentity,
+    archive_id: ArchiveId,
+    writer_params: &[u8],
+) -> Result<()> {
+    let seq = source.seq;
+    let max = Limits::WRITER_DEFAULT.max_frame_len;
+    let mismatch = |what: &str, detail: String| {
+        MochiError::new(
+            ErrorCode::CheckpointMismatch,
+            format!("the {what} of commit {seq} disagrees with the source state: {detail}"),
+        )
+    };
+    let remap = |what: &str, e: MochiError| match e.code {
+        ErrorCode::StoredIntegrityFailed | ErrorCode::IoError | ErrorCode::OutOfBounds => e,
+        _ => mismatch(
+            what,
+            format!("it could not be read back ({}: {})", e.code, e.message),
+        ),
+    };
+
+    // Snapshot: hash, canonical-CBOR decode, identity; no SQLite.
+    let stored = load_verified(
+        storage,
+        snapshot_ref,
+        snapshot_ref.end()?,
+        max,
+        "snapshot manifest",
+    )?;
+    let (manifest, _) =
+        Manifest::from_stored(&stored, &Limits::WRITER_DEFAULT, &CborLimits::default())
+            .map_err(|e| remap("snapshot manifest", e))?;
+    if manifest.kind != ManifestKind::Snapshot || manifest.identity().check(identity).is_err() {
+        return Err(mismatch(
+            "snapshot manifest",
+            "it is not the snapshot bound to this commit".to_string(),
+        ));
+    }
+    let got =
+        AuthoritativeState::from_snapshot(&manifest).map_err(|e| remap("snapshot manifest", e))?;
+    if got != *source {
+        return Err(mismatch(
+            "snapshot manifest",
+            got.differences(source, 8).join("; "),
+        ));
+    }
+
+    // Image: hash, envelope bound to this commit, then SQLite exactly as a
+    // reader opens it (integrity, foreign keys, extents, namespace).
+    let stored = load_verified(storage, image_ref, image_ref.end()?, max, "catalog image")?;
+    let bytes = decode_image_record(&stored, identity, &Limits::WRITER_DEFAULT)
+        .map_err(|e| remap("catalog image", e))?;
+    let img = Catalog::open_image(bytes, &CatalogLimits::default())
+        .map_err(|e| remap("catalog image", e))?;
+    let head = img.head_commit().map_err(|e| remap("catalog image", e))?;
+    if head != Some(seq) {
+        return Err(mismatch(
+            "catalog image",
+            format!("it materializes commit {head:?}"),
+        ));
+    }
+    if img
+        .meta(META_ARCHIVE_ID)
+        .map_err(|e| remap("catalog image", e))?
+        .as_deref()
+        != Some(&archive_id.as_bytes()[..])
+    {
+        return Err(mismatch(
+            "catalog image",
+            "it names another archive".to_string(),
+        ));
+    }
+    if img
+        .meta(META_WRITER_PARAMS)
+        .map_err(|e| remap("catalog image", e))?
+        .as_deref()
+        != Some(writer_params)
+    {
+        return Err(mismatch(
+            "catalog image",
+            "its writer parameters differ".to_string(),
+        ));
+    }
+    let got = AuthoritativeState::from_catalog(&img, seq).map_err(|e| remap("catalog image", e))?;
+    // C6: include attributes once the image stores them (Q6, Q38).
+    let want = source.clone().without_attributes();
+    if got != want {
+        return Err(mismatch(
+            "catalog image",
+            got.differences(&want, 8).join("; "),
+        ));
+    }
+    Ok(())
+}
+
+/// D10.7 for a published checkpoint, as `verify` repeats it: both
+/// representations hash-verified and decoded, then compared without
+/// attributes (the image holds none, Q38). A disagreement is
+/// `CHECKPOINT_MISMATCH`. A representation that fails to load returns that
+/// failure unchanged ([`crate::damage`] reports it as object damage).
+pub fn check_checkpoint_representations(
+    src: &dyn ReadStorage,
+    cp: &HistoryEntry,
+    opts: &ReadOptions,
+) -> Result<()> {
+    let Metadata::Checkpoint { image, snapshot } = cp.commit.metadata else {
+        return Err(MochiError::new(
+            ErrorCode::InvalidArgument,
+            "this commit is not a checkpoint",
+        ));
+    };
+    let snap = read_bound_manifest(
+        src,
+        &cp.commit,
+        &snapshot,
+        cp.commit_offset,
+        ManifestKind::Snapshot,
+        opts,
+    )?;
+    let img = check_image(src, cp, &image, opts, false)?;
+    compare_representations(&snap, &img, cp.commit.seq)
+}
+
+/// The shared comparison: snapshot (decoded, without SQLite) against image
+/// (as a reader opened it), without attributes.
+pub(crate) fn compare_representations(
+    snapshot: &Manifest,
+    image: &Catalog,
+    seq: u64,
+) -> Result<()> {
+    let from_snapshot = AuthoritativeState::from_snapshot(snapshot)?.without_attributes();
+    let from_image = AuthoritativeState::from_catalog(image, seq)?;
+    if from_snapshot != from_image {
+        return Err(MochiError::new(
+            ErrorCode::CheckpointMismatch,
+            format!(
+                "the snapshot manifest and the catalog image of commit {seq} disagree: {}",
+                from_snapshot.differences(&from_image, 8).join("; ")
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// The base a delta written after `head` names (D10.6 base rule).
 fn next_base_after(head: &OpenedHead) -> CommitLink {
     match head.commit.metadata {
@@ -2195,6 +2776,111 @@ impl<S: Storage> ArchiveWriter<S> {
     /// this; it writes `EveryCommit` until the T14 trigger exists.
     pub fn set_checkpoint_policy(&mut self, policy: CheckpointPolicy) -> Result<()> {
         self.policy = policy.validate()?;
+        Ok(())
+    }
+
+    /// Damage what the next checkpoints *serialize* (never the writer's own
+    /// state), to show that adoption blocks the head (D10.7). `None` turns it
+    /// off. Needs a commit with at least one namespace operation for
+    /// [`CheckpointTamper::ImageOmitsLastOp`] and at least one entry for
+    /// [`CheckpointTamper::SnapshotOmitsEntry`]; otherwise it changes nothing.
+    pub fn set_checkpoint_tamper(&mut self, t: Option<CheckpointTamper>) {
+        self.tamper = t;
+    }
+
+    /// A catalog like the one about to be published, except that commit `seq`
+    /// omits the transaction's last namespace operation.
+    fn catalog_without_last_op(&self, manifest: &Manifest, seq: u64) -> Result<Catalog> {
+        let mut c = match self.head {
+            None => {
+                let mut c = Catalog::new_working()?;
+                c.set_meta(META_ARCHIVE_ID, self.archive_id.as_bytes())?;
+                c.set_meta(META_WRITER_PARAMS, &self.params.encode()?)?;
+                c
+            }
+            Some(_) => self.catalog.duplicate()?,
+        };
+        for ch in &manifest.chunks {
+            c.insert_object(&ch.record, ch.location)?;
+        }
+        for v in &manifest.file_versions {
+            c.insert_file_version(&v.version, &v.extents)?;
+        }
+        let keep = manifest.ops.len().saturating_sub(1);
+        c.append_commit(&Commit {
+            seq,
+            parent: self.head.map(|h| h.seq),
+            ops: manifest.ops[..keep].to_vec(),
+        })?;
+        Ok(c)
+    }
+}
+
+/// How [`ArchiveWriter::set_checkpoint_tamper`] damages a checkpoint's
+/// serialized form (test controls only).
+#[cfg(any(test, feature = "test-controls"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointTamper {
+    /// XOR the POSIX mode of the first file version (by ID) that has POSIX
+    /// attributes, in the serialized snapshot only.
+    SnapshotAttributes,
+    /// Drop the last namespace entry (by path) from the serialized snapshot,
+    /// and its version and chunks when nothing else uses them. The result
+    /// still passes the manifest's structure checks: the divergence is
+    /// semantic, not a decode error.
+    SnapshotOmitsEntry,
+    /// Serialize an image whose head commit omits the transaction's last
+    /// namespace operation.
+    ImageOmitsLastOp,
+}
+
+#[cfg(any(test, feature = "test-controls"))]
+impl CheckpointTamper {
+    fn apply_to_snapshot(self, snapshot: &mut Manifest) -> Result<()> {
+        match self {
+            CheckpointTamper::SnapshotAttributes => {
+                if let Some(p) = snapshot
+                    .file_versions
+                    .iter_mut()
+                    .find_map(|v| v.attributes.posix.as_mut())
+                {
+                    p.mode ^= 0o7;
+                }
+            }
+            CheckpointTamper::SnapshotOmitsEntry => {
+                if let Some((_, version)) = snapshot.entries.pop() {
+                    if !snapshot.entries.iter().any(|(_, v)| *v == version) {
+                        if let Some(pos) = snapshot
+                            .file_versions
+                            .iter()
+                            .position(|v| v.version.id == version)
+                        {
+                            let dropped = snapshot.file_versions.remove(pos);
+                            let used = |id: &crate::object::ObjectId| {
+                                snapshot.file_versions.iter().any(|v| {
+                                    v.extents.iter().any(|e| {
+                                        matches!(e.source, ExtentSource::Chunk { chunk, .. } if chunk == *id)
+                                    })
+                                })
+                            };
+                            let gone: Vec<_> = dropped
+                                .extents
+                                .iter()
+                                .filter_map(|e| match e.source {
+                                    ExtentSource::Chunk { chunk, .. } if !used(&chunk) => {
+                                        Some(chunk)
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            snapshot.chunks.retain(|c| !gone.contains(&c.record.id));
+                        }
+                    }
+                }
+                snapshot.canonicalize();
+            }
+            CheckpointTamper::ImageOmitsLastOp => {}
+        }
         Ok(())
     }
 }

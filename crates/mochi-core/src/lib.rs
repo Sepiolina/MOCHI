@@ -15,13 +15,17 @@
 //! ([`object`]); the C3 catalog ([`catalog`]); C4 recovery manifests
 //! ([`manifest`], [`recovery`]); and C5 commit records ([`commit`]) and
 //! single-file publication ([`publish`]): the §12.2 protocol, head location
-//! with interrupted-tail detection, and hash-verified opening.
+//! with interrupted-tail detection, and hash-verified opening. Replay
+//! segments ([`segment`]), the authoritative-state model ([`state`]), and
+//! baseline recovery from a snapshot manifest (T16, in [`publish`]) follow
+//! Annex B.2 D10.4–D10.9.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod catalog;
 pub mod commit;
+pub mod damage;
 pub mod descriptor;
 pub mod error;
 pub mod image;
@@ -32,6 +36,7 @@ pub mod publish;
 pub mod recovery;
 pub mod report;
 pub mod segment;
+pub mod state;
 pub mod status;
 pub mod storage;
 

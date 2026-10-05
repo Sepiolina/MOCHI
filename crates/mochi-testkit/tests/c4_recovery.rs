@@ -325,8 +325,9 @@ fn without(found: &[StoredObject], w: &HistoryWriter, seqs: &[u64]) -> Vec<Store
 /// link and restarted the chain past the missing delta(3), recovering 6..=9.
 /// In schema 1 a snapshot has no parent, and binding S(6) to delta(7)'s
 /// parent link needs commit 6's record (D10.8), which manifest-only recovery
-/// does not have. So: file-level metadata only, and S(6) is unused. Plan T16
-/// restores 6..=9 through `recover_with_trusted_head`.
+/// does not have. So: file-level metadata only, and S(6) is unused. T16 restores
+/// 6..=9 through `recover_with_trusted_head`; the real-archive version of this
+/// case is `t16_missing_delta_before_a_checkpoint_is_bridged_by_commit_records`.
 #[test]
 fn missing_delta_before_a_snapshot_is_not_bridged_without_commit_records() {
     let w = fixed();

@@ -79,6 +79,7 @@ struct Sample {
     catalog_update: Duration,
     manifest: Duration,
     checkpoint: Duration,
+    adopt: Duration,
     commit_record: Duration,
     sync_objects: Duration,
     footer_and_sync: Duration,
@@ -116,8 +117,8 @@ fn main() {
         .unwrap();
     let mut committed = 0u64;
     println!();
-    println!("| prior commits | archive MiB | catalog image KiB | snapshot manifest KiB | footer lookup | open (verify + catalog) | append open (+ snapshot read) | head catalog copy + replay | content | catalog update | delta manifest | checkpoint (snapshot + image) | commit record | sync objects | footer + sync | **append total** (ms) |");
-    println!("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+    println!("| prior commits | archive MiB | catalog image KiB | snapshot manifest KiB | footer lookup | open (verify + catalog) | append open (+ snapshot read) | head catalog copy + replay | content | catalog update | delta manifest | checkpoint (snapshot + image) | adopt (re-read + compare, T15) | adopt / checkpoint | commit record | sync objects | footer + sync | **append total** (ms) |");
+    println!("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
     for &n in SIZES {
         // Grow to n commits (unmeasured).
         while committed < n {
@@ -168,7 +169,8 @@ fn main() {
             s.content = at("catalog") - at("content");
             s.catalog_update = at("manifest") - at("catalog");
             s.manifest = at("checkpoint") - at("manifest");
-            s.checkpoint = at("commit-record") - at("checkpoint");
+            s.checkpoint = at("adopt") - at("checkpoint");
+            s.adopt = at("commit-record") - at("adopt");
             s.commit_record = at("sync-content") - at("commit-record");
             s.sync_objects = at("footer") - at("sync-content");
             s.footer_and_sync = end - at("footer");
@@ -189,8 +191,10 @@ fn main() {
         let size_mib =
             OsReadStorage::open(&file).unwrap().size().unwrap() as f64 / (1 << 20) as f64;
         let col = |f: fn(&Sample) -> Duration| ms(median(samples.iter().map(f).collect()));
+        let ratio = median(samples.iter().map(|s| s.adopt).collect()).as_secs_f64()
+            / median(samples.iter().map(|s| s.checkpoint).collect()).as_secs_f64();
         println!(
-            "| {n} | {size_mib:.1} | {image_kib:.0} | {snapshot_kib:.0} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | **{}** |",
+            "| {n} | {size_mib:.1} | {image_kib:.0} | {snapshot_kib:.0} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {ratio:.2} | {} | {} | {} | **{}** |",
             col(|s| s.footer_lookup),
             col(|s| s.open_total),
             col(|s| s.append_open),
@@ -199,6 +203,7 @@ fn main() {
             col(|s| s.catalog_update),
             col(|s| s.manifest),
             col(|s| s.checkpoint),
+            col(|s| s.adopt),
             col(|s| s.commit_record),
             col(|s| s.sync_objects),
             col(|s| s.footer_and_sync),

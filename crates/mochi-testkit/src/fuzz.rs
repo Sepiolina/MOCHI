@@ -332,6 +332,10 @@ pub fn exercise_archive_open(data: &[u8]) -> ArchiveOpenOutcome {
         limits: fuzz_limits(),
         ..Default::default()
     };
+    // T16: baseline recovery runs on anything with a locatable head, whether
+    // or not the head opens, and must never return a state for another commit.
+    baseline_recovery_is_sound(&storage, &opts);
+    damage_assessment_is_sound(&storage, &opts);
     let Ok(head) = mochi_core::publish::open_head(&storage, &opts) else {
         return ArchiveOpenOutcome::Refused;
     };
@@ -346,7 +350,21 @@ pub fn exercise_archive_open(data: &[u8]) -> ArchiveOpenOutcome {
     // manifest with the commit's identity.
     assert_eq!(head.commit.descriptor.offset, 0);
     assert_eq!(head.descriptor.archive_id, head.commit.archive_id);
-    assert_eq!(head.manifest.identity(), head.commit.identity());
+    match (&head.manifest, &head.manifest_error) {
+        (Some(m), None) => assert_eq!(m.identity(), head.commit.identity()),
+        // Q31: only a checkpoint tolerates it, and only for stored damage.
+        (None, Some(e)) => {
+            assert!(head.commit.metadata.is_checkpoint());
+            assert!(mochi_core::publish::is_stored_damage(e));
+        }
+        _ => panic!("a head has its delta manifest or the reason it has none"),
+    }
+    // D10.9: the snapshot stands in for the image only after stored damage.
+    if let mochi_core::publish::CatalogSource::SnapshotManifest { image_error } =
+        &head.catalog_source
+    {
+        assert!(mochi_core::publish::is_stored_damage(image_error));
+    }
     // Every referenced object lies before the commit frame.
     for (_, o) in head.commit.object_refs() {
         assert!(o.offset + o.stored_len <= head.location.footer.fields.commit_offset);
@@ -415,6 +433,53 @@ pub fn exercise_archive_open(data: &[u8]) -> ArchiveOpenOutcome {
         ArchiveOpenOutcome::OpenedDelta
     } else {
         ArchiveOpenOutcome::OpenedCheckpoint
+    }
+}
+
+/// D10.8: whatever baseline recovery returns for the located head is a
+/// catalog that materializes exactly that head, from a base at or below it.
+/// An error is always acceptable (untrusted input); a wrong state is not.
+fn baseline_recovery_is_sound(
+    storage: &crate::SimStorage,
+    opts: &mochi_core::publish::ReadOptions,
+) {
+    let Ok(loc) = mochi_core::publish::locate_head(storage, &opts.limits) else {
+        return;
+    };
+    if let Ok(b) =
+        mochi_core::publish::recover_baseline_at_footer(storage, loc.footer.footer_offset, opts)
+    {
+        assert_eq!(b.head_seq, loc.footer.fields.commit_sequence);
+        assert_eq!(b.catalog.head_commit().unwrap(), Some(b.head_seq));
+        assert!(b.segment.base_seq <= b.head_seq);
+    }
+}
+
+/// D10.9: the damage assessment of any history whose commit chain walks
+/// holds its own self-check. An error is acceptable (untrusted input) unless
+/// it is the assessment reporting an internal inconsistency.
+fn damage_assessment_is_sound(
+    storage: &crate::SimStorage,
+    opts: &mochi_core::publish::ReadOptions,
+) {
+    use mochi_core::job::{CancellationToken, JobContext, NullProgress};
+    if mochi_core::publish::commit_history(storage, opts).is_err() {
+        return;
+    }
+    let cancel = CancellationToken::new();
+    let ctx = JobContext {
+        progress: &NullProgress,
+        cancel: &cancel,
+    };
+    match mochi_core::damage::assess_damage(storage, opts, &ctx) {
+        Ok(r) => {
+            assert_eq!(r.commits.len() as u64, r.head_seq + 1);
+            assert_eq!(r.objects.len(), r.ranges.len());
+        }
+        Err(e) => assert!(
+            !e.message.starts_with("internal:"),
+            "the assessment found itself inconsistent: {e}"
+        ),
     }
 }
 

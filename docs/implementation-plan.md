@@ -171,7 +171,35 @@ Each phase ends with a working, tested artifact. "Fault-matrix rows" refers to t
   - Tests: `c6_read.rs` (8), against the scripted history's independent model and the test kit's separate reassembly. They cover every commit's snapshot, an absent path or a directory refused with nothing written, a damaged chunk, cancellation, sparse files, and a file whose intact chunks do not match its content hash.
   - Mutations (9): 6 killed. A shorter zero block is an equivalent mutant. Dropping the extent re-check or the length check survives because the catalog already refuses invalid extents at insertion and at open (defense in depth, unreachable through the public API).
   - **Decision [delegated]:** a path absent from the snapshot is `INVALID_ARGUMENT` (exit 3), not a new code; a dedicated not-found code is for R7 if automation needs one.
-  - **Next:** restore to a directory, which brings traversal rejection, collisions, unsupported names, case-insensitivity detection, and O6 attributes. Attributes need the snapshot manifest's per-version attributes exposed (B.2 checklist question 6).
+- **Status (C6 restore engine, 2026-10-05).** `mochi_core::restore::restore` writes an opened commit, or one subtree with the directories above it, into a `RestoreDir`. New pieces:
+  - `storage::RestoreDir`: byte names, nested directories, exclusive creation, no-replace publication.
+  - `OsRestoreDir`: Unix names are the bytes as stored; Windows names are WTF-8 decoded to UTF-16 (O24).
+  - `windows_name_issue`: reserved device names (with extensions, any case, superscript digits), forbidden characters, trailing dot or space, and names that are not representable.
+  - Test kit `SimTree`: an in-memory destination that can be case-insensitive or apply Windows rules on any host.
+  - **Rules** (delegated decisions; spec §10.4 and §23.3 #7 require reporting but leave policy open):
+    - Nothing is ever overwritten or merged. An existing or case-folded name is `NAME_COLLISION`, and the earlier entry keeps its bytes.
+    - Names are never altered. An unsupported one is `NAME_UNSUPPORTED`, and the entry is skipped.
+    - A skipped directory's subtree is reported with its cause.
+    - Every file is streamed to a temporary name, verified (chunks and file-content hash), synced, and only then published. A damaged file is absent, never partial.
+    - Exceptions do not stop the job; only cancellation or a failing destination do.
+  - Two error codes were added: `NAME_COLLISION` and `NAME_UNSUPPORTED` (draft, R7).
+  - **Traversal** cannot be encoded: archive paths reject `.`, `..`, empty, and separator-bearing components. A catalog that holds `d/../f` is refused at open (`catalog` test `relationship_and_mochi_rule_violations_are_refused`).
+  - **Tests** (`c6_restore.rs`, 11, plus Windows-rule unit tests, 27 names) cover:
+    - the head;
+    - case-insensitive collisions (no overwrite, no merge);
+    - existing destination content;
+    - unsupported names under Windows rules;
+    - an entry named like a temporary file;
+    - a damaged file left absent;
+    - subtrees (top-level and nested);
+    - cancellation, including before a directory;
+    - the real filesystem, restored twice: the second run collides everywhere and keeps a locally edited file. On Windows the hostile fixture name is reported as unsupported.
+  - **Mutations:** 15, all killed (two after adding the nested-subtree and directory-cancellation tests).
+  - **Open:**
+    - Attributes (O6) are not restored yet; the report says so, with a warning finding. They need the snapshot manifest's per-version attributes exposed (B.2 checklist question 6).
+    - `OsRestoreDir` is path-based. A local process that swaps a just-created directory for a symbolic link could redirect later writes; descriptor-relative operations (`openat` with `O_NOFOLLOW` on Linux) are the remedy.
+    - Up-front case-insensitivity detection (collisions are already caught as they happen).
+    - The §27 decomposed read benchmarks.
 
 ### C7 — Verification, health, and reports
 - Levels: structural, referential, stored integrity, content integrity, restoration (§20.1). Inventory, search, and disaster-recovery levels return `UNSUPPORTED` in 1.0 unless implemented.

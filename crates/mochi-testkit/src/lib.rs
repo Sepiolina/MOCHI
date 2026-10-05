@@ -16,7 +16,9 @@ pub mod history;
 pub mod replay;
 mod sim;
 mod sim_dir;
+mod sim_tree;
 
 pub use fixtures::{deterministic_bytes, SeqIds};
 pub use sim::{is_halted, CrashMode, Fault, Halted, Op, SimStorage};
 pub use sim_dir::{DirFault, DirOp, SimDir};
+pub use sim_tree::SimTree;

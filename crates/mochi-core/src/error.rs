@@ -121,6 +121,17 @@ pub enum ErrorCode {
     /// e.g. enabling encryption (D12). Write a new archive. Exit 4.
     /// Added in B.2.
     ProfileChangeUnsupported,
+    /// Restoration: an entry's name already exists at the destination, or
+    /// the destination filesystem folds it onto another entry's name (case,
+    /// normalization). Nothing was overwritten or merged (spec §10.4,
+    /// §23.3 #7). A report finding; exit 3 if ever returned as an error.
+    /// Added in C6.
+    NameCollision,
+    /// Restoration: the destination platform cannot hold an entry's name
+    /// (reserved, forbidden characters, not representable). The name was
+    /// not altered; the entry was skipped (spec §10.4, §23.3 #7). A report
+    /// finding; exit 3 if ever returned as an error. Added in C6.
+    NameUnsupported,
 }
 
 impl ErrorCode {
@@ -160,6 +171,8 @@ impl ErrorCode {
         ErrorCode::QuarantineFailed,
         ErrorCode::DurabilityUnconfirmed,
         ErrorCode::ProfileChangeUnsupported,
+        ErrorCode::NameCollision,
+        ErrorCode::NameUnsupported,
     ];
 
     /// The stable string form. Independent of serde so it cannot drift silently;
@@ -200,6 +213,8 @@ impl ErrorCode {
             ErrorCode::QuarantineFailed => "QUARANTINE_FAILED",
             ErrorCode::DurabilityUnconfirmed => "DURABILITY_UNCONFIRMED",
             ErrorCode::ProfileChangeUnsupported => "PROFILE_CHANGE_UNSUPPORTED",
+            ErrorCode::NameCollision => "NAME_COLLISION",
+            ErrorCode::NameUnsupported => "NAME_UNSUPPORTED",
         }
     }
 }
@@ -322,6 +337,8 @@ mod tests {
         "QUARANTINE_FAILED",
         "DURABILITY_UNCONFIRMED",
         "PROFILE_CHANGE_UNSUPPORTED",
+        "NAME_COLLISION",
+        "NAME_UNSUPPORTED",
     ];
 
     #[test]

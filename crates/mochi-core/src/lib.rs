@@ -38,6 +38,7 @@ pub mod quarantine;
 pub mod read;
 pub mod recovery;
 pub mod report;
+pub mod restore;
 pub mod segment;
 pub mod state;
 pub mod status;

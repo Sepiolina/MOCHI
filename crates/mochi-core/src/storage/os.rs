@@ -58,8 +58,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::{
-    check_file_name, DirectoryDurability, ReadStorage, RemoveOutcome, Storage, StorageDir,
-    StorageError,
+    check_file_name, windows_name_issue, DirectoryDurability, NameIssue, ReadStorage,
+    RemoveOutcome, RestoreDir, Storage, StorageDir, StorageError,
 };
 
 #[cfg(not(any(unix, windows)))]
@@ -475,6 +475,116 @@ impl StorageDir for OsDir {
         std::fs::remove_file(&path)?;
         drop(file);
         Ok(RemoveOutcome::Removed)
+    }
+
+    fn sync_directory(&mut self) -> Result<DirectoryDurability, StorageError> {
+        sync_dir(&self.path)
+    }
+}
+
+/// A restore destination directory on the local filesystem (plan C6;
+/// [`RestoreDir`]).
+///
+/// Names are converted without loss or they are refused. On Unix they are
+/// the bytes as they are; on Windows, WTF-8 decoded to UTF-16 (plan O24),
+/// checked against [`windows_name_issue`] first. Creation is exclusive and
+/// publication never replaces (the [`OsDir`] mechanisms).
+///
+/// **Path-based:** each operation joins names onto the directory's path.
+/// Every directory on that path below the restore root was created by this
+/// restoration, exclusively. A local process that replaces one of them with
+/// a symbolic link between two operations could redirect later writes;
+/// descriptor-relative operations (`openat` with `O_NOFOLLOW`) are the
+/// remedy, recorded for C6.
+#[derive(Debug, Clone)]
+pub struct OsRestoreDir {
+    path: PathBuf,
+}
+
+impl OsRestoreDir {
+    /// The existing directory at `path`.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
+        let dir = OsDir::open(path)?;
+        Ok(Self { path: dir.path })
+    }
+
+    /// Where this directory is.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn entry(&self, name: &[u8]) -> Result<PathBuf, StorageError> {
+        if let Some(issue) = self.name_issue(name) {
+            return Err(StorageError::InvalidName {
+                name: format!("{} ({issue})", String::from_utf8_lossy(name)),
+            });
+        }
+        Ok(self.path.join(os_name(name)?))
+    }
+}
+
+#[cfg(unix)]
+fn os_name(name: &[u8]) -> Result<std::ffi::OsString, StorageError> {
+    use std::os::unix::ffi::OsStrExt;
+    Ok(std::ffi::OsStr::from_bytes(name).to_os_string())
+}
+
+#[cfg(windows)]
+fn os_name(name: &[u8]) -> Result<std::ffi::OsString, StorageError> {
+    use std::os::windows::ffi::OsStringExt;
+    crate::catalog::path::utf16_from_wtf8(name)
+        .map(|w| std::ffi::OsString::from_wide(&w))
+        .ok_or_else(|| StorageError::InvalidName {
+            name: String::from_utf8_lossy(name).into_owned(),
+        })
+}
+
+impl RestoreDir for OsRestoreDir {
+    type File = OsStorage;
+
+    fn name_issue(&self, name: &[u8]) -> Option<NameIssue> {
+        if cfg!(windows) {
+            windows_name_issue(name)
+        } else {
+            // Unix: archive components already exclude NUL and `/`, and any
+            // other byte is a valid name byte.
+            None
+        }
+    }
+
+    fn create_dir(&mut self, name: &[u8]) -> Result<Self, StorageError> {
+        let path = self.entry(name)?;
+        let lossy = String::from_utf8_lossy(name);
+        std::fs::create_dir(&path).map_err(exists_as(&lossy))?;
+        Ok(Self { path })
+    }
+
+    fn create_file(&mut self, name: &[u8]) -> Result<OsStorage, StorageError> {
+        let path = self.entry(name)?;
+        let lossy = String::from_utf8_lossy(name);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(exists_as(&lossy))?;
+        Ok(OsStorage {
+            file,
+            path,
+            locked: false,
+        })
+    }
+
+    fn publish_no_replace(&mut self, from: &[u8], to: &[u8]) -> Result<(), StorageError> {
+        let (src, dst) = (self.entry(from)?, self.entry(to)?);
+        publish_no_replace_at(&src, &dst, &String::from_utf8_lossy(to))?;
+        Ok(())
+    }
+
+    fn discard(&mut self, file: OsStorage, name: &[u8]) -> Result<(), StorageError> {
+        let path = self.entry(name)?;
+        drop(file);
+        Ok(std::fs::remove_file(path)?)
     }
 
     fn sync_directory(&mut self) -> Result<DirectoryDurability, StorageError> {

@@ -234,6 +234,96 @@ pub trait StorageDir {
     fn sync_directory(&mut self) -> Result<DirectoryDurability, StorageError>;
 }
 
+/// Why an archive name cannot be created on a restore target (spec §10.4,
+/// §23.3 #7). Restoration reports it and skips the entry; it never renames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameIssue {
+    /// The bytes cannot be expressed as a name on this platform (for example
+    /// a non-UTF-8 POSIX name on Windows).
+    NotRepresentable,
+    /// A reserved device name (`CON`, `NUL`, `COM1`, …), with or without an
+    /// extension.
+    Reserved,
+    /// A byte the platform forbids in names.
+    IllegalCharacter(u8),
+    /// The name ends with a space or a period, which Windows strips.
+    TrailingDotOrSpace,
+}
+
+impl fmt::Display for NameIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotRepresentable => f.write_str("not representable on this platform"),
+            Self::Reserved => f.write_str("a reserved device name"),
+            Self::IllegalCharacter(b) => write!(f, "contains the forbidden byte 0x{b:02x}"),
+            Self::TrailingDotOrSpace => f.write_str("ends with a space or a period"),
+        }
+    }
+}
+
+/// Windows naming rules for one component (Microsoft, "Naming Files, Paths,
+/// and Namespaces"): no `< > : " / \ | ? *` or control characters; no
+/// trailing space or period; none of the reserved device names `CON`, `PRN`,
+/// `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9` (also with the superscript
+/// digits ¹ ² ³), in any case, even with an extension; and valid WTF-8
+/// (plan O24). A pure function, so the rules are tested on every platform.
+pub fn windows_name_issue(name: &[u8]) -> Option<NameIssue> {
+    if crate::catalog::path::utf16_from_wtf8(name).is_none() {
+        return Some(NameIssue::NotRepresentable);
+    }
+    if let Some(b) = name
+        .iter()
+        .find(|b| **b < 0x20 || b"<>:\"/\\|?*".contains(b))
+    {
+        return Some(NameIssue::IllegalCharacter(*b));
+    }
+    if matches!(name.last(), Some(b' ' | b'.')) {
+        return Some(NameIssue::TrailingDotOrSpace);
+    }
+    // The device name is the part before the first period, trailing spaces
+    // ignored ("NUL .txt" is NUL too).
+    let stem = name.split(|b| *b == b'.').next().unwrap_or(name);
+    let stem = stem.trim_ascii_end().to_ascii_uppercase();
+    let reserved = matches!(stem.as_slice(), b"CON" | b"PRN" | b"AUX" | b"NUL")
+        || ((stem.starts_with(b"COM") || stem.starts_with(b"LPT"))
+            && matches!(
+                &stem[3..],
+                [b'1'..=b'9'] | [0xC2, 0xB9] | [0xC2, 0xB2] | [0xC2, 0xB3]
+            ));
+    reserved.then_some(NameIssue::Reserved)
+}
+
+/// A directory that restoration writes into (plan C6; spec §10.4). Names
+/// are archive path components, raw bytes, and are never altered: a name
+/// the platform cannot hold is reported ([`RestoreDir::name_issue`]), not
+/// rewritten. No operation ever replaces or merges into an existing entry:
+/// [`StorageError::Exists`] is how collisions surface, including the ones a
+/// case-insensitive or normalizing filesystem creates.
+pub trait RestoreDir: Sized {
+    /// The file type created here.
+    type File: Storage;
+
+    /// Why `name` cannot be created here, if it cannot.
+    fn name_issue(&self, name: &[u8]) -> Option<NameIssue>;
+
+    /// Create the subdirectory `name`, which must not exist, and return it.
+    fn create_dir(&mut self, name: &[u8]) -> Result<Self, StorageError>;
+
+    /// Create the file `name`, which must not exist (a temporary name while
+    /// its content is written and verified).
+    fn create_file(&mut self, name: &[u8]) -> Result<Self::File, StorageError>;
+
+    /// Make `from` appear at `to`, never replacing an existing `to`
+    /// (`Exists`, and `from` is left as it was).
+    fn publish_no_replace(&mut self, from: &[u8], to: &[u8]) -> Result<(), StorageError>;
+
+    /// Remove a file this restoration created and still holds.
+    fn discard(&mut self, file: Self::File, name: &[u8]) -> Result<(), StorageError>;
+
+    /// Persist this directory's entries.
+    fn sync_directory(&mut self) -> Result<DirectoryDurability, StorageError>;
+}
+
 /// Adapts a [`ReadStorage`] to `mochi_format`'s [`ReadAt`] so the pure frame
 /// walker and footer validator can run over any storage. The size is taken
 /// once at construction: archive-derived offsets are checked against that
@@ -282,5 +372,53 @@ impl ReadAt for StorageReader<'_> {
             StorageError::OutOfBounds { .. } => ReadError::OutOfRange,
             other => ReadError::Failed(other.to_string()),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_name_rules() {
+        use NameIssue::*;
+        let cases: &[(&[u8], Option<NameIssue>)] = &[
+            (b"normal.txt", None),
+            (b"CONSOLE", None),
+            (b"COM0", None),
+            (b"LPT10", None),
+            (b"con.txt.bak", Some(Reserved)),
+            (b"CON", Some(Reserved)),
+            (b"con", Some(Reserved)),
+            (b"Nul.txt", Some(Reserved)),
+            (b"NUL .txt", Some(Reserved)),
+            (b"aux.tar.gz", Some(Reserved)),
+            (b"PRN", Some(Reserved)),
+            (b"com1", Some(Reserved)),
+            (b"LPT9.log", Some(Reserved)),
+            ("COM\u{b9}".as_bytes(), Some(Reserved)),
+            ("lpt\u{b3}".as_bytes(), Some(Reserved)),
+            (b"a.", Some(TrailingDotOrSpace)),
+            (b"a ", Some(TrailingDotOrSpace)),
+            (b"a<b", Some(IllegalCharacter(b'<'))),
+            (b"a:b", Some(IllegalCharacter(b':'))),
+            (b"a\"b", Some(IllegalCharacter(b'"'))),
+            (b"a\\b", Some(IllegalCharacter(b'\\'))),
+            (b"a|b", Some(IllegalCharacter(b'|'))),
+            (b"a*", Some(IllegalCharacter(b'*'))),
+            (b"tab\there", Some(IllegalCharacter(b'\t'))),
+            (b"\xff\xfe", Some(NotRepresentable)),
+            ("caf\u{e9}".as_bytes(), None),
+            // An unpaired surrogate in WTF-8 is a valid Windows name (O24).
+            (b"\xed\xa0\x80", None),
+        ];
+        for (name, want) in cases {
+            assert_eq!(
+                windows_name_issue(name),
+                *want,
+                "{:?}",
+                String::from_utf8_lossy(name)
+            );
+        }
     }
 }

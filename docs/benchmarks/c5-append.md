@@ -65,6 +65,56 @@ near the 268,434,864-byte image budget that copy is a buffer of the same size.
 * Unchanged: footer lookup constant; content constant per byte; open linear
   in catalog size.
 
+## Results, schema 1 with adoption (plan T15, 2026-10-05; milliseconds)
+
+Annex B.2 D10.7 and §18.1 require the writer to re-read both checkpoint
+representations before publishing and compare each with the source state.
+Adoption is mandatory and has no opt-out. It re-reads the snapshot manifest
+and the image from storage, hash-verifies them, decodes the snapshot without
+SQLite, and opens the image **exactly as a reader does** (SQLite integrity
+check, foreign keys, every version's extents, full namespace replay). Its own
+progress phase, `adopt`, sits between `checkpoint` and `commit-record`, so
+the *checkpoint* column below is the same quantity as in the schema 1 table
+above and *adopt* is new.
+
+### Setup (§27)
+
+| Item | Value |
+|---|---|
+| Dataset, chunking, compression, encryption, build, measurement | As the schema 1 setup above (4 KiB incompressible files, one commit each; fixed-size chunks; zstd 3; Core profile; `--release`; median of 7 fresh writer sessions per row). |
+| Hardware | **Different from the earlier runs:** sandbox VM, 4 vCPU, Intel Xeon @ 2.10 GHz, 15 GiB RAM, ext4 on a virtio disk, kernel 6.18. The earlier tables ran on a 1-vCPU 2.80 GHz VM. **Absolute times are not comparable across the two machines**; the within-run *adopt / checkpoint* ratio is. |
+| Cache state | Warm (the archive was just written by the same process). |
+| Run | One clean run (an earlier attempt had two copies running at once and was discarded). Not repeated; run-to-run variation on these VMs is 10 to 20%. |
+
+| prior commits | archive MiB | catalog image KiB | snapshot manifest KiB | footer lookup | open (verify + catalog) | append open (+ snapshot read) | head catalog copy + replay | content | catalog update | delta manifest | checkpoint (snapshot + image) | adopt (re-read + compare) | adopt / checkpoint | commit record | sync objects | footer + sync | **append total** (ms) |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 0.4 | 44 | 2 | 0.01 | 0.75 | 0.83 | 0.26 | 0.23 | 0.09 | 0.02 | 1.46 | 0.95 | 0.65 | 0.03 | 0.51 | 0.21 | **4.55** |
+| 10 | 0.8 | 44 | 5 | 0.01 | 0.80 | 0.90 | 0.21 | 0.18 | 0.11 | 0.01 | 1.92 | 1.22 | 0.64 | 0.02 | 0.60 | 0.18 | **5.53** |
+| 100 | 8.8 | 100 | 30 | 0.01 | 3.58 | 4.34 | 0.75 | 0.18 | 0.63 | 0.01 | 10.60 | 7.27 | 0.69 | 0.03 | 0.78 | 0.28 | **24.98** |
+| 1000 | 403.3 | 472 | 287 | 0.01 | 29.62 | 38.28 | 5.88 | 0.33 | 5.44 | 0.02 | 93.54 | 63.49 | 0.68 | 0.18 | 1.51 | 0.47 | **207.10** |
+
+### What this shows
+
+* **Adoption costs about two thirds of the checkpoint phase at every size**
+  (ratio 0.64 to 0.69, flat from N=1 to N=1000). It grows linearly with the
+  catalog, like the checkpoint and the open, because it is the same work in
+  the other direction: decode the snapshot, open and verify the image.
+* **Share of the append:** with adoption removed, the same rows total about
+  3.6, 4.3, 17.7, and 143.6 ms, so adoption adds roughly 26%, 28%, 41%, and
+  44% (N = 1, 10, 100, 1000). At N=1000 the 143.6 ms agrees with the earlier
+  schema 1 run (145 ms) although the hardware differs; treat that agreement as
+  loose, not as a controlled comparison.
+* **Not 10× the checkpoint phase at any N**, so the plan's stop-and-ask
+  condition did not trigger.
+* **Why it is kept as it is.** Adoption is required by §18.1 and D10.7; the
+  full reader open is the point (it proves a reader can open what is about to
+  be published). It is paid per checkpoint, and until the T14 trigger
+  (Δ ≥ α·max(*B*, *F*)) every commit is a checkpoint. T14 makes checkpoints
+  rare and so bounds this cost by design; the cost belongs to G3's inputs,
+  not to a reason to weaken the check.
+* Unchanged: footer lookup constant, content constant per byte, archive size
+  as before (adoption writes nothing).
+
 ## Results, schema 0 (C5 original; milliseconds)
 
 | prior commits | archive MiB | catalog image KiB | footer lookup | open (verify + catalog) | head catalog copy + replay | content | catalog update | manifest | checkpoint publish | commit record | sync objects | footer + sync | **append total** (ms) |

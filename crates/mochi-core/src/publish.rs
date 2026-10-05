@@ -132,7 +132,10 @@ use crate::recovery::{
 };
 use crate::segment::{check_delta_parent_link, walk_segment, SegmentInfo};
 use crate::state::AuthoritativeState;
-use crate::storage::{DirectoryDurability, ReadStorage, Storage, StorageError, StorageReader};
+use crate::storage::{
+    check_file_name, DirectoryDurability, ReadStorage, Storage, StorageDir, StorageError,
+    StorageReader,
+};
 
 pub use crate::catalog::META_ARCHIVE_ID;
 /// `archive_meta` key holding the writer parameters recorded at creation
@@ -1862,6 +1865,8 @@ pub mod phase {
     pub const FOOTER: &str = "footer";
     pub const SYNC_FOOTER: &str = "sync-footer";
     pub const DIRECTORY: &str = "directory";
+    /// Creation only (D13): publishing the temporary file at its final name.
+    pub const PUBLISH: &str = "publish";
 }
 
 /// What `open_locked` hands to `open_append`: the verified head, the
@@ -1974,6 +1979,12 @@ fn check_append_profile(descriptor: &Descriptor, asked: Option<Profile>) -> Resu
     Ok(())
 }
 
+/// The temporary name a D13 creation of `name` writes to.
+pub fn temporary_name(name: &str, tag: &[u8; 32]) -> String {
+    let hex: String = tag[..8].iter().map(|b| format!("{b:02x}")).collect();
+    format!(".{name}.{hex}.mochi-tmp")
+}
+
 fn lock(storage: &mut dyn Storage) -> Result<()> {
     storage.try_lock_exclusive().map_err(|e| match e {
         StorageError::LockHeld => MochiError::new(
@@ -2037,6 +2048,106 @@ impl<S: Storage> ArchiveWriter<S> {
             poisoned: None,
             audit: Vec::new(),
         })
+    }
+
+    /// Create the archive `name` in `dir` by the Annex B.2 D13 mechanism:
+    ///
+    /// 1. an exclusively created, locked temporary file in `dir`
+    ///    (`.NAME.<16 hex>.mochi-tmp`, from a fresh ID);
+    /// 2. the first commit, `first`, written and synced into it (the §12.2
+    ///    steps; the directory is not flushed yet);
+    /// 3. publication at `name` **without replacing** an existing file;
+    /// 4. a flush of `dir`.
+    ///
+    /// Outcomes (D13; the C5 commit outcomes otherwise):
+    ///
+    /// | Where it stops | Result | At `name` | Temporary file |
+    /// |---|---|---|---|
+    /// | `name` already exists | `DESTINATION_EXISTS` | unchanged | removed |
+    /// | any failure before publication (including a commit failure) | that error; a commit-unconfirmed failure becomes `IO_ERROR`, because nothing was published | nothing | removed (or left for cleanup if removal fails) |
+    /// | directory flush `Unconfirmed` | `LOCAL_COMMITTED`, durability `DirectoryUnconfirmed` (report `DEGRADED`) | the archive | gone |
+    /// | directory flush error | `COMMIT_UNCONFIRMED`; the writer is poisoned | the archive, left in place | gone |
+    /// | success | `LOCAL_COMMITTED`, `Durable` | the archive | gone |
+    ///
+    /// A crash leaves either nothing at `name` (and possibly the temporary
+    /// file, which nobody holds and cleanup may remove) or the complete,
+    /// synced first commit at `name`. The returned writer holds the
+    /// archive's publication lock. Overwriting is not offered here: D13
+    /// requires an explicit request and a separate code path.
+    pub fn create_in<D: StorageDir<File = S>>(
+        dir: &mut D,
+        name: &str,
+        mut ids: Box<dyn IdSource>,
+        opts: WriterOptions,
+        first: Transaction,
+        ctx: &JobContext<'_>,
+    ) -> Result<(Self, CommitOutcome)> {
+        check_file_name(name)?;
+        let tag = ids.next_id()?;
+        let temp = temporary_name(name, &tag);
+        let nothing_created = |e: MochiError| {
+            let code = match e.code {
+                // Nothing was published: the outcome is known.
+                ErrorCode::CommitUnconfirmed | ErrorCode::WriterPoisoned => ErrorCode::IoError,
+                c => c,
+            };
+            MochiError::new(
+                code,
+                format!("{}; nothing was created at {name:?}", e.message),
+            )
+        };
+
+        let file = dir.create_exclusive(&temp)?;
+        let mut w = match Self::create(file, ids, opts) {
+            Ok(w) => w,
+            Err(e) => {
+                let _ = dir.remove_if_unlocked(&temp);
+                return Err(nothing_created(e));
+            }
+        };
+        // The new entry is flushed once, after publication (step 4).
+        w.needs_directory_sync = false;
+        let mut outcome = match w.commit(first, ctx) {
+            Ok(o) => o,
+            Err(e) => {
+                drop(w);
+                let _ = dir.remove_if_unlocked(&temp);
+                return Err(nothing_created(e));
+            }
+        };
+
+        ctx.report(phase::PUBLISH, 0, None);
+        if let Err(e) = dir.publish_no_replace(&temp, name) {
+            drop(w);
+            let _ = dir.remove_if_unlocked(&temp);
+            return Err(match e {
+                StorageError::Exists { .. } => MochiError::new(
+                    ErrorCode::DestinationExists,
+                    format!(
+                        "{name:?} already exists; creating an archive never replaces a file \
+                         (D13). Nothing was changed."
+                    ),
+                ),
+                other => nothing_created(other.into()),
+            });
+        }
+
+        ctx.report(phase::DIRECTORY, 0, None);
+        match dir.sync_directory() {
+            Ok(DirectoryDurability::Confirmed) => {}
+            Ok(DirectoryDurability::Unconfirmed(why)) => {
+                outcome.durability = PublishDurability::DirectoryUnconfirmed(why);
+            }
+            Err(e) => {
+                let msg = format!(
+                    "the archive was published at {name:?}, but persisting its directory entry \
+                     failed ({e}); it may not survive a power loss. The file is left in place."
+                );
+                w.poison(msg.clone());
+                return Err(MochiError::new(ErrorCode::CommitUnconfirmed, msg));
+            }
+        }
+        Ok((w, outcome))
     }
 
     /// Open an existing archive for appending (§12.2 steps 1–2).

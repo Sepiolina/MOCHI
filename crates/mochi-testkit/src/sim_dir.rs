@@ -20,7 +20,7 @@ use mochi_core::storage::{
     check_file_name, DirectoryDurability, RemoveOutcome, Storage, StorageDir, StorageError,
 };
 
-use crate::sim::{CrashMode, Halted, SimStorage};
+use crate::sim::{CrashMode, Fault, Halted, SimStorage};
 
 /// A scripted directory fault. Indices are zero-based and count operations
 /// of that kind on this directory.
@@ -73,6 +73,8 @@ struct DirInner {
     syncs: usize,
     halted: bool,
     trace: Vec<DirOp>,
+    /// Faults given to the next file `create_exclusive` makes.
+    next_file_faults: Vec<Fault>,
 }
 
 fn halted_error() -> StorageError {
@@ -138,6 +140,12 @@ impl SimDir {
 
     pub fn add_fault(&self, fault: DirFault) {
         self.inner().faults.push(fault);
+    }
+
+    /// Schedule `fault` on the next file `create_exclusive` makes (for
+    /// example a halt before its k-th mutation).
+    pub fn add_next_file_fault(&self, fault: Fault) {
+        self.inner().next_file_faults.push(fault);
     }
 
     /// Add an existing file under `name`, durable (a fixture: as if created
@@ -212,7 +220,8 @@ impl StorageDir for SimDir {
         if d.has(|f| matches!(f, DirFault::FailCreate { index } if *index == idx)) {
             return Err(injected("create"));
         }
-        let mut file = SimStorage::new();
+        let faults = std::mem::take(&mut d.next_file_faults);
+        let mut file = SimStorage::with_faults(faults);
         file.try_lock_exclusive()?;
         d.entries.insert(name.to_string(), file.clone());
         d.trace.push(DirOp::Create {

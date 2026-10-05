@@ -19,13 +19,15 @@
 //! * **Snapshot manifests are not on the chain** (schema 1: parent always
 //!   null). A snapshot S(b) can serve as a baseline only through commit *b*'s
 //!   record, which binds it by hash and supplies the delta-manifest hash the
-//!   next delta links to (Annex B.2 D10.8). That is baseline recovery, plan
-//!   T16, and needs commit records; this function sees manifests only, so a
-//!   scanned snapshot is counted as `unused`. Exception: a snapshot the
-//!   caller names as the head is used on its own, since it is self-contained.
-//!   **Change from schema 0**, where a snapshot carried a parent link and
-//!   could restart a chain past a missing delta: that capability returns with
-//!   T16, anchored on commit records instead of a manifest-only link.
+//!   next delta links to (Annex B.2 D10.8). That is baseline recovery,
+//!   `crate::publish::recover_baseline_at_footer` (plan T16): it needs commit
+//!   records, which this function does not see, so a scanned snapshot is
+//!   counted as `unused` here. Exception: a snapshot the caller names as the
+//!   head is used on its own, since it is self-contained
+//!   ([`catalog_from_snapshot`]). **Change from schema 0**, where a snapshot
+//!   carried a parent link and could restart a chain past a missing delta;
+//!   that capability now lives in `crate::publish::recover_with_trusted_head`,
+//!   anchored on commit records instead of a manifest-only link.
 //! * **Authenticity comes only from the head.** A forger who rewrites one
 //!   manifest and re-links every later one produces a new, self-consistent
 //!   chain with a different head hash. Only a *trusted* head exposes that:

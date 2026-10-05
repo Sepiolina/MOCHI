@@ -332,6 +332,9 @@ pub fn exercise_archive_open(data: &[u8]) -> ArchiveOpenOutcome {
         limits: fuzz_limits(),
         ..Default::default()
     };
+    // T16: baseline recovery runs on anything with a locatable head, whether
+    // or not the head opens, and must never return a state for another commit.
+    baseline_recovery_is_sound(&storage, &opts);
     let Ok(head) = mochi_core::publish::open_head(&storage, &opts) else {
         return ArchiveOpenOutcome::Refused;
     };
@@ -415,6 +418,25 @@ pub fn exercise_archive_open(data: &[u8]) -> ArchiveOpenOutcome {
         ArchiveOpenOutcome::OpenedDelta
     } else {
         ArchiveOpenOutcome::OpenedCheckpoint
+    }
+}
+
+/// D10.8: whatever baseline recovery returns for the located head is a
+/// catalog that materializes exactly that head, from a base at or below it.
+/// An error is always acceptable (untrusted input); a wrong state is not.
+fn baseline_recovery_is_sound(
+    storage: &crate::SimStorage,
+    opts: &mochi_core::publish::ReadOptions,
+) {
+    let Ok(loc) = mochi_core::publish::locate_head(storage, &opts.limits) else {
+        return;
+    };
+    if let Ok(b) =
+        mochi_core::publish::recover_baseline_at_footer(storage, loc.footer.footer_offset, opts)
+    {
+        assert_eq!(b.head_seq, loc.footer.fields.commit_sequence);
+        assert_eq!(b.catalog.head_commit().unwrap(), Some(b.head_seq));
+        assert!(b.segment.base_seq <= b.head_seq);
     }
 }
 

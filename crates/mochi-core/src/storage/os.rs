@@ -163,6 +163,11 @@ impl ReadStorage for OsReadStorage {
 pub struct OsStorage {
     file: File,
     path: PathBuf,
+    /// Whether this handle holds the publication lock. Taking it again is a
+    /// no-op: `flock` (Linux) allows that, but `LockFileEx` (Windows) refuses
+    /// an overlapping lock even from the same handle, so the state is kept
+    /// here rather than asked of the OS (found by T22 on `windows-latest`).
+    locked: bool,
 }
 
 impl OsStorage {
@@ -174,14 +179,22 @@ impl OsStorage {
             .write(true)
             .create_new(true)
             .open(&path)?;
-        Ok(Self { file, path })
+        Ok(Self {
+            file,
+            path,
+            locked: false,
+        })
     }
 
     /// Open an existing file for reading and writing.
     pub fn open_existing(path: impl AsRef<Path>) -> Result<Self, StorageError> {
         let path = path.as_ref().to_path_buf();
         let file = OpenOptions::new().read(true).write(true).open(&path)?;
-        Ok(Self { file, path })
+        Ok(Self {
+            file,
+            path,
+            locked: false,
+        })
     }
 }
 
@@ -219,15 +232,26 @@ impl Storage for OsStorage {
     }
 
     fn try_lock_exclusive(&mut self) -> Result<(), StorageError> {
+        if self.locked {
+            return Ok(());
+        }
         match self.file.try_lock() {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.locked = true;
+                Ok(())
+            }
             Err(std::fs::TryLockError::WouldBlock) => Err(StorageError::LockHeld),
             Err(std::fs::TryLockError::Error(e)) => Err(StorageError::Io(e)),
         }
     }
 
     fn unlock(&mut self) -> Result<(), StorageError> {
-        Ok(self.file.unlock()?)
+        if !self.locked {
+            return Ok(());
+        }
+        self.file.unlock()?;
+        self.locked = false;
+        Ok(())
     }
 
     fn truncate(&mut self, new_len: u64) -> Result<(), StorageError> {
@@ -407,7 +431,11 @@ impl StorageDir for OsDir {
             .create_new(true)
             .open(&path)
             .map_err(exists_as(name))?;
-        let mut s = OsStorage { file, path };
+        let mut s = OsStorage {
+            file,
+            path,
+            locked: false,
+        };
         s.try_lock_exclusive()?;
         Ok(s)
     }
@@ -528,6 +556,24 @@ mod tests {
             b.try_lock_exclusive(),
             Err(StorageError::LockHeld)
         ));
+        a.unlock().unwrap();
+        b.try_lock_exclusive().unwrap();
+    }
+
+    /// The holder may take the lock again (`Storage` contract): a no-op, on
+    /// Windows too, where `LockFileEx` itself refuses an overlapping lock.
+    #[test]
+    fn the_holder_may_lock_again() {
+        let (_d, path) = tmp();
+        let mut a = OsStorage::create_new(&path).unwrap();
+        a.try_lock_exclusive().unwrap();
+        a.try_lock_exclusive().unwrap();
+        let mut b = OsStorage::open_existing(&path).unwrap();
+        assert!(matches!(
+            b.try_lock_exclusive(),
+            Err(StorageError::LockHeld)
+        ));
+        a.unlock().unwrap();
         a.unlock().unwrap();
         b.try_lock_exclusive().unwrap();
     }

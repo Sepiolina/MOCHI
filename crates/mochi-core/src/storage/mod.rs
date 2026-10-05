@@ -148,10 +148,11 @@ pub trait Storage: ReadStorage {
     fn sync_directory(&mut self) -> Result<DirectoryDurability, StorageError>;
 
     /// Try to take the exclusive publication lock without blocking.
-    /// `Err(StorageError::LockHeld)` if another writer holds it.
+    /// `Err(StorageError::LockHeld)` if another writer holds it. Taking it
+    /// again through the handle that holds it is a no-op, on every platform.
     fn try_lock_exclusive(&mut self) -> Result<(), StorageError>;
 
-    /// Release the publication lock.
+    /// Release the publication lock. A no-op if this handle does not hold it.
     fn unlock(&mut self) -> Result<(), StorageError>;
 
     /// Shrink the object to `new_len`. Only for explicit, auditable tail

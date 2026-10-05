@@ -193,7 +193,7 @@ fn t15_checkpoints_under_every_policy_are_adopted() {
         let mut w = writer(&s);
         w.set_checkpoint_policy(CheckpointPolicy::Every(n)).unwrap();
         for (i, st) in steps.iter().enumerate() {
-            let cp = i == 0 || (i as u64) % n == 0;
+            let cp = i == 0 || (i as u64).is_multiple_of(n);
             let prev = i.checked_sub(1).map(|p| &steps[p].after);
             if cp {
                 assert_blocked(

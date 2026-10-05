@@ -18,12 +18,12 @@ end-user application.
 | Path | Role | Status |
 |---|---|---|
 | `crates/mochi-format` | Framing, record envelopes, digests. Pure, no I/O. | C1: frame walker, skippable writer, framed footer, draft envelope. C2: representation types, per-scope typed digests, unencrypted object codec |
-| `crates/mochi-core` | Archive operations, jobs, reports, `Storage` trait | C0 harness; C2: object records, integrity checks; C3: catalog (paths, extents, namespace replay, published images); C4: recovery manifests; C5: commit records, §12.2 publication, head location, tail handling |
+| `crates/mochi-core` | Archive operations, jobs, reports, `Storage` trait | C0 harness; C2: object records, integrity checks; C3: catalog (paths, extents, namespace replay, published images); C4: recovery manifests; C5: commit records, §12.2 publication, head location, tail handling; Annex B.2 batch: archive descriptor, commit v1, delta manifests with checkpoints, D13 creation, D14 tail quarantine, D15 report results and timestamps |
 | `crates/mochi-cli` | The `mochi` binary | C0: full command surface, every command reports honestly that it is not built |
 | `crates/mochi-testkit` | Fault-injecting storage, fixtures | C0: `SimStorage`; C1/C2: golden vectors, fuzz exercisers, C2 property tests |
 | `apps/mochi-desktop` | Tauri v2 app: React + TypeScript + Vite (O1); reads `.mochi` plus ZIP, 7z, RAR, `.tar.gz` (D8, read-only) | **Not started; unblocked** (D0 next on the desktop track). Windows 10 22H2+/11 and Ubuntu 22.04/24.04 (O11) |
 | `fuzz/` | cargo-fuzz targets | `frame_walker`, `footer`, `envelope` (C1), `object_decode` (C2), `catalog_image` (C3), `cbor_decode`, `manifest_decode` (C4), `commit_decode`, `archive_open` (C5); see `fuzz/README.md` |
-| `fixtures/golden/` | Valid / corrupt / interrupted archives | `c1/`: 16 framing vectors; `c2/`: 13 object vectors + 15 digest known answers; `c3/`: one catalog image that must stay readable; `c4/`: 16 recovery-manifest vectors; `c5/`: 14 commit-record vectors and one archive that must stay readable |
+| `fixtures/golden/` | Valid / corrupt / interrupted archives | `c1/`: 16 framing vectors; `c2/`: 13 object vectors + 15 digest known answers; `c3/`: one catalog image that must stay readable; `c4/`: recovery-manifest vectors; `c5/`: commit-record vectors and archives that must stay readable; `b2/`: Annex B.2 vectors (binary envelope v0, archive descriptor). See `fixtures/golden/README.md` |
 | `docs/ratification/` | Frozen format artifacts R1–R10 | Empty; written from working code |
 
 Dependency direction is one-way: `mochi-format` ← `mochi-core` ← {`mochi-cli`, desktop backend}.
@@ -72,9 +72,9 @@ integrity failures exit 1, with a documented precedence (O22, O13).
 
 Product decisions (plan §9): the desktop app is Tauri v2 with React and TypeScript
 (O1); it supports Windows 10 22H2 / 11 and Ubuntu 22.04 / 24.04 on x86-64, not macOS
-(O11); and it opens ZIP, 7z, RAR, and `.tar.gz` read-only (O9, phase D8). **No
-project license has been chosen yet (O23)**; it must permit distributing UnRAR
-before RAR support or any release can ship.
+(O11); and it opens ZIP, 7z, RAR, and `.tar.gz` read-only (O9, phase D8). The
+project is licensed MIT OR Apache-2.0 (O23), which permits distributing UnRAR
+in the D8 helper; its notice is in `THIRD-PARTY-NOTICES.md`.
 
 - **C3.** Reversible archive paths (byte components; Windows names as WTF-8, so
   unpaired surrogates round-trip). Extent validation rejecting gaps, overlaps,
@@ -85,9 +85,10 @@ before RAR support or any release can ship.
   schema, integrity, foreign-key, and MOCHI checks. SQLite cannot detect a bit
   flip inside a stored value, so C5 must hash-verify images before opening them.
 
-All nine format decisions in spec Annex B are recorded (Annex B.1), and every
-product decision in plan §9 is settled except three drafts that close with
-ratification (O15, O16, O18). Notably: manifests and commit bodies use
+The nine format decisions D1–D9 are recorded in spec Annex B.1, and D10–D15
+are decided in Annex B.2, with their evidence tracked by gates G1–G9. Every
+product decision in plan §9 is settled except two drafts that close with
+ratification: error-code names (O15) and walker defaults (O18). Notably: manifests and commit bodies use
 deterministic CBOR (D2); encryption is XChaCha20-Poly1305, passphrase-only in
 1.0 (D3); TAR compatibility is opt-in (D4).
 
@@ -107,16 +108,21 @@ deterministic CBOR (D2); encryption is XChaCha20-Poly1305, passphrase-only in
   audit record; anything that might be a damaged commit is refused. Tested
   against halts at every write, torn and lost writes, lying and failing
   syncs, and truncation at every byte.
-  **Known cost:** every commit stores a full catalog image, so archive size
-  grows roughly quadratically with commit count until metadata deltas are
-  defined (plan O26; `docs/benchmarks/c5-append.md`). Do not use for long
-  histories yet.
+  C5 stored a full catalog image with every commit, so archive size grew
+  roughly quadratically with history (`docs/benchmarks/c5-append.md`). The
+  Annex B.2 batch replaced that: each commit stores a delta manifest, and a
+  checkpoint (image plus snapshot manifest) is written only when the deltas
+  since the last one reach α·max(*B*, *F*). Measured to 10,000 commits in
+  `docs/benchmarks/t32-scaling.md` (gate G3).
 
-**Annex B.2 batch in progress** (`docs/b2-implementation-checklist.md`):
-the format layer (T1–T6: descriptor placement, binary envelope v0, B.2.3
-limits, writer-side limit checks, new error codes) and the descriptor codec
-(T7) are implemented and tested locally; core work from T8 (commit v1) on is
-next. Archives written today are still C5-layout (no descriptor, v0 commits).
+**Annex B.2 batch in progress** (`docs/b2-implementation-checklist.md`,
+which tracks every task, decision, CI run, and gate). Archives written today
+carry the archive descriptor at offset 0, v1 commit records, and delta
+manifests with checkpoints; pre-batch drafts (no descriptor, v0 commits or
+manifests) are refused as legacy (§26). Gates G1 (conformance), G3
+(scaling), and G5 (capacity) have passed. Still open: the Windows publish
+path (T21), the CLI flags for truncation and limits (T29, with C14), native
+Windows durability evidence (T33, gate G6), and the GC hold test (C9).
 
 The next phase after the batch is **C6: read path and extraction**. D0 (desktop shell) and D2 (create and add) can start. Until later phases land,
 `mochi verify` and friends exit `3` with `NOT_IMPLEMENTED`, and post-1.0 commands

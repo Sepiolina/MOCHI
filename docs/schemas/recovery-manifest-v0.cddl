@@ -1,3 +1,7 @@
+; SUPERSEDED by recovery-manifest-v1.cddl (Annex B.2 batch). Kept for reference only: this
+; is the pre-batch draft, and readers refuse it as legacy (spec §26). Do not
+; implement from this file.
+;
 ; MOCHI recovery manifest, schema version 0 (DRAFT; ratification item R3).
 ; Spec §11; encoding per Annex B.1 D2: the deterministic-CBOR subset
 ; (integer map keys in increasing order, shortest forms, no floats, tags,

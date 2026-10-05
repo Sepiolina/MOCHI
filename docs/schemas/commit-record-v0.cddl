@@ -1,3 +1,7 @@
+; SUPERSEDED by commit-record-v1.cddl (Annex B.2 batch). Kept for reference only: this
+; is the pre-batch draft, and readers refuse it as legacy (spec §26). Do not
+; implement from this file.
+;
 ; MOCHI commit record, schema version 0 (DRAFT; ratification item R3).
 ; Spec §12.1 (contents), §9.2 (commit ID), §8.4 (footer), §10.6 (checkpoints).
 ; Encoding per Annex B.1 D2: the same deterministic-CBOR subset as recovery

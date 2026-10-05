@@ -326,8 +326,10 @@ Rows not listed for 1.0 — deleted primary archive, original machine unavailabl
 4. The draft-to-1.0 boundary is enforced: pre-1.0 archives are rejected explicitly or migrated per §26, never misread.
 5. User documentation covers: a `.mochi` file is not a backup (§1.1); the encrypted-archive limits on tool fallback and self-healing without keys; the dedup-under-encryption leak; what "Test archive" does and does not prove.
 6. Signed installers and signed updates for Windows and Ubuntu.
-8. A project license is chosen that permits distributing UnRAR (O23).
 7. All Annex B decisions that block 1.0 scope are recorded.
+8. A project license is chosen that permits distributing UnRAR (O23). **Met:** MIT OR Apache-2.0, with UnRAR's notice in `THIRD-PARTY-NOTICES.md`.
+
+These release gates are numbered 1–8. The Annex B.2 evidence gates G1–G9 (spec Annex B.2.6, `docs/b2-implementation-checklist.md`) are a separate series.
 
 ---
 

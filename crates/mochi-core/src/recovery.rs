@@ -47,7 +47,7 @@ use mochi_format::repr::StoredObject;
 use mochi_format::Limits;
 
 use crate::catalog::namespace::{FileVersionId, NamespaceOp, Snapshot};
-use crate::catalog::{Catalog, Commit};
+use crate::catalog::{Catalog, Commit, META_ARCHIVE_ID};
 use crate::error::{ErrorCode, MochiError, Result};
 use crate::manifest::{Attributes, Manifest, ManifestKind};
 use crate::object::ArchiveId;
@@ -143,6 +143,59 @@ fn diff_ops(
         }
     }
     ops
+}
+
+/// A working catalog that materializes exactly commit `s.commit_seq`, built
+/// from a snapshot manifest the caller has already hash-verified and
+/// identity-bound (Annex B.2 D10.8). One commit row (parent null), the
+/// snapshot's chunks and versions, its entries as `PUT`s, and the archive ID.
+/// Reads no catalog image.
+///
+/// **Precondition:** the manifest's stored bytes were verified against the
+/// hash that referenced it, as for [`Catalog::open_image`].
+///
+/// Errors from filling a hash-verified snapshot mean the snapshot is an
+/// invalid record, not damaged bytes, so they are reported as
+/// `RECORD_INVALID` (`IDENTITY_CONFLICT` and I/O keep their codes).
+pub fn catalog_from_snapshot(s: &Manifest) -> Result<Catalog> {
+    if s.kind != ManifestKind::Snapshot {
+        return Err(invalid("a catalog is built from a snapshot manifest"));
+    }
+    let as_record_invalid = |e: MochiError| match e.code {
+        ErrorCode::InvalidArgument
+        | ErrorCode::NamespaceInvalid
+        | ErrorCode::ExtentInvalid
+        | ErrorCode::CatalogInvalid => MochiError::new(
+            ErrorCode::RecordInvalid,
+            format!("snapshot manifest {}: {}", s.commit_seq, e.message),
+        ),
+        _ => e,
+    };
+    let build = || -> Result<Catalog> {
+        let mut cat = Catalog::new_working()?;
+        for c in &s.chunks {
+            cat.insert_object(&c.record, c.location)?;
+        }
+        for v in &s.file_versions {
+            cat.insert_file_version(&v.version, &v.extents)?;
+        }
+        let ops = diff_ops(&Snapshot::new(), &s.entries);
+        cat.append_commit(&Commit {
+            seq: s.commit_seq,
+            parent: None,
+            ops,
+        })?;
+        cat.set_meta(META_ARCHIVE_ID, s.archive_id.as_bytes())?;
+        cat.verify()?;
+        if cat.head_commit()? != Some(s.commit_seq) {
+            return Err(MochiError::new(
+                ErrorCode::CatalogInvalid,
+                "internal: the catalog built from a snapshot does not materialize its commit",
+            ));
+        }
+        Ok(cat)
+    };
+    build().map_err(as_record_invalid)
 }
 
 fn snapshot_matches(
@@ -276,6 +329,11 @@ pub fn recover_from_manifests(
     for &i in &chain[base..] {
         let m = &parsed[i].0;
         let step = (|| -> Result<()> {
+            if m.kind == ManifestKind::Snapshot && applied.is_none() {
+                // No prior state: a snapshot stands alone (D10.8).
+                catalog = catalog_from_snapshot(m)?;
+                return Ok(());
+            }
             for c in &m.chunks {
                 catalog.insert_object(&c.record, c.location)?;
             }

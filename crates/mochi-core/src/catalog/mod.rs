@@ -47,6 +47,9 @@ use crate::object::{Dependency, ObjectId, ObjectRecord};
 
 pub use apply::SegmentApplier;
 
+/// `archive_meta` key holding the archive ID (32 bytes).
+pub const META_ARCHIVE_ID: &str = "archive_id";
+
 use extent::{validate_extents, Extent, ExtentSource};
 use namespace::{EntryKind, FileVersionId, NamespaceOp, Snapshot};
 use path::ArchivePath;

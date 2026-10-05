@@ -119,8 +119,7 @@ use crate::recovery::{recover_from_manifests, ManifestRecovery};
 use crate::segment::{check_delta_parent_link, walk_segment, SegmentInfo};
 use crate::storage::{DirectoryDurability, ReadStorage, Storage, StorageError, StorageReader};
 
-/// `archive_meta` key holding the archive ID (32 bytes).
-pub const META_ARCHIVE_ID: &str = "archive_id";
+pub use crate::catalog::META_ARCHIVE_ID;
 /// `archive_meta` key holding the writer parameters recorded at creation
 /// (spec §13: chunking parameters must be recorded per archive). Canonical
 /// CBOR `{0: 0 (fixed-size chunking), 1: max chunk bytes, 2: zstd level}`.

@@ -576,6 +576,30 @@ pub(crate) fn skippable_payload<'a>(
     }
 }
 
+/// The only failure treated as damage to stored bytes (review decisions
+/// Q31, Q32). Every object is hash-checked before it is parsed, so any change
+/// to its stored bytes (a flipped bit, zeroed bytes, a deleted payload) is
+/// this code, before any decoder runs. An object that passes its hash and
+/// then fails to decode or validate carries exactly the bytes its commit was
+/// published with: an invalid record, which D10.4 refuses, not damage that a
+/// twin representation may stand in for. `IO_ERROR` and `OUT_OF_BOUNDS` are
+/// operational; `LIMIT_EXCEEDED` and `UNSUPPORTED_FEATURE` are "cannot", not
+/// "damaged".
+pub fn is_stored_damage(e: &MochiError) -> bool {
+    e.code == ErrorCode::StoredIntegrityFailed
+}
+
+/// Where an opened commit's catalog came from (D10.9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogSource {
+    /// The base checkpoint's catalog image: the normal path.
+    Image,
+    /// Rebuilt from the base checkpoint's snapshot manifest because the
+    /// image's stored bytes are damaged. The same commit's state, never an
+    /// earlier one.
+    SnapshotManifest { image_error: MochiError },
+}
+
 /// A fully verified head: its commit, descriptor, delta manifest, and
 /// catalog. The snapshot manifest of a checkpoint is not loaded (see
 /// [`read_snapshot`]).
@@ -585,12 +609,22 @@ pub struct OpenedHead {
     pub commit: CommitRecord,
     pub commit_id: CommitId,
     pub descriptor: Descriptor,
-    /// This commit's delta manifest (commit key 6).
-    pub manifest: Manifest,
+    /// This commit's delta manifest (commit key 6). `None` only for a
+    /// checkpoint opened for reading whose delta manifest's stored bytes are
+    /// damaged (review decision Q31, D10.9: nothing reads it, so the
+    /// commit's reads are unaffected). A delta head always has it: it is in
+    /// its own replay segment.
+    pub manifest: Option<Manifest>,
+    /// Why `manifest` is `None`.
+    pub manifest_error: Option<MochiError>,
     /// The catalog at this commit: the checkpoint's image, or for a delta
     /// commit its base checkpoint's image with the segment's delta
-    /// manifests replayed onto it (D10.4).
+    /// manifests replayed onto it (D10.4); if the image's stored bytes are
+    /// damaged, the same commit's snapshot manifest stands in for it
+    /// ([`CatalogSource`]).
     pub catalog: Catalog,
+    /// Where `catalog`'s base came from.
+    pub catalog_source: CatalogSource,
     /// The replay segment this commit was opened through. For a checkpoint
     /// it is the commit itself. `base_hint_mismatch` is a diagnostic only
     /// (review decision 17).
@@ -749,6 +783,7 @@ type Replayed = (
     Catalog,
     SegmentInfo,
     Option<BTreeMap<FileVersionId, Attributes>>,
+    CatalogSource,
 );
 
 struct Opened {
@@ -769,14 +804,29 @@ fn open_at(
     // D12: interpretation needs a valid descriptor bound to this commit.
     let descriptor = read_descriptor(src, &commit, limit, opts)?;
 
-    let manifest = read_bound_manifest(
+    // Q31: a checkpoint opened for reading does not need its own delta
+    // manifest (the snapshot's base is the checkpoint itself, D10.9), so
+    // damage to its stored bytes is recorded, not fatal. Any other failure
+    // (an invalid record, a limit, I/O) is refused as before, and so is every
+    // failure on a delta head or in append mode.
+    let (manifest, manifest_error) = match read_bound_manifest(
         src,
         &commit,
         &commit.delta_manifest,
         limit,
         ManifestKind::Delta,
         opts,
-    )?;
+    ) {
+        Ok(m) => (Some(m), None),
+        Err(e)
+            if mode == OpenMode::Read
+                && commit.metadata.is_checkpoint()
+                && is_stored_damage(&e) =>
+        {
+            (None, Some(e))
+        }
+        Err(e) => return Err(e),
+    };
 
     let head_entry = HistoryEntry {
         footer_offset: location.footer.footer_offset,
@@ -784,9 +834,13 @@ fn open_at(
         commit: commit.clone(),
         commit_id,
     };
-    let (catalog, segment, attributes) = match commit.metadata {
+    let (catalog, segment, attributes, catalog_source) = match commit.metadata {
         Metadata::Checkpoint { image, .. } => {
-            let catalog = open_checkpoint_catalog(src, &head_entry, &image, opts, mode)?;
+            let (catalog, source) = base_catalog(src, &head_entry, &image, opts, mode, false)?;
+            if mode == OpenMode::Read {
+                // A catalog rebuilt from S(b) is writable; a reader's never is.
+                catalog.make_query_only()?;
+            }
             let segment = SegmentInfo {
                 base_seq: commit.seq,
                 base_commit_id: commit_id,
@@ -817,9 +871,19 @@ fn open_at(
                     Some(reachable_attributes(&reachable, map).map_err(attributes_incomplete)?)
                 }
             };
-            (catalog, segment, attributes)
+            (catalog, segment, attributes, source)
         }
-        Metadata::Delta { .. } => replay_segment(src, head_entry, &manifest, opts, mode)?,
+        Metadata::Delta { .. } => {
+            // A delta head's own delta manifest is in its segment, so the
+            // tolerance above never applies to it.
+            let own = manifest.as_ref().ok_or_else(|| {
+                MochiError::new(
+                    ErrorCode::InvalidArgument,
+                    "internal: a delta head without its delta manifest",
+                )
+            })?;
+            replay_segment(src, head_entry, own, opts, mode)?
+        }
     };
 
     if catalog.head_commit()? != Some(commit.seq) {
@@ -835,7 +899,9 @@ fn open_at(
             commit_id,
             descriptor,
             manifest,
+            manifest_error,
             catalog,
+            catalog_source,
             segment,
         },
         attributes,
@@ -876,15 +942,16 @@ fn attributes_incomplete(e: MochiError) -> MochiError {
     )
 }
 
-/// Open checkpoint `cp`'s catalog image: stored hash first, then the binary
+/// Checkpoint `cp`'s catalog image: stored hash first, then the binary
 /// envelope bound to `cp` (D11), and only then SQLite (plan C5). The catalog
-/// must materialize `cp` and belong to its archive.
-fn open_checkpoint_catalog(
+/// must materialize `cp` and belong to its archive. `writable` selects a
+/// catalog that accepts writes (replay and append) over a query-only one.
+fn check_image(
     src: &dyn ReadStorage,
     cp: &HistoryEntry,
     image_ref: &ObjectRef,
     opts: &ReadOptions,
-    mode: OpenMode,
+    writable: bool,
 ) -> Result<Catalog> {
     let stored = load_verified(
         src,
@@ -894,9 +961,10 @@ fn open_checkpoint_catalog(
         "catalog checkpoint",
     )?;
     let image = decode_image_record(&stored, &cp.commit.identity(), &opts.limits)?;
-    let catalog = match mode {
-        OpenMode::Read => Catalog::open_image(image, &opts.catalog)?,
-        OpenMode::Append => Catalog::open_image_writable(image, &opts.catalog)?,
+    let catalog = if writable {
+        Catalog::open_image_writable(image, &opts.catalog)?
+    } else {
+        Catalog::open_image(image, &opts.catalog)?
     };
     if catalog.head_commit()? != Some(cp.commit.seq) {
         return Err(MochiError::new(
@@ -911,6 +979,57 @@ fn open_checkpoint_catalog(
         ));
     }
     Ok(catalog)
+}
+
+/// Base checkpoint `base`'s catalog (D10.9).
+///
+/// * The image is used when it is intact: `(catalog, Image)`. The snapshot
+///   manifest is **not** read.
+/// * A reader ([`OpenMode::Read`]) whose image fails with stored damage
+///   ([`is_stored_damage`]) rebuilds the catalog from the same commit's
+///   snapshot manifest, hash-verified and identity-bound, without SQLite
+///   ([`catalog_from_snapshot`]). If that fails too, the image's error is
+///   returned with the snapshot's failure named. Never an earlier
+///   checkpoint (D10.4, D10.6).
+/// * Any other image failure, and every failure when appending, is
+///   returned as it is (review decision Q34): the writer needs the image's
+///   writer parameters, and repair is plan-then-apply (§22.2).
+///
+/// `writable` as for [`check_image`]. A catalog rebuilt from the snapshot is
+/// always writable; a reader makes it query-only afterwards.
+fn base_catalog(
+    src: &dyn ReadStorage,
+    base: &HistoryEntry,
+    image_ref: &ObjectRef,
+    opts: &ReadOptions,
+    mode: OpenMode,
+    writable: bool,
+) -> Result<(Catalog, CatalogSource)> {
+    match check_image(src, base, image_ref, opts, writable) {
+        Ok(c) => Ok((c, CatalogSource::Image)),
+        Err(image_error) if mode == OpenMode::Read && is_stored_damage(&image_error) => {
+            let rebuilt = read_bound_manifest(
+                src,
+                &base.commit,
+                &checkpoint_snapshot_ref(&base.commit)?,
+                base.commit_offset,
+                ManifestKind::Snapshot,
+                opts,
+            )
+            .and_then(|s_b| catalog_from_snapshot(&s_b));
+            match rebuilt {
+                Ok(c) => Ok((c, CatalogSource::SnapshotManifest { image_error })),
+                Err(snapshot_error) => Err(MochiError::new(
+                    image_error.code,
+                    format!(
+                        "{}; the snapshot manifest could not stand in for it: {}",
+                        image_error.message, snapshot_error.message
+                    ),
+                )),
+            }
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// T11 + T12: open a delta commit through its segment.
@@ -954,8 +1073,8 @@ fn replay_segment(
     };
     // Replay needs a writable connection; a reader's is made query-only
     // once replay is done.
-    let base_catalog = open_checkpoint_catalog(src, base, &image, opts, OpenMode::Append)?;
-    let mut applier = SegmentApplier::new(base_catalog)?;
+    let (base_cat, catalog_source) = base_catalog(src, base, &image, opts, mode, true)?;
+    let mut applier = SegmentApplier::new(base_cat)?;
 
     // Attributes, append only: S(b) first, before any delta is applied, so
     // a damaged S(b) refuses append without doing the replay work.
@@ -1005,7 +1124,7 @@ fn replay_segment(
     if mode == OpenMode::Read {
         catalog.make_query_only()?;
     }
-    Ok((catalog, info, attributes))
+    Ok((catalog, info, attributes, catalog_source))
 }
 
 /// Apply deltas *b*+1 … *h* (from `entries`, which [`walk_segment`] produced,

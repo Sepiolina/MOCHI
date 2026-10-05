@@ -349,7 +349,21 @@ pub fn exercise_archive_open(data: &[u8]) -> ArchiveOpenOutcome {
     // manifest with the commit's identity.
     assert_eq!(head.commit.descriptor.offset, 0);
     assert_eq!(head.descriptor.archive_id, head.commit.archive_id);
-    assert_eq!(head.manifest.identity(), head.commit.identity());
+    match (&head.manifest, &head.manifest_error) {
+        (Some(m), None) => assert_eq!(m.identity(), head.commit.identity()),
+        // Q31: only a checkpoint tolerates it, and only for stored damage.
+        (None, Some(e)) => {
+            assert!(head.commit.metadata.is_checkpoint());
+            assert!(mochi_core::publish::is_stored_damage(e));
+        }
+        _ => panic!("a head has its delta manifest or the reason it has none"),
+    }
+    // D10.9: the snapshot stands in for the image only after stored damage.
+    if let mochi_core::publish::CatalogSource::SnapshotManifest { image_error } =
+        &head.catalog_source
+    {
+        assert!(mochi_core::publish::is_stored_damage(image_error));
+    }
     // Every referenced object lies before the commit frame.
     for (_, o) in head.commit.object_refs() {
         assert!(o.offset + o.stored_len <= head.location.footer.fields.commit_offset);

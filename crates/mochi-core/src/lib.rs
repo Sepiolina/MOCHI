@@ -44,6 +44,7 @@ pub mod state;
 pub mod status;
 pub mod storage;
 pub mod timestamp;
+pub mod verify;
 
 pub use error::{ErrorCode, MochiError, Result};
 

@@ -47,7 +47,9 @@ pub fn exit_code_for(code: ErrorCode) -> u8 {
         ErrorCode::StoredIntegrityFailed
         | ErrorCode::ContentIntegrityFailed
         | ErrorCode::DescriptorInvalid
-        | ErrorCode::RetentionUnresolved => exit::FAILED,
+        | ErrorCode::RetentionUnresolved
+        | ErrorCode::ReferenceInvalid
+        | ErrorCode::FreshnessFailed => exit::FAILED,
         ErrorCode::UnsupportedFeature | ErrorCode::ProfileChangeUnsupported => exit::UNSUPPORTED,
         ErrorCode::IoError
         | ErrorCode::OutOfBounds

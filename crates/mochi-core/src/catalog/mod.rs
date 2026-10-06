@@ -814,6 +814,47 @@ impl Catalog {
         Ok(ops)
     }
 
+    /// Every object ID in the catalog, sorted: every object of the retained
+    /// history. Verification (C7) checks each one; tests use it to check
+    /// recorded objects independently (the T12 oracle, review amendment 4).
+    pub fn object_ids(&self) -> Result<Vec<ObjectId>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT object_id FROM objects ORDER BY object_id")
+            .map_err(sql)?;
+        let ids = stmt
+            .query_map([], |r| r.get::<_, Vec<u8>>(0))
+            .map_err(sql)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sql)?;
+        ids.into_iter()
+            .map(|b| {
+                let a: [u8; 32] = b
+                    .try_into()
+                    .map_err(|_| invalid("object ID is not 32 bytes"))?;
+                Ok(ObjectId::from_bytes(a))
+            })
+            .collect()
+    }
+
+    /// Every file-version ID in the catalog, sorted: every version of the
+    /// retained history, reachable at the head or not. Verification's
+    /// restoration level (C7) reassembles each one.
+    pub fn file_version_ids(&self) -> Result<Vec<FileVersionId>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT file_version_id FROM file_versions ORDER BY file_version_id")
+            .map_err(sql)?;
+        let ids: Vec<Vec<u8>> = stmt
+            .query_map([], |r| r.get(0))
+            .map_err(sql)?
+            .collect::<std::result::Result<_, _>>()
+            .map_err(sql)?;
+        ids.into_iter()
+            .map(|b| Ok(FileVersionId::from_bytes(id32(b, "file version id")?)))
+            .collect()
+    }
+
     // ---- verification -----------------------------------------------------------------
 
     /// SQLite structural integrity, foreign keys, and every MOCHI rule
@@ -915,29 +956,6 @@ impl Catalog {
     /// Q25); unlike `publish`, it does not write to the source connection.
     pub fn writable_copy_for_tests(&self) -> Result<Self> {
         self.duplicate()
-    }
-
-    /// Every object ID in the catalog, sorted. For tests that check each
-    /// recorded object independently (the T12 oracle's physical-location
-    /// validation, review amendment 4).
-    pub fn object_ids(&self) -> Result<Vec<ObjectId>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT object_id FROM objects ORDER BY object_id")
-            .map_err(sql)?;
-        let ids = stmt
-            .query_map([], |r| r.get::<_, Vec<u8>>(0))
-            .map_err(sql)?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(sql)?;
-        ids.into_iter()
-            .map(|b| {
-                let a: [u8; 32] = b
-                    .try_into()
-                    .map_err(|_| invalid("object ID is not 32 bytes"))?;
-                Ok(ObjectId::from_bytes(a))
-            })
-            .collect()
     }
 }
 

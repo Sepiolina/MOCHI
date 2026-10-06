@@ -9,7 +9,7 @@ use mochi_core::publish::{open_head, ArchiveWriter, ReadOptions, Transaction};
 use mochi_core::report::Severity;
 use mochi_core::restore::{restore, ExceptionKind, RestoreOptions, RestoreReport};
 use mochi_core::storage::os::OsRestoreDir;
-use mochi_core::storage::{DirectoryDurability, NameIssue, RestoreDir};
+use mochi_core::storage::{CaseBehavior, DirectoryDurability, NameIssue, RestoreDir};
 use mochi_core::ErrorCode;
 use mochi_testkit::archive::{build, path, scripted_history, test_options, Content, Job};
 use mochi_testkit::{SeqIds, SimStorage, SimTree};
@@ -131,6 +131,74 @@ fn c6_case_insensitive_collisions_never_overwrite_or_merge() {
             .count(),
         3
     );
+}
+
+fn refusing(s: &SimStorage, root: SimTree) -> mochi_core::MochiError {
+    let head = open_head(s, &opts()).unwrap();
+    restore(
+        s,
+        &head,
+        None,
+        root,
+        &RestoreOptions {
+            refuse_on_preflight_exceptions: true,
+            ..RestoreOptions::default()
+        },
+        &opts(),
+        &Job::new().ctx(),
+    )
+    .unwrap_err()
+}
+
+/// **C6 (collision preflight).** The destination's case behaviour is
+/// detected and every collision is known before anything is written: asked
+/// to refuse on any, the restore ends with `NAME_COLLISION` and the
+/// destination is untouched. The same archive into a case-sensitive
+/// destination has no collision and restores in full.
+#[test]
+fn c6_preflight_finds_collisions_before_writing() {
+    let s = archive_with(&[
+        ("Docs", None),
+        ("Docs/x", Some(b"upper dir file")),
+        ("docs", None),
+        ("docs/y", Some(b"lower dir file")),
+        ("z", Some(b"zed")),
+    ]);
+    let tree = SimTree::new().case_insensitive();
+    let e = refusing(&s, tree.clone());
+    assert_eq!(e.code, ErrorCode::NameCollision, "{e}");
+    assert!(e.message.contains("nothing was written"), "{e}");
+    assert!(tree.paths().is_empty(), "{:?}", tree.paths());
+
+    let r = run(&s, None, tree.clone());
+    assert_eq!(r.case_behavior, CaseBehavior::Insensitive);
+    assert_eq!(exception(&r, "docs"), Some(ExceptionKind::Collision));
+    assert_eq!(tree.paths(), ["Docs", "Docs/x", "z"]);
+
+    let sensitive = SimTree::new();
+    let r = run(&s, None, sensitive.clone());
+    assert_eq!(r.case_behavior, CaseBehavior::Sensitive);
+    assert!(r.complete(), "{:?}", r.exceptions);
+    assert_eq!(sensitive.paths().len(), 5);
+}
+
+/// The preflight also sees what is already at the destination, through the
+/// destination's own case rule, and names the destination cannot hold.
+#[test]
+fn c6_preflight_sees_existing_entries_and_unsupported_names() {
+    let s = archive_with(&[("readme", Some(b"archive")), ("b", Some(b"bee"))]);
+    let tree = SimTree::new().case_insensitive();
+    tree.insert_file("README", b"already here");
+    let e = refusing(&s, tree.clone());
+    assert_eq!(e.code, ErrorCode::NameCollision, "{e}");
+    assert_eq!(tree.paths(), ["README"]);
+    assert_eq!(tree.file(b"README").unwrap(), b"already here");
+
+    let s = archive_with(&[("ok", Some(b"fine")), ("CON", Some(b"device"))]);
+    let tree = SimTree::new().windows_rules();
+    let e = refusing(&s, tree.clone());
+    assert_eq!(e.code, ErrorCode::NameUnsupported, "{e}");
+    assert!(tree.paths().is_empty());
 }
 
 /// Existing destination content is a collision too, and keeps its bytes.
@@ -289,36 +357,21 @@ fn c6_restore_cancellation() {
 
 /// On the real filesystem: the head restores; a second restore into the same
 /// directory collides everywhere and changes nothing, including a file the
-/// user edited in between. On Windows the hostile fixture name is reported
-/// as unsupported instead of restored.
+/// user edited in between. Linux only: elsewhere restoration to the
+/// filesystem is refused ([`c6_os_restore_is_refused_where_unsupported`]);
+/// Windows naming rules are covered on `SimTree`.
+#[cfg(target_os = "linux")]
 #[test]
 fn c6_os_restore_and_restore_again() {
     let s = scripted();
     let dir = tempfile::tempdir().unwrap();
     let r = run(&s, None, OsRestoreDir::open(dir.path()).unwrap());
     let model = &scripted_history()[2].after;
-    let hostile = "<img src=x onerror=alert(1)>";
-    if cfg!(windows) {
-        assert_eq!(
-            exception(&r, hostile),
-            Some(ExceptionKind::UnsupportedName(NameIssue::IllegalCharacter(
-                b'<'
-            )))
-        );
-        assert_eq!(r.exceptions.len(), 1);
-        assert!(matches!(
-            r.directory_durability,
-            DirectoryDurability::Unconfirmed(_)
-        ));
-    } else {
-        assert!(r.complete(), "{:?}", r.exceptions);
-        assert_eq!(r.directory_durability, DirectoryDurability::Confirmed);
-    }
+    assert!(r.complete(), "{:?}", r.exceptions);
+    assert_eq!(r.directory_durability, DirectoryDurability::Confirmed);
+    assert_eq!(r.case_behavior, CaseBehavior::Sensitive);
     for (k, c) in model {
         let p = String::from_utf8(k.clone()).unwrap();
-        if cfg!(windows) && p == hostile {
-            continue;
-        }
         let on_disk = dir.path().join(&p);
         match c {
             Content::Dir => assert!(on_disk.is_dir(), "{p}"),
@@ -345,6 +398,19 @@ fn c6_os_restore_and_restore_again() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     no_temporaries(&left);
+}
+
+/// Where race-resistant restoration is not implemented (every platform but
+/// Linux; Windows included), opening a restore destination fails clearly,
+/// `UNSUPPORTED_FEATURE` (exit 4), and nothing is written.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn c6_os_restore_is_refused_where_unsupported() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = mochi_core::MochiError::from(OsRestoreDir::open(dir.path()).unwrap_err());
+    assert_eq!(e.code, ErrorCode::UnsupportedFeature, "{e}");
+    assert!(e.message.contains("Nothing was written"), "{e}");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
 
 /// A nested subtree brings the directories above it, and nothing beside it.

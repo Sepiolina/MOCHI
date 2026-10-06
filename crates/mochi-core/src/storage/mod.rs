@@ -310,6 +310,38 @@ pub fn windows_name_issue(name: &[u8]) -> Option<NameIssue> {
     reserved.then_some(NameIssue::Reserved)
 }
 
+/// How a restore destination compares names (plan C6: "case-insensitive
+/// filesystem detection"). Detected once, on the restore root, before
+/// anything is restored; directories created below it inherit it on the
+/// filesystems MOCHI supports (ext4 casefold is inherited; NTFS and vfat are
+/// insensitive throughout).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseBehavior {
+    /// Names differing only in case are different entries.
+    Sensitive,
+    /// Names differing only in case are the same entry.
+    Insensitive,
+}
+
+/// The key under which the restore preflight treats two sibling names as
+/// one on a [`CaseBehavior::Insensitive`] destination: valid UTF-8 runs
+/// lower-cased with Unicode's full lowercase mapping, other bytes kept.
+///
+/// An approximation of the filesystem's own rule, which differs between
+/// filesystems (ext4 casefold also normalizes; NTFS upcases per UTF-16
+/// unit). It decides only what is *reported* before writing. Safety does not
+/// rest on it: every entry is still created exclusively and published
+/// without replacing, so a collision the key misses (Unicode normalization)
+/// is caught when the entry is created, and nothing is overwritten.
+pub fn case_fold_key(name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(name.len());
+    for chunk in name.utf8_chunks() {
+        out.extend_from_slice(chunk.valid().to_lowercase().as_bytes());
+        out.extend_from_slice(chunk.invalid());
+    }
+    out
+}
+
 /// A directory that restoration writes into (plan C6; spec §10.4). Names
 /// are archive path components, raw bytes, and are never altered: a name
 /// the platform cannot hold is reported ([`RestoreDir::name_issue`]), not
@@ -339,6 +371,15 @@ pub trait RestoreDir: Sized {
 
     /// Persist this directory's entries.
     fn sync_directory(&mut self) -> Result<DirectoryDurability, StorageError>;
+
+    /// How this directory compares names. Asked of the restore root before
+    /// anything is restored. A backend may create and remove a probe entry
+    /// of its own to find out.
+    fn case_behavior(&mut self) -> Result<CaseBehavior, StorageError>;
+
+    /// Whether `name` (or a name the destination treats as the same) exists
+    /// here, without following a symbolic link.
+    fn entry_exists(&mut self, name: &[u8]) -> Result<bool, StorageError>;
 
     /// Apply promised attributes (plan O6) to the entry `name`, which this
     /// restoration created. Returns what could not be applied; never fails
@@ -431,6 +472,17 @@ impl ReadAt for StorageReader<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn case_fold_key_lowercases_unicode_and_keeps_other_bytes() {
+        assert_eq!(case_fold_key(b"ReadMe.TXT"), b"readme.txt");
+        assert_eq!(
+            case_fold_key("\u{c9}T\u{c9}".as_bytes()),
+            "\u{e9}t\u{e9}".as_bytes()
+        );
+        assert_eq!(case_fold_key(b"A\xffB"), b"a\xffb");
+        assert_ne!(case_fold_key(b"a"), case_fold_key(b"b"));
+    }
 
     #[test]
     fn windows_name_rules() {

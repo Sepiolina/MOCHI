@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use mochi_core::catalog::namespace::EntryKind;
 use mochi_core::manifest::Attributes;
 use mochi_core::storage::{
-    windows_name_issue, AttributeIssue, AttributeKind, DirectoryDurability, NameIssue, RestoreDir,
-    StorageError,
+    windows_name_issue, AttributeIssue, AttributeKind, CaseBehavior, DirectoryDurability,
+    NameIssue, RestoreDir, StorageError,
 };
 
 use crate::SimStorage;
@@ -222,6 +222,18 @@ impl RestoreDir for SimTree {
 
     fn sync_directory(&mut self) -> Result<DirectoryDurability, StorageError> {
         Ok(DirectoryDurability::Confirmed)
+    }
+
+    fn case_behavior(&mut self) -> Result<CaseBehavior, StorageError> {
+        Ok(if self.tree.lock().unwrap().case_insensitive {
+            CaseBehavior::Insensitive
+        } else {
+            CaseBehavior::Sensitive
+        })
+    }
+
+    fn entry_exists(&mut self, name: &[u8]) -> Result<bool, StorageError> {
+        Ok(self.tree.lock().unwrap().existing(&self.at, name).is_some())
     }
 
     fn apply_attributes(

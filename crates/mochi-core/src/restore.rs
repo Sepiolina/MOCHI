@@ -22,6 +22,16 @@
 //!   Every chunk and the whole file's content hash are checked, the file is
 //!   synced, and only then is it published. On failure the temporary file
 //!   is discarded, so a damaged file is absent, never partly present.
+//! * **Collisions are found before anything is written** ([`preflight`]):
+//!   the destination's case behaviour is detected on the root, sibling
+//!   names that it would treat as one are grouped (the first in path order
+//!   is restored, the others are `NAME_COLLISION`), names it cannot hold
+//!   are `NAME_UNSUPPORTED`, and top-level names that already exist there
+//!   are `NAME_COLLISION`. Exclusive creation remains the authority: a
+//!   collision the preflight cannot foresee (Unicode normalization) is still
+//!   caught when the entry is created, and nothing is overwritten. With
+//!   [`RestoreOptions::refuse_on_preflight_exceptions`] any preflight
+//!   exception ends the job before anything is written.
 //! * **Exceptions do not stop the restore.** Each is recorded with its path
 //!   and code ([`RestoreReport`]). Only cancellation and failures of the
 //!   destination itself end the job early.
@@ -49,8 +59,8 @@ use crate::publish::{promised_attributes, OpenedHead, ReadOptions};
 use crate::read::read_file_in;
 use crate::report::{Finding, Severity};
 use crate::storage::{
-    AttributeIssue, AttributeKind, DirectoryDurability, NameIssue, RestoreDir, Storage,
-    StorageError,
+    case_fold_key, AttributeIssue, AttributeKind, CaseBehavior, DirectoryDurability, NameIssue,
+    RestoreDir, Storage, StorageError,
 };
 
 /// Progress phase of [`restore`]: `completed` is entries handled.
@@ -66,6 +76,10 @@ pub struct RestoreOptions {
     /// Restore setuid and setgid bits (plan O6: only on explicit request;
     /// from an untrusted archive they are a privilege-escalation risk).
     pub restore_setid: bool,
+    /// End the job before writing anything if the [`preflight`] finds any
+    /// collision or unsupported name (`NAME_COLLISION` or
+    /// `NAME_UNSUPPORTED`), instead of restoring everything else.
+    pub refuse_on_preflight_exceptions: bool,
 }
 
 /// The setuid and setgid bits.
@@ -130,6 +144,8 @@ pub struct RestoreReport {
     pub attributes_unavailable: Option<String>,
     /// Attributes that were not applied to restored entries.
     pub attribute_exceptions: Vec<AttributeException>,
+    /// The destination's case behaviour, detected before writing.
+    pub case_behavior: CaseBehavior,
 }
 
 impl RestoreReport {
@@ -244,6 +260,49 @@ fn is_integrity(code: ErrorCode) -> bool {
     )
 }
 
+/// One selected entry: its path, kind, and version.
+type Selected = (ArchivePath, EntryKind, FileVersionId);
+
+/// What restoring would meet, found before anything is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Preflight {
+    pub case_behavior: CaseBehavior,
+    /// Entries that will not be restored, and why. Their subtrees are
+    /// skipped too (reported as `ParentNotRestored` during the restore).
+    pub exceptions: BTreeMap<ArchivePath, ExceptionKind>,
+}
+
+/// The restore preflight (plan C6): detect the destination's case
+/// behaviour, then find the collisions and unsupported names among
+/// `selected` (in path order) before anything is written. Only the case
+/// probe touches the destination, and it removes what it creates.
+pub fn preflight<D: RestoreDir>(root: &mut D, selected: &[Selected]) -> Result<Preflight> {
+    let case_behavior = root.case_behavior()?;
+    let mut exceptions = BTreeMap::new();
+    let mut taken: std::collections::HashSet<(Option<ArchivePath>, Vec<u8>)> =
+        std::collections::HashSet::new();
+    for (path, _, _) in selected {
+        let name = last_component(path);
+        if let Some(issue) = root.name_issue(name) {
+            exceptions.insert(path.clone(), ExceptionKind::UnsupportedName(issue));
+            continue;
+        }
+        let key = match case_behavior {
+            CaseBehavior::Sensitive => name.to_vec(),
+            CaseBehavior::Insensitive => case_fold_key(name),
+        };
+        let parent = path.parent();
+        let top_level = parent.is_none();
+        if !taken.insert((parent, key)) || (top_level && root.entry_exists(name)?) {
+            exceptions.insert(path.clone(), ExceptionKind::Collision);
+        }
+    }
+    Ok(Preflight {
+        case_behavior,
+        exceptions,
+    })
+}
+
 /// Restore the opened commit's entries, or only `under` and its subtree
 /// (with the directories above it), into `root`, which must exist. Entries
 /// keep their full archive paths below `root`.
@@ -257,7 +316,7 @@ pub fn restore<D: RestoreDir>(
     src: &dyn crate::storage::ReadStorage,
     head: &OpenedHead,
     under: Option<&ArchivePath>,
-    root: D,
+    mut root: D,
     options: &RestoreOptions,
     opts: &ReadOptions,
     ctx: &JobContext<'_>,
@@ -276,7 +335,7 @@ pub fn restore<D: RestoreDir>(
             ));
         }
     }
-    let selected: Vec<(ArchivePath, EntryKind, FileVersionId)> = snapshot
+    let selected: Vec<Selected> = snapshot
         .iter()
         .filter(|(p, _)| match under {
             None => true,
@@ -286,6 +345,27 @@ pub fn restore<D: RestoreDir>(
         .collect();
     let total = selected.len() as u64;
 
+    ctx.check_cancelled()?;
+    let pre = preflight(&mut root, &selected)?;
+    if options.refuse_on_preflight_exceptions {
+        if let Some((p, kind)) = pre.exceptions.iter().next() {
+            return Err(MochiError::new(
+                kind.code(),
+                format!(
+                    "{} entr{} cannot be restored here, first {:?} ({}); nothing was written",
+                    pre.exceptions.len(),
+                    if pre.exceptions.len() == 1 {
+                        "y"
+                    } else {
+                        "ies"
+                    },
+                    String::from_utf8_lossy(p.as_stored()),
+                    kind.code()
+                ),
+            ));
+        }
+    }
+
     let mut report = RestoreReport {
         files: 0,
         directories: 0,
@@ -294,6 +374,7 @@ pub fn restore<D: RestoreDir>(
         directory_durability: DirectoryDurability::Confirmed,
         attributes_unavailable: None,
         attribute_exceptions: Vec::new(),
+        case_behavior: pre.case_behavior,
     };
     let attributes: Option<BTreeMap<FileVersionId, Attributes>> =
         match promised_attributes(src, head, opts) {
@@ -357,6 +438,10 @@ pub fn restore<D: RestoreDir>(
             });
             continue;
         };
+        if let Some(kind) = pre.exceptions.get(path) {
+            except(kind.clone());
+            continue;
+        }
         let name = last_component(path);
         if let Some(issue) = parent.name_issue(name) {
             except(ExceptionKind::UnsupportedName(issue));

@@ -88,6 +88,35 @@ jobs:
         working-directory: fuzz
         run: cargo +nightly fuzz run ${{ matrix.target }} corpus/${{ matrix.target }} ${{ matrix.seeds }} -- -max_total_time=60 ${{ matrix.args }}
 
+  powercut:
+    # Gate G7 (spec Annex B.2.6): power loss at every step of D13 creation,
+    # on ext4 over dm-flakey, separate from the process-crash tests in
+    # t22_creation.rs. Needs root and the dm-flakey module, which GitHub's
+    # Ubuntu runners provide (linux-modules-extra if not loaded).
+    name: power loss (${{ matrix.os }}, dm-flakey)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the power-cut helper
+        run: cargo build --locked -p mochi-testkit --example g7_powercut
+      - name: Load dm-flakey
+        run: |
+          command -v dmsetup || { sudo apt-get update && sudo apt-get install -y dmsetup; }
+          sudo modprobe dm-flakey || {
+            sudo apt-get update
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+            sudo modprobe dm-flakey
+          }
+      - name: Cut power at every creation step
+        run: sudo bash ci/g7-powercut.sh target/debug/examples/g7_powercut
+
   doc-nightly:
     # Stable rustdoc ignores the error code in `compile_fail,E0308`; nightly
     # enforces it. The C2 representation-type guarantees (repr.rs) depend on

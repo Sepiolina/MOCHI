@@ -75,12 +75,13 @@ pub enum ErrorCode {
     /// §8.4, §12.2): it was never committed, or every footer is damaged.
     /// Added in C5.
     NoValidHead,
-    /// Bytes follow the last valid commit and are provably uncommitted (an
-    /// interrupted write, spec §12.2). Appending is refused until they are
+    /// Bytes follow the last valid commit and are *eligible* for truncation
+    /// (Annex B.2 D14: they look like an interrupted write; a conservative
+    /// screen, not proof). Appending is refused until they are
     /// removed by an explicit, audited truncation. Added in C5.
     UncommittedTail,
-    /// Bytes follow the last valid commit and cannot be proven uncommitted:
-    /// they may hold a damaged later commit (spec §12.2, §22). Truncation is
+    /// Bytes follow the last valid commit and are not eligible for
+    /// truncation (Annex B.2 D14): they may hold a damaged later commit (spec §12.2, §22). Truncation is
     /// refused; this needs the repair workflow. Added in C5.
     TailUnresolved,
     /// A failure after the footer was appended (spec §12.2 steps 7–9): the
@@ -120,6 +121,22 @@ pub enum ErrorCode {
     /// e.g. enabling encryption (D12). Write a new archive. Exit 4.
     /// Added in B.2.
     ProfileChangeUnsupported,
+    /// Restoration: an entry's name already exists at the destination, or
+    /// the destination filesystem folds it onto another entry's name (case,
+    /// normalization). Nothing was overwritten or merged (spec §10.4,
+    /// §23.3 #7). A report finding; exit 3 if ever returned as an error.
+    /// Added in C6.
+    NameCollision,
+    /// Restoration: the destination platform cannot hold an entry's name
+    /// (reserved, forbidden characters, not representable). The name was
+    /// not altered; the entry was skipped (spec §10.4, §23.3 #7). A report
+    /// finding; exit 3 if ever returned as an error. Added in C6.
+    NameUnsupported,
+    /// Restoration: a promised attribute (mode, owner, time, Windows bits:
+    /// plan O6) could not be applied, or attributes were unavailable. The
+    /// file's content was restored. Spec §10.4.1. A report finding; exit 3 if
+    /// ever returned as an error. Added in C6.
+    AttributeNotRestored,
 }
 
 impl ErrorCode {
@@ -159,6 +176,9 @@ impl ErrorCode {
         ErrorCode::QuarantineFailed,
         ErrorCode::DurabilityUnconfirmed,
         ErrorCode::ProfileChangeUnsupported,
+        ErrorCode::NameCollision,
+        ErrorCode::NameUnsupported,
+        ErrorCode::AttributeNotRestored,
     ];
 
     /// The stable string form. Independent of serde so it cannot drift silently;
@@ -199,6 +219,9 @@ impl ErrorCode {
             ErrorCode::QuarantineFailed => "QUARANTINE_FAILED",
             ErrorCode::DurabilityUnconfirmed => "DURABILITY_UNCONFIRMED",
             ErrorCode::ProfileChangeUnsupported => "PROFILE_CHANGE_UNSUPPORTED",
+            ErrorCode::NameCollision => "NAME_COLLISION",
+            ErrorCode::NameUnsupported => "NAME_UNSUPPORTED",
+            ErrorCode::AttributeNotRestored => "ATTRIBUTE_NOT_RESTORED",
         }
     }
 }
@@ -242,6 +265,9 @@ impl From<StorageError> for MochiError {
             StorageError::OutOfBounds { .. } => ErrorCode::OutOfBounds,
             StorageError::LockHeld => ErrorCode::LockConflict,
             StorageError::Unsupported(_) => ErrorCode::UnsupportedFeature,
+            // D13: a destination is never replaced.
+            StorageError::Exists { .. } => ErrorCode::DestinationExists,
+            StorageError::InvalidName { .. } => ErrorCode::InvalidArgument,
         };
         MochiError::new(code, err.to_string())
     }
@@ -318,6 +344,9 @@ mod tests {
         "QUARANTINE_FAILED",
         "DURABILITY_UNCONFIRMED",
         "PROFILE_CHANGE_UNSUPPORTED",
+        "NAME_COLLISION",
+        "NAME_UNSUPPORTED",
+        "ATTRIBUTE_NOT_RESTORED",
     ];
 
     #[test]

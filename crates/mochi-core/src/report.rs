@@ -8,11 +8,28 @@
 //! * [`Report::validate`] rejects an overall status that hides a failing
 //!   dimension, or a `PASS` that contradicts skipped/failed evidence.
 //!
-//! Open question raised here (plan §9, O13): the timestamp format and the
-//! exit-code precedence are not defined by the spec; timestamps are opaque
-//! RFC 3339 strings for now.
+//! Timestamps follow Annex B.2 D15 ([`crate::timestamp::Timestamp`], T28);
+//! the v0 fields still hold them as strings until C7's schema v1.
+//!
+//! # Three results (D15, T26)
+//!
+//! A report carries three results in distinct fields, which
+//! [`Report::conclude`] computes and [`Report::validate`] re-derives:
+//!
+//! * **evidence**: each dimension's status (`dimensions`) and their rollup
+//!   (`overall_status`), ordered `FAIL` > `UNSUPPORTED` > `DEGRADED` >
+//!   `OVERDUE` > `UNKNOWN` > `PASS` ([`Status::rollup`]);
+//! * **policy result** (`policy_result`): the same rollup over the policy's
+//!   required dimensions only, with the policy listed (`policy`);
+//! * **exit code** (`exit_code`), by the D15 precedence
+//!   ([`crate::exit::for_results`]).
+//!
+//! Freshness is required only when the user supplied an expected head, the
+//! local history holds this archive ID, or freshness was explicitly requested
+//! ([`FreshnessBasis`]). On first sight it is not required, so its `UNKNOWN`
+//! does not stop exit 0.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -84,6 +101,68 @@ pub struct SkippedItem {
     pub reason: String,
 }
 
+/// Why freshness is or is not required (Annex B.2 D15). Each field records
+/// one of the three conditions; any one makes freshness required.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FreshnessBasis {
+    /// The user supplied an expected head.
+    pub expected_head_supplied: bool,
+    /// The local history holds this archive ID.
+    pub archive_in_local_history: bool,
+    /// Freshness was explicitly requested.
+    pub requested: bool,
+}
+
+impl FreshnessBasis {
+    /// D15: freshness is required only when one of the conditions holds.
+    pub const fn required(&self) -> bool {
+        self.expected_head_supplied || self.archive_in_local_history || self.requested
+    }
+}
+
+/// The verification policy a report was judged against (D15: "with the
+/// policy listed"). Whether freshness is required is derived from
+/// [`FreshnessBasis`], never chosen separately.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Policy {
+    /// The required dimensions, in [`Dimension`] order.
+    pub required: BTreeSet<Dimension>,
+    pub freshness: FreshnessBasis,
+}
+
+impl Policy {
+    /// A policy requiring `required`. Naming [`Dimension::Freshness`] there is
+    /// an explicit request for it (D15's third condition) and is recorded as
+    /// such; otherwise freshness is required exactly when `freshness` says so.
+    pub fn new(
+        required: impl IntoIterator<Item = Dimension>,
+        mut freshness: FreshnessBasis,
+    ) -> Self {
+        let mut required: BTreeSet<Dimension> = required.into_iter().collect();
+        if required.contains(&Dimension::Freshness) {
+            freshness.requested = true;
+        }
+        if freshness.required() {
+            required.insert(Dimension::Freshness);
+        }
+        Self {
+            required,
+            freshness,
+        }
+    }
+
+    /// The D15 policy result: the rollup over the required dimensions only.
+    /// A required dimension with no reported status counts as `UNKNOWN`; a
+    /// policy that requires nothing is `UNKNOWN` ([`Status::rollup`]).
+    pub fn result(&self, dimensions: &BTreeMap<Dimension, Status>) -> Status {
+        Status::rollup(
+            self.required
+                .iter()
+                .map(|d| dimensions.get(d).copied().unwrap_or(Status::Unknown)),
+        )
+    }
+}
+
 /// Objects and bytes checked versus expected, plus evidence age (spec §20.5).
 /// `None` means "not measured", which is different from zero.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,7 +194,16 @@ pub struct Report {
     /// Repair actions, only if a repair was separately performed (spec §20.5).
     pub repair_actions: Vec<String>,
     pub dimensions: BTreeMap<Dimension, Status>,
+    /// D15 evidence rollup over every reported dimension.
     pub overall_status: Status,
+    /// The policy `policy_result` was judged against.
+    pub policy: Policy,
+    /// D15 policy result: the rollup over `policy.required` only.
+    pub policy_result: Status,
+    /// The run itself was compromised (I/O, cancellation, bad invocation).
+    pub operational_error: bool,
+    /// D15 exit code ([`crate::exit::for_results`]).
+    pub exit_code: u8,
 }
 
 /// A way in which a report breaks the spec's reporting invariants.
@@ -143,6 +231,25 @@ pub enum ReportViolation {
     },
     /// Freshness `PASS` with no expected head to compare against (spec §5.7).
     FreshnessPassWithoutExpectedHead,
+    /// `overall_status` is not the D15 rollup of `dimensions`.
+    EvidenceRollupMismatch {
+        expected: Status,
+        found: Status,
+    },
+    /// `policy_result` is not the D15 rollup of the required dimensions.
+    PolicyResultMismatch {
+        expected: Status,
+        found: Status,
+    },
+    /// `exit_code` is not the D15 exit code of these results.
+    ExitCodeMismatch {
+        expected: u8,
+        found: u8,
+    },
+    /// Freshness is required, or not, against what the basis says (D15).
+    FreshnessRequirementMismatch {
+        basis_requires: bool,
+    },
 }
 
 impl fmt::Display for ReportViolation {
@@ -167,15 +274,41 @@ impl fmt::Display for ReportViolation {
             Self::FreshnessPassWithoutExpectedHead => {
                 write!(f, "freshness PASS without an expected head")
             }
+            Self::EvidenceRollupMismatch { expected, found } => write!(
+                f,
+                "overall status {found:?} is not the rollup of the dimensions ({expected:?})"
+            ),
+            Self::PolicyResultMismatch { expected, found } => write!(
+                f,
+                "policy result {found:?} is not the rollup of the required dimensions \
+                 ({expected:?})"
+            ),
+            Self::ExitCodeMismatch { expected, found } => {
+                write!(
+                    f,
+                    "exit code {found} does not follow from the results ({expected})"
+                )
+            }
+            Self::FreshnessRequirementMismatch { basis_requires } => write!(
+                f,
+                "freshness is {}required, but its basis says it is {}",
+                if *basis_requires { "not " } else { "" },
+                if *basis_requires {
+                    "required"
+                } else {
+                    "not required"
+                }
+            ),
         }
     }
 }
 
 impl Report {
     /// A report with no evidence yet: every dimension and the overall status are
-    /// `UNKNOWN`. Checks must earn `PASS`; it is never the default.
+    /// `UNKNOWN`, the policy requires nothing (so its result is `UNKNOWN` too),
+    /// and the exit code is 2. Checks must earn `PASS`; it is never the default.
     pub fn new(level: VerificationLevel) -> Self {
-        Self {
+        let mut r = Self {
             schema_version: REPORT_SCHEMA_VERSION,
             archive_id: None,
             checked_commit: None,
@@ -194,14 +327,34 @@ impl Report {
                 .map(|d| (*d, Status::Unknown))
                 .collect(),
             overall_status: Status::Unknown,
-        }
+            policy: Policy::default(),
+            policy_result: Status::Unknown,
+            operational_error: false,
+            exit_code: crate::exit::DEGRADED,
+        };
+        r.conclude(false);
+        r
+    }
+
+    /// Compute the three D15 results from `dimensions` and `policy`: the
+    /// evidence rollup, the policy result, and the exit code. Call it after
+    /// the last dimension is set; `operational_error` says whether the run
+    /// itself was compromised.
+    pub fn conclude(&mut self, operational_error: bool) {
+        self.overall_status = Status::rollup(self.dimensions.values().copied());
+        self.policy_result = self.policy.result(&self.dimensions);
+        self.operational_error = operational_error;
+        self.exit_code = crate::exit::for_results(
+            self.dimensions.values().copied(),
+            self.policy_result,
+            operational_error,
+        );
     }
 
     /// Check the reporting invariants. Returns every violation found.
     ///
-    /// This does not *compute* an overall status: how `FAIL`, `UNSUPPORTED`,
-    /// `DEGRADED`, etc. combine into an exit code is unspecified (plan §9, O13)
-    /// and lands with C7. It only refuses reports that lie.
+    /// Besides refusing reports that lie, it re-derives the three D15 results
+    /// and refuses any that differ from what [`Report::conclude`] computes.
     pub fn validate(&self) -> Result<(), Vec<ReportViolation>> {
         let mut out = Vec::new();
 
@@ -240,6 +393,36 @@ impl Report {
             && self.expected_head.is_none()
         {
             out.push(ReportViolation::FreshnessPassWithoutExpectedHead);
+        }
+
+        let evidence = Status::rollup(self.dimensions.values().copied());
+        if self.overall_status != evidence {
+            out.push(ReportViolation::EvidenceRollupMismatch {
+                expected: evidence,
+                found: self.overall_status,
+            });
+        }
+        let basis_requires = self.policy.freshness.required();
+        if self.policy.required.contains(&Dimension::Freshness) != basis_requires {
+            out.push(ReportViolation::FreshnessRequirementMismatch { basis_requires });
+        }
+        let policy = self.policy.result(&self.dimensions);
+        if self.policy_result != policy {
+            out.push(ReportViolation::PolicyResultMismatch {
+                expected: policy,
+                found: self.policy_result,
+            });
+        }
+        let exit = crate::exit::for_results(
+            self.dimensions.values().copied(),
+            self.policy_result,
+            self.operational_error,
+        );
+        if self.exit_code != exit {
+            out.push(ReportViolation::ExitCodeMismatch {
+                expected: exit,
+                found: self.exit_code,
+            });
         }
 
         if out.is_empty() {
@@ -302,13 +485,14 @@ mod tests {
     fn overall_cannot_conceal_a_failing_dimension() {
         let mut r = Report::new(VerificationLevel::Structural);
         r.dimensions.insert(Dimension::Integrity, Status::Fail);
+        r.conclude(false);
+        assert_eq!(r.overall_status, Status::Fail);
+        assert!(r.validate().is_ok());
         r.overall_status = Status::Degraded;
         let v = r.validate().unwrap_err();
         assert!(v.contains(&ReportViolation::FailingDimensionConcealed {
             dimension: Dimension::Integrity
         }));
-        r.overall_status = Status::Fail;
-        assert!(r.validate().is_ok());
     }
 
     #[test]
@@ -339,6 +523,18 @@ mod tests {
         r.expected_head = None;
         let v = r.validate().unwrap_err();
         assert!(v.contains(&ReportViolation::FreshnessPassWithoutExpectedHead));
+    }
+
+    /// A required dimension the map does not mention has no evidence: it
+    /// counts as `UNKNOWN`, never as a pass.
+    #[test]
+    fn a_missing_required_dimension_is_unknown() {
+        let p = Policy::new(
+            [Dimension::Integrity, Dimension::Durability],
+            FreshnessBasis::default(),
+        );
+        let only_integrity: BTreeMap<_, _> = [(Dimension::Integrity, Status::Pass)].into();
+        assert_eq!(p.result(&only_integrity), Status::Unknown);
     }
 
     #[test]

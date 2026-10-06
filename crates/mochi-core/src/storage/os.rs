@@ -29,20 +29,21 @@
 //! * `sync_data` is `FlushFileBuffers` (what `File::sync_data` calls), which
 //!   also flushes the file's metadata, including its size. Appending needs
 //!   no directory flush.
-//! * Creating: O12 decides that a new file is published with
-//!   `MoveFileExW(…, MOVEFILE_WRITE_THROUGH)` (documented not to return until
-//!   the move is on disk), followed by a best-effort directory flush that
-//!   degrades the report only if it fails. **C5 does not create by rename
-//!   yet**: it creates the archive in place (`create_new`). Without the
-//!   write-through rename, the directory entry rests entirely on the
-//!   undocumented directory flush, so `sync_directory` reports
+//! * Creating (D13, T22): the first commit goes to a locked temporary file,
+//!   which is published by hard link (`CreateHardLinkW`, which fails if the
+//!   name exists) and then removal of the temporary name; see [`OsDir`].
+//!   The owner chose this over `MoveFileExW(…, MOVEFILE_WRITE_THROUGH)`
+//!   (T21, checklist Q63), so `mochi-core` keeps `forbid(unsafe_code)` and
+//!   needs no Windows API crate. Neither step is documented as
+//!   write-through, so the new directory entry rests on the undocumented
+//!   directory flush, and `sync_directory` reports
 //!   [`DirectoryDurability::Unconfirmed`] on Windows **even when the flush
-//!   succeeds**, and the first commit of a new archive is reported as
-//!   degraded ("directory durability unconfirmed"). This is stricter than
-//!   O12, deliberately, until creation-by-rename lands (plan §9, O12 note).
+//!   succeeds**: the first commit of a new archive is reported as degraded
+//!   ("directory durability unconfirmed"), as D13 requires until G6.
 //!   Appends to an existing archive are unaffected.
-//! * **This Windows path has not been compiled or run by the C5 author's
-//!   environment;** Windows CI (plan C0) is its first check.
+//! * Windows CI (`windows-latest`) runs the storage conformance suite,
+//!   including publication of a locked temporary file and refusal of an
+//!   existing destination.
 //!
 //! **Locking.** `try_lock_exclusive` is `File::try_lock` (Linux `flock`,
 //! Windows `LockFileEx`). Advisory on Linux: a process that ignores it is not
@@ -56,7 +57,12 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::{DirectoryDurability, ReadStorage, Storage, StorageError};
+use super::{
+    check_file_name, windows_name_issue, AttributeIssue, AttributeKind, DirectoryDurability,
+    NameIssue, ReadStorage, RemoveOutcome, RestoreDir, Storage, StorageDir, StorageError,
+};
+use crate::catalog::namespace::EntryKind;
+use crate::manifest::{Attributes, Mtime, WINDOWS_HIDDEN, WINDOWS_READONLY, WINDOWS_SYSTEM};
 
 #[cfg(not(any(unix, windows)))]
 compile_error!("mochi-core storage supports only Unix and Windows targets");
@@ -108,6 +114,29 @@ fn parent_dir(path: &Path) -> &Path {
     }
 }
 
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> Result<DirectoryDurability, StorageError> {
+    File::open(dir)?.sync_all()?;
+    Ok(DirectoryDurability::Confirmed)
+}
+
+#[cfg(windows)]
+fn sync_dir(dir: &Path) -> Result<DirectoryDurability, StorageError> {
+    // Best effort only (module docs, plan O12): never Confirmed.
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let flushed = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(dir)
+        .and_then(|d| d.sync_all());
+    Ok(DirectoryDurability::Unconfirmed(match flushed {
+        Ok(()) => "directory flush ran, but Windows does not document it as durable".into(),
+        Err(e) => format!("best-effort directory flush failed: {e}"),
+    }))
+}
+
 /// Read-only handle. There is no write API on this type, and the file is opened
 /// without write access, so verification cannot modify the archive.
 #[derive(Debug)]
@@ -137,6 +166,11 @@ impl ReadStorage for OsReadStorage {
 pub struct OsStorage {
     file: File,
     path: PathBuf,
+    /// Whether this handle holds the publication lock. Taking it again is a
+    /// no-op: `flock` (Linux) allows that, but `LockFileEx` (Windows) refuses
+    /// an overlapping lock even from the same handle, so the state is kept
+    /// here rather than asked of the OS (found by T22 on `windows-latest`).
+    locked: bool,
 }
 
 impl OsStorage {
@@ -148,14 +182,22 @@ impl OsStorage {
             .write(true)
             .create_new(true)
             .open(&path)?;
-        Ok(Self { file, path })
+        Ok(Self {
+            file,
+            path,
+            locked: false,
+        })
     }
 
     /// Open an existing file for reading and writing.
     pub fn open_existing(path: impl AsRef<Path>) -> Result<Self, StorageError> {
         let path = path.as_ref().to_path_buf();
         let file = OpenOptions::new().read(true).write(true).open(&path)?;
-        Ok(Self { file, path })
+        Ok(Self {
+            file,
+            path,
+            locked: false,
+        })
     }
 }
 
@@ -188,39 +230,31 @@ impl Storage for OsStorage {
         Ok(self.file.sync_data()?)
     }
 
-    #[cfg(unix)]
     fn sync_directory(&mut self) -> Result<DirectoryDurability, StorageError> {
-        File::open(parent_dir(&self.path))?.sync_all()?;
-        Ok(DirectoryDurability::Confirmed)
-    }
-
-    #[cfg(windows)]
-    fn sync_directory(&mut self) -> Result<DirectoryDurability, StorageError> {
-        // Best effort only (module docs, plan O12): never Confirmed.
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-        let flushed = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-            .open(parent_dir(&self.path))
-            .and_then(|dir| dir.sync_all());
-        Ok(DirectoryDurability::Unconfirmed(match flushed {
-            Ok(()) => "directory flush ran, but Windows does not document it as durable".into(),
-            Err(e) => format!("best-effort directory flush failed: {e}"),
-        }))
+        sync_dir(parent_dir(&self.path))
     }
 
     fn try_lock_exclusive(&mut self) -> Result<(), StorageError> {
+        if self.locked {
+            return Ok(());
+        }
         match self.file.try_lock() {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.locked = true;
+                Ok(())
+            }
             Err(std::fs::TryLockError::WouldBlock) => Err(StorageError::LockHeld),
             Err(std::fs::TryLockError::Error(e)) => Err(StorageError::Io(e)),
         }
     }
 
     fn unlock(&mut self) -> Result<(), StorageError> {
-        Ok(self.file.unlock()?)
+        if !self.locked {
+            return Ok(());
+        }
+        self.file.unlock()?;
+        self.locked = false;
+        Ok(())
     }
 
     fn truncate(&mut self, new_len: u64) -> Result<(), StorageError> {
@@ -233,6 +267,493 @@ impl Storage for OsStorage {
             });
         }
         Ok(self.file.set_len(new_len)?)
+    }
+}
+
+/// The directory that holds an archive (plan T19; Annex B.2 D13, D14).
+///
+/// **Publication without replacing** (plan T20):
+/// * **Linux:** one atomic `renameat2(RENAME_NOREPLACE)`. `EEXIST` is
+///   `Exists`. If the filesystem (`EINVAL`) or kernel (`ENOSYS`) rejects the
+///   flag, it falls back to the portable mechanism below.
+/// * **Portable** (Windows, other Unix, and Linux's fallback): a
+///   hard link to the new name, then removal of the old one. `link(2)` /
+///   `CreateHardLinkW` fail if the new name exists, so nothing is ever
+///   replaced. A crash between the two steps leaves both names on the same
+///   bytes; cleanup removes the temporary name once its lock is free.
+///
+/// A filesystem with neither refuses publication with an I/O error; nothing
+/// ever falls back to a replacing rename. Windows keeps the portable
+/// mechanism (T21 decided, checklist Q63): no `MoveFileExW`.
+#[derive(Debug)]
+pub struct OsDir {
+    path: PathBuf,
+    last_publish: Option<PublishMechanism>,
+}
+
+/// How the last [`StorageDir::publish_no_replace`] was carried out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishMechanism {
+    /// One atomic `renameat2(RENAME_NOREPLACE)` (Linux).
+    RenameNoReplace,
+    /// Hard link to the new name, then unlink of the old: the portable
+    /// mechanism, and Linux's fallback where the filesystem or kernel
+    /// rejects the flag.
+    LinkThenUnlink,
+}
+
+impl OsDir {
+    /// The mechanism the last successful publication used (diagnostics and
+    /// tests).
+    pub fn last_publish(&self) -> Option<PublishMechanism> {
+        self.last_publish
+    }
+}
+
+fn link_then_unlink(src: &Path, dst: &Path, to: &str) -> Result<PublishMechanism, StorageError> {
+    std::fs::hard_link(src, dst).map_err(exists_as(to))?;
+    std::fs::remove_file(src)?;
+    Ok(PublishMechanism::LinkThenUnlink)
+}
+
+/// What a failed `renameat2(RENAME_NOREPLACE)` means (plan T20).
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenameOutcome {
+    /// The destination exists: never replaced.
+    Exists,
+    /// The filesystem (`EINVAL`) or kernel (`ENOSYS`) does not support the
+    /// flag: fall back to link then unlink, which is also no-replace.
+    Unsupported,
+    /// Any other failure is reported as is.
+    Failed,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn classify_rename_errno(raw: i32) -> RenameOutcome {
+    const EEXIST: i32 = 17;
+    const EINVAL: i32 = 22;
+    const ENOSYS: i32 = 38;
+    match raw {
+        EEXIST => RenameOutcome::Exists,
+        EINVAL | ENOSYS => RenameOutcome::Unsupported,
+        _ => RenameOutcome::Failed,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn publish_no_replace_at(
+    src: &Path,
+    dst: &Path,
+    to: &str,
+) -> Result<PublishMechanism, StorageError> {
+    use rustix::fs::{renameat_with, RenameFlags, CWD};
+    publish_with(src, dst, to, |s, d| {
+        renameat_with(CWD, s, CWD, d, RenameFlags::NOREPLACE).map_err(|e| e.raw_os_error())
+    })
+}
+
+/// The Linux decision, with the no-replace rename passed in (it returns the
+/// raw errno on failure), so the fallback can be tested on filesystems that
+/// support the flag.
+#[cfg(any(target_os = "linux", test))]
+fn publish_with(
+    src: &Path,
+    dst: &Path,
+    to: &str,
+    rename_noreplace: impl FnOnce(&Path, &Path) -> Result<(), i32>,
+) -> Result<PublishMechanism, StorageError> {
+    match rename_noreplace(src, dst) {
+        Ok(()) => Ok(PublishMechanism::RenameNoReplace),
+        Err(errno) => match classify_rename_errno(errno) {
+            RenameOutcome::Exists => Err(StorageError::Exists {
+                name: to.to_string(),
+            }),
+            RenameOutcome::Unsupported => link_then_unlink(src, dst, to),
+            RenameOutcome::Failed => Err(StorageError::Io(io::Error::from_raw_os_error(errno))),
+        },
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn publish_no_replace_at(
+    src: &Path,
+    dst: &Path,
+    to: &str,
+) -> Result<PublishMechanism, StorageError> {
+    link_then_unlink(src, dst, to)
+}
+
+impl OsDir {
+    /// The directory at `path`, which must exist.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
+        let path = path.as_ref().to_path_buf();
+        if !std::fs::metadata(&path)?.is_dir() {
+            return Err(StorageError::Io(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                format!("{} is not a directory", path.display()),
+            )));
+        }
+        Ok(Self {
+            path,
+            last_publish: None,
+        })
+    }
+
+    /// The directory that contains `file`.
+    pub fn containing(file: impl AsRef<Path>) -> Result<Self, StorageError> {
+        Self::open(parent_dir(file.as_ref()))
+    }
+
+    fn entry(&self, name: &str) -> Result<PathBuf, StorageError> {
+        check_file_name(name)?;
+        Ok(self.path.join(name))
+    }
+}
+
+fn exists_as(name: &str) -> impl Fn(io::Error) -> StorageError + '_ {
+    move |e| {
+        if e.kind() == io::ErrorKind::AlreadyExists {
+            StorageError::Exists {
+                name: name.to_string(),
+            }
+        } else {
+            StorageError::Io(e)
+        }
+    }
+}
+
+impl StorageDir for OsDir {
+    type File = OsStorage;
+
+    fn open(&mut self, name: &str) -> Result<OsStorage, StorageError> {
+        OsStorage::open_existing(self.entry(name)?)
+    }
+
+    fn create_exclusive(&mut self, name: &str) -> Result<OsStorage, StorageError> {
+        let path = self.entry(name)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(exists_as(name))?;
+        let mut s = OsStorage {
+            file,
+            path,
+            locked: false,
+        };
+        s.try_lock_exclusive()?;
+        Ok(s)
+    }
+
+    fn publish_no_replace(&mut self, from: &str, to: &str) -> Result<(), StorageError> {
+        let (src, dst) = (self.entry(from)?, self.entry(to)?);
+        self.last_publish = Some(publish_no_replace_at(&src, &dst, to)?);
+        Ok(())
+    }
+
+    fn discard(&mut self, file: OsStorage, name: &str) -> Result<(), StorageError> {
+        let path = self.entry(name)?;
+        // Removed while still held: no other process can take the name's
+        // lock in between and see a half-removed file.
+        let removed = std::fs::remove_file(&path);
+        drop(file);
+        Ok(removed?)
+    }
+
+    fn remove_if_unlocked(&mut self, name: &str) -> Result<RemoveOutcome, StorageError> {
+        let path = self.entry(name)?;
+        let file = match OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(RemoveOutcome::Missing),
+            Err(e) => return Err(e.into()),
+        };
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(RemoveOutcome::Locked),
+            Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+        }
+        std::fs::remove_file(&path)?;
+        drop(file);
+        Ok(RemoveOutcome::Removed)
+    }
+
+    fn sync_directory(&mut self) -> Result<DirectoryDurability, StorageError> {
+        sync_dir(&self.path)
+    }
+}
+
+/// A restore destination directory on the local filesystem (plan C6;
+/// [`RestoreDir`]).
+///
+/// Names are converted without loss or they are refused. On Unix they are
+/// the bytes as they are; on Windows, WTF-8 decoded to UTF-16 (plan O24),
+/// checked against [`windows_name_issue`] first. Creation is exclusive and
+/// publication never replaces (the [`OsDir`] mechanisms).
+///
+/// **Path-based:** each operation joins names onto the directory's path.
+/// Every directory on that path below the restore root was created by this
+/// restoration, exclusively. A local process that replaces one of them with
+/// a symbolic link between two operations could redirect later writes;
+/// descriptor-relative operations (`openat` with `O_NOFOLLOW`) are the
+/// remedy, recorded for C6.
+#[derive(Debug, Clone)]
+pub struct OsRestoreDir {
+    path: PathBuf,
+}
+
+impl OsRestoreDir {
+    /// The existing directory at `path`.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
+        let dir = OsDir::open(path)?;
+        Ok(Self { path: dir.path })
+    }
+
+    /// Where this directory is.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn entry(&self, name: &[u8]) -> Result<PathBuf, StorageError> {
+        if let Some(issue) = self.name_issue(name) {
+            return Err(StorageError::InvalidName {
+                name: format!("{} ({issue})", String::from_utf8_lossy(name)),
+            });
+        }
+        Ok(self.path.join(os_name(name)?))
+    }
+}
+
+#[cfg(unix)]
+fn os_name(name: &[u8]) -> Result<std::ffi::OsString, StorageError> {
+    use std::os::unix::ffi::OsStrExt;
+    Ok(std::ffi::OsStr::from_bytes(name).to_os_string())
+}
+
+#[cfg(windows)]
+fn os_name(name: &[u8]) -> Result<std::ffi::OsString, StorageError> {
+    use std::os::windows::ffi::OsStringExt;
+    crate::catalog::path::utf16_from_wtf8(name)
+        .map(|w| std::ffi::OsString::from_wide(&w))
+        .ok_or_else(|| StorageError::InvalidName {
+            name: String::from_utf8_lossy(name).into_owned(),
+        })
+}
+
+impl RestoreDir for OsRestoreDir {
+    type File = OsStorage;
+
+    fn name_issue(&self, name: &[u8]) -> Option<NameIssue> {
+        if cfg!(windows) {
+            windows_name_issue(name)
+        } else {
+            // Unix: archive components already exclude NUL and `/`, and any
+            // other byte is a valid name byte.
+            None
+        }
+    }
+
+    fn create_dir(&mut self, name: &[u8]) -> Result<Self, StorageError> {
+        let path = self.entry(name)?;
+        let lossy = String::from_utf8_lossy(name);
+        std::fs::create_dir(&path).map_err(exists_as(&lossy))?;
+        Ok(Self { path })
+    }
+
+    fn create_file(&mut self, name: &[u8]) -> Result<OsStorage, StorageError> {
+        let path = self.entry(name)?;
+        let lossy = String::from_utf8_lossy(name);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(exists_as(&lossy))?;
+        Ok(OsStorage {
+            file,
+            path,
+            locked: false,
+        })
+    }
+
+    fn publish_no_replace(&mut self, from: &[u8], to: &[u8]) -> Result<(), StorageError> {
+        let (src, dst) = (self.entry(from)?, self.entry(to)?);
+        publish_no_replace_at(&src, &dst, &String::from_utf8_lossy(to))?;
+        Ok(())
+    }
+
+    fn discard(&mut self, file: OsStorage, name: &[u8]) -> Result<(), StorageError> {
+        let path = self.entry(name)?;
+        drop(file);
+        Ok(std::fs::remove_file(path)?)
+    }
+
+    fn sync_directory(&mut self) -> Result<DirectoryDurability, StorageError> {
+        sync_dir(&self.path)
+    }
+
+    fn apply_attributes(
+        &mut self,
+        name: &[u8],
+        kind: EntryKind,
+        attributes: &Attributes,
+    ) -> Vec<AttributeIssue> {
+        let mut issues = Vec::new();
+        match self.entry(name) {
+            Ok(path) => apply_os_attributes(&path, kind, attributes, &mut issues),
+            Err(e) => issues.push(AttributeIssue {
+                attribute: AttributeKind::Mtime,
+                reason: e.to_string(),
+            }),
+        }
+        issues
+    }
+}
+
+fn issue(issues: &mut Vec<AttributeIssue>, attribute: AttributeKind, reason: impl ToString) {
+    issues.push(AttributeIssue {
+        attribute,
+        reason: reason.to_string(),
+    });
+}
+
+/// An archive time as a `SystemTime`, or `None` if it is out of range.
+fn system_time(m: Mtime) -> Option<std::time::SystemTime> {
+    use std::time::{Duration, UNIX_EPOCH};
+    if m.nanos >= 1_000_000_000 {
+        return None;
+    }
+    let nanos = Duration::from_nanos(u64::from(m.nanos));
+    if m.secs >= 0 {
+        UNIX_EPOCH
+            .checked_add(Duration::from_secs(m.secs.unsigned_abs()))?
+            .checked_add(nanos)
+    } else {
+        UNIX_EPOCH
+            .checked_sub(Duration::from_secs(m.secs.unsigned_abs()))?
+            .checked_add(nanos)
+    }
+}
+
+/// Set the modification time through a handle (files and directories).
+fn set_mtime(path: &Path, m: Mtime) -> Result<(), String> {
+    let t = system_time(m).ok_or("the time is out of this platform's range")?;
+    #[cfg(unix)]
+    let handle = File::open(path);
+    #[cfg(windows)]
+    let handle = {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+    };
+    handle
+        .and_then(|f| f.set_modified(t))
+        .map_err(|e| e.to_string())
+}
+
+/// POSIX (plan O6): the time first, then the owner (which clears setuid and
+/// setgid), then the mode. The Windows read-only bit clears the write bits;
+/// hidden and system have no POSIX equivalent and are reported. The
+/// Windows archive bit is a backup marker with no meaning here and is
+/// ignored.
+#[cfg(unix)]
+fn apply_os_attributes(
+    path: &Path,
+    _kind: EntryKind,
+    a: &Attributes,
+    issues: &mut Vec<AttributeIssue>,
+) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(m) = a.mtime {
+        if let Err(e) = set_mtime(path, m) {
+            issue(issues, AttributeKind::Mtime, e);
+        }
+    }
+    let readonly = a.windows.is_some_and(|w| w & WINDOWS_READONLY != 0);
+    if let Some(w) = a.windows {
+        if w & (WINDOWS_HIDDEN | WINDOWS_SYSTEM) != 0 {
+            issue(issues, AttributeKind::HiddenOrSystem, "no POSIX equivalent");
+        }
+    }
+    let mode = match a.posix {
+        Some(p) => {
+            if let Err(e) = std::os::unix::fs::chown(path, Some(p.uid), Some(p.gid)) {
+                issue(issues, AttributeKind::Ownership, e);
+            }
+            Some(p.mode & 0o7777)
+        }
+        None => std::fs::metadata(path)
+            .ok()
+            .map(|m| m.permissions().mode() & 0o7777),
+    };
+    if let Some(mut mode) = mode {
+        if readonly {
+            mode &= !0o222;
+        }
+        if a.posix.is_some() || readonly {
+            if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) {
+                issue(issues, AttributeKind::Mode, e);
+            }
+        }
+    }
+}
+
+/// Windows (plan O6): the time, then the read-only bit (from the Windows
+/// bits, or from POSIX write bits when the entry was authored on POSIX).
+/// Hidden and system need `SetFileAttributesW`, which `mochi-core` does
+/// not call (no `unsafe`, T21's decision), so they are reported; so are a
+/// POSIX owner and the POSIX bits Windows cannot hold.
+#[cfg(windows)]
+fn apply_os_attributes(
+    path: &Path,
+    kind: EntryKind,
+    a: &Attributes,
+    issues: &mut Vec<AttributeIssue>,
+) {
+    if let Some(m) = a.mtime {
+        if let Err(e) = set_mtime(path, m) {
+            issue(issues, AttributeKind::Mtime, e);
+        }
+    }
+    let readonly = match (a.windows, a.posix) {
+        (Some(w), _) => w & WINDOWS_READONLY != 0,
+        (None, Some(p)) => p.mode & 0o222 == 0,
+        (None, None) => false,
+    };
+    if let Some(w) = a.windows {
+        if w & (WINDOWS_HIDDEN | WINDOWS_SYSTEM) != 0 {
+            issue(
+                issues,
+                AttributeKind::HiddenOrSystem,
+                "not restored: setting them needs the Windows API, which this build does not call",
+            );
+        }
+    }
+    if a.posix.is_some() {
+        issue(
+            issues,
+            AttributeKind::Ownership,
+            "Windows has no numeric owner or group",
+        );
+        issue(
+            issues,
+            AttributeKind::Mode,
+            "only the write bits map to Windows (the read-only attribute)",
+        );
+    }
+    if readonly && kind == EntryKind::File {
+        let set = std::fs::metadata(path).and_then(|m| {
+            let mut p = m.permissions();
+            p.set_readonly(true);
+            std::fs::set_permissions(path, p)
+        });
+        if let Err(e) = set {
+            issue(issues, AttributeKind::ReadOnly, e);
+        }
     }
 }
 
@@ -319,6 +840,24 @@ mod tests {
         b.try_lock_exclusive().unwrap();
     }
 
+    /// The holder may take the lock again (`Storage` contract): a no-op, on
+    /// Windows too, where `LockFileEx` itself refuses an overlapping lock.
+    #[test]
+    fn the_holder_may_lock_again() {
+        let (_d, path) = tmp();
+        let mut a = OsStorage::create_new(&path).unwrap();
+        a.try_lock_exclusive().unwrap();
+        a.try_lock_exclusive().unwrap();
+        let mut b = OsStorage::open_existing(&path).unwrap();
+        assert!(matches!(
+            b.try_lock_exclusive(),
+            Err(StorageError::LockHeld)
+        ));
+        a.unlock().unwrap();
+        a.unlock().unwrap();
+        b.try_lock_exclusive().unwrap();
+    }
+
     #[test]
     fn read_only_handle_reads_and_leaves_bytes_unchanged() {
         let (_d, path) = tmp();
@@ -333,6 +872,79 @@ mod tests {
         r.read_exact_at(0, &mut buf).unwrap();
         assert_eq!(&buf, b"payload");
         assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn t20_rename_errnos_are_classified() {
+        assert_eq!(classify_rename_errno(17), RenameOutcome::Exists);
+        assert_eq!(classify_rename_errno(22), RenameOutcome::Unsupported);
+        assert_eq!(classify_rename_errno(38), RenameOutcome::Unsupported);
+        for other in [1, 2, 5, 13, 18, 28, 30, 95] {
+            assert_eq!(
+                classify_rename_errno(other),
+                RenameOutcome::Failed,
+                "{other}"
+            );
+        }
+    }
+
+    /// **T20 DoD (fallback).** A rename that the filesystem rejects with
+    /// `EINVAL` (or the kernel with `ENOSYS`) falls back to link then
+    /// unlink, which still never replaces. The rename is injected because
+    /// every filesystem in CI supports the flag.
+    #[test]
+    fn t20_rejected_flag_falls_back_to_link_then_unlink() {
+        for errno in [22, 38] {
+            let (td, _) = tmp();
+            let dir = td.path().to_path_buf();
+            let (src, dst) = (dir.join("a.tmp"), dir.join("a"));
+            std::fs::write(&src, b"payload").unwrap();
+            let used = publish_with(&src, &dst, "a", |_, _| Err(errno)).unwrap();
+            assert_eq!(used, PublishMechanism::LinkThenUnlink);
+            assert!(!src.exists());
+            assert_eq!(std::fs::read(&dst).unwrap(), b"payload");
+
+            // The fallback never replaces either.
+            std::fs::write(&src, b"other").unwrap();
+            let e = publish_with(&src, &dst, "a", |_, _| Err(errno)).unwrap_err();
+            assert!(
+                matches!(e, StorageError::Exists { ref name } if name == "a"),
+                "{e}"
+            );
+            assert_eq!(std::fs::read(&dst).unwrap(), b"payload");
+            assert_eq!(std::fs::read(&src).unwrap(), b"other");
+        }
+    }
+
+    #[test]
+    fn t20_other_rename_failures_do_not_fall_back() {
+        let (td, _) = tmp();
+        let dir = td.path().to_path_buf();
+        let (src, dst) = (dir.join("a.tmp"), dir.join("a"));
+        std::fs::write(&src, b"payload").unwrap();
+        let e = publish_with(&src, &dst, "a", |_, _| Err(13)).unwrap_err();
+        assert!(matches!(e, StorageError::Io(_)), "{e}");
+        assert!(src.exists() && !dst.exists());
+    }
+
+    /// On Linux filesystems that support the flag (ext4 and tmpfs in CI),
+    /// publication is the one atomic rename, and `EEXIST` comes from it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn t20_linux_uses_rename_noreplace() {
+        let (td, _) = tmp();
+        let dir = td.path().to_path_buf();
+        let mut d = OsDir::open(&dir).unwrap();
+        let mut f = d.create_exclusive("a.tmp").unwrap();
+        f.append(b"payload").unwrap();
+        d.publish_no_replace("a.tmp", "a").unwrap();
+        assert_eq!(d.last_publish(), Some(PublishMechanism::RenameNoReplace));
+        let mut g = d.create_exclusive("b.tmp").unwrap();
+        g.append(b"other").unwrap();
+        let e = d.publish_no_replace("b.tmp", "a").unwrap_err();
+        assert!(matches!(e, StorageError::Exists { .. }), "{e}");
+        assert_eq!(std::fs::read(dir.join("a")).unwrap(), b"payload");
+        assert_eq!(std::fs::read(dir.join("b.tmp")).unwrap(), b"other");
     }
 
     #[test]

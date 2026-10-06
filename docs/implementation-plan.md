@@ -147,7 +147,7 @@ Each phase ends with a working, tested artifact. "Fault-matrix rows" refers to t
 
 ### C5 — Commit and single-file publication
 - The ten-step protocol in §12.2: exclusive lock, head validation and interrupted-tail detection, content → recovery/metadata → commit → sync → footer → sync → directory sync where needed.
-- Document per-OS durability assumptions (POSIX `fsync` on file and parent directory; Windows per decision O12: `FlushFileBuffers` on the file, `MOVEFILE_WRITE_THROUGH` for renames, best-effort directory flush reported as degraded if it fails), per §12.2.
+- Document per-OS durability assumptions (POSIX `fsync` on file and parent directory; Windows per decision O12: `FlushFileBuffers` on the file, publication of a new file by hard link then unlink (T21 decision, 2026-10-05; not `MOVEFILE_WRITE_THROUGH`), best-effort directory flush reported as degraded if it fails), per §12.2.
 - Locate previous valid footers when the tail is incomplete; auditable, explicit tail truncation only under exclusive access.
 - Commit status reporting: `LOCAL_COMMITTED` (Preservation states are unreachable in 1.0 and must say so).
 - Cancellation before step 7 leaves the previous head valid.
@@ -163,6 +163,52 @@ Each phase ends with a working, tested artifact. "Fault-matrix rows" refers to t
 - Open: footer → commit → checkpoint + deltas replay (§10.6); snapshot selection by commit.
 - `list`, `get`, restore to directory with traversal rejection, collision and unsupported-name reporting, case-insensitive-filesystem detection, sparse-file handling, attribute restoration per O6 with exceptions reported.
 - **Exit:** fault-matrix row *path traversal or naming collision*. Benchmarks per §27: footer lookup, catalog open, replay, selected-file read — each reported separately, with dataset, hardware, and cache state.
+
+- **Status (C6 started 2026-10-05).** Opening with replay and snapshot selection by commit already exist (C5, B.2: `open_head`, `open_at_footer` with offsets from `commit_history`). New `mochi_core::read`:
+  - `list(head, under)`: path, kind, logical length, and content hash, from the catalog alone.
+  - `read_file` / `read_file_in`: streams one file to a writer as a job (progress, cancellation). Every chunk is hash-verified as stored and decoded bytes; holes are written as zeros and hashed. The whole logical stream must match the file-content hash, and extents are re-checked where their offsets are used.
+  - **Output reaches the writer before the final comparison** (streaming), so it is unverified until `Ok`. The restore engine must write to a temporary file and publish only on `Ok`.
+  - Tests: `c6_read.rs` (8), against the scripted history's independent model and the test kit's separate reassembly. They cover every commit's snapshot, an absent path or a directory refused with nothing written, a damaged chunk, cancellation, sparse files, and a file whose intact chunks do not match its content hash.
+  - Mutations (9): 6 killed. A shorter zero block is an equivalent mutant. Dropping the extent re-check or the length check survives because the catalog already refuses invalid extents at insertion and at open (defense in depth, unreachable through the public API).
+  - **Decision [delegated]:** a path absent from the snapshot is `INVALID_ARGUMENT` (exit 3), not a new code; a dedicated not-found code is for R7 if automation needs one.
+- **Status (C6 restore engine, 2026-10-05).** `mochi_core::restore::restore` writes an opened commit, or one subtree with the directories above it, into a `RestoreDir`. New pieces:
+  - `storage::RestoreDir`: byte names, nested directories, exclusive creation, no-replace publication.
+  - `OsRestoreDir`: Unix names are the bytes as stored; Windows names are WTF-8 decoded to UTF-16 (O24).
+  - `windows_name_issue`: reserved device names (with extensions, any case, superscript digits), forbidden characters, trailing dot or space, and names that are not representable.
+  - Test kit `SimTree`: an in-memory destination that can be case-insensitive or apply Windows rules on any host.
+  - **Rules** (delegated decisions; spec §10.4 and §23.3 #7 require reporting but leave policy open):
+    - Nothing is ever overwritten or merged. An existing or case-folded name is `NAME_COLLISION`, and the earlier entry keeps its bytes.
+    - Names are never altered. An unsupported one is `NAME_UNSUPPORTED`, and the entry is skipped.
+    - A skipped directory's subtree is reported with its cause.
+    - Every file is streamed to a temporary name, verified (chunks and file-content hash), synced, and only then published. A damaged file is absent, never partial.
+    - Exceptions do not stop the job; only cancellation or a failing destination do.
+  - Two error codes were added: `NAME_COLLISION` and `NAME_UNSUPPORTED` (draft, R7).
+  - **Traversal** cannot be encoded: archive paths reject `.`, `..`, empty, and separator-bearing components. A catalog that holds `d/../f` is refused at open (`catalog` test `relationship_and_mochi_rule_violations_are_refused`).
+  - **Tests** (`c6_restore.rs`, 11, plus Windows-rule unit tests, 27 names) cover:
+    - the head;
+    - case-insensitive collisions (no overwrite, no merge);
+    - existing destination content;
+    - unsupported names under Windows rules;
+    - an entry named like a temporary file;
+    - a damaged file left absent;
+    - subtrees (top-level and nested);
+    - cancellation, including before a directory;
+    - the real filesystem, restored twice: the second run collides everywhere and keeps a locally edited file. On Windows the hostile fixture name is reported as unsupported.
+  - **Mutations:** 15, all killed (two after adding the nested-subtree and directory-cancellation tests).
+  - **Open:**
+    - `OsRestoreDir` is path-based. A local process that swaps a just-created directory for a symbolic link could redirect later writes; descriptor-relative operations (`openat` with `O_NOFOLLOW` on Linux) are the remedy.
+    - Up-front case-insensitivity detection (collisions are already caught as they happen).
+    - The §27 decomposed read benchmarks.
+- **Status (C6 attributes, 2026-10-05).** `publish::promised_attributes` rebuilds an opened commit's promised attributes as appending does: the segment base's snapshot manifest, then each delta in order, each manifest hash-verified against its commit. A reintroduced version or a reachable version without attributes is `RECORD_INVALID`.
+  - **How restore applies them:** files right after they are published; directories at the end, deepest first, so creating children neither disturbs a directory's time nor needs write permission it no longer has. Every attribute not applied is an `ATTRIBUTE_NOT_RESTORED` exception (new code), summarised as one finding per kind with a count and the first path.
+  - **If attributes cannot be reconstructed** (for example a damaged snapshot manifest), content is still restored and verified, nothing is guessed, and the report says the attributes were unavailable.
+  - **Rules (O6; the platform mappings are delegated decisions):**
+    - Setuid and setgid are removed unless `RestoreOptions::restore_setid` is set, and the removal is reported. The sticky bit is kept.
+    - **Unix:** the time (nanoseconds), then the owner (attempted; a refusal is reported, which is the unprivileged case), then the mode. The Windows read-only bit clears the write bits. Hidden and system are reported. The archive bit is ignored.
+    - **Windows:** the time and the read-only bit (from the Windows bits, or from POSIX write bits). Hidden and system are reported, because they need `SetFileAttributesW` and `mochi-core` has no `unsafe` (Q63). A POSIX owner and the POSIX bits Windows cannot hold are reported.
+  - **Tests:** `c6_restore_attributes.rs` (8) covers exact attributes for every entry, directory order (nested), setuid and setgid with and without the request, a refused owner summarised once, attributes unavailable after a damaged snapshot manifest, attributes from delta manifests, and on the real filesystem the time to the nanosecond, the mode, ownership both privileged and unprivileged, and Windows-authored bits on Unix. All restore tests also pass as an unprivileged user here.
+  - **Mutations:** 11 run; 10 killed (one only when unprivileged, as CI runs). One is equivalent: an empty map instead of none applies nothing either way.
+- **C6 CI evidence (2026-10-05):** all jobs green on Ubuntu 22.04/24.04 (non-root runners, so the unprivileged ownership path) and `windows-latest`: the read API (run 37340859066, `f96b546`), the restore engine (run 37342327439, `f18b82c`), and attributes (run 37343548193, `0e172d9`). On Windows this covers WTF-8 names, `NAME_UNSUPPORTED` for the hostile fixture name, times on files and directories through backup-semantics handles, and the read-only bit.
 
 ### C7 — Verification, health, and reports
 - Levels: structural, referential, stored integrity, content integrity, restoration (§20.1). Inventory, search, and disaster-recovery levels return `UNSUPPORTED` in 1.0 unless implemented.
@@ -326,8 +372,10 @@ Rows not listed for 1.0 — deleted primary archive, original machine unavailabl
 4. The draft-to-1.0 boundary is enforced: pre-1.0 archives are rejected explicitly or migrated per §26, never misread.
 5. User documentation covers: a `.mochi` file is not a backup (§1.1); the encrypted-archive limits on tool fallback and self-healing without keys; the dedup-under-encryption leak; what "Test archive" does and does not prove.
 6. Signed installers and signed updates for Windows and Ubuntu.
-8. A project license is chosen that permits distributing UnRAR (O23).
 7. All Annex B decisions that block 1.0 scope are recorded.
+8. A project license is chosen that permits distributing UnRAR (O23). **Met:** MIT OR Apache-2.0, with UnRAR's notice in `THIRD-PARTY-NOTICES.md`.
+
+These release gates are numbered 1–8. The Annex B.2 evidence gates G1–G9 (spec Annex B.2.6, `docs/b2-implementation-checklist.md`) are a separate series.
 
 ---
 
@@ -347,7 +395,7 @@ Spec Annex B holds the format-level decisions (D1–D9). Product-level decisions
 | O9 | **Decided (= spec D9):** the desktop app **opens ZIP, 7z, RAR, and `.tar.gz`/`.tgz` (and plain `.tar`) read-only**: browse, extract, test. It never creates or modifies them. Phase D8 has the scope and rules; the reasoning is recorded there. Foreign formats are outside the MOCHI specification: none of this changes the `.mochi` wire format | D8 |
 | O10 | **Decided.** Windows: classic context-menu verbs (Open with MOCHI, Extract here, Extract to folder, Add to archive) via installer registry entries; on Windows 11 they sit under "Show more options". The Windows 11 top-level menu needs an `IExplorerCommand` handler with package identity: 1.x. Ubuntu: file associations and "Open with" via the `.desktop` file only; Nautilus extensions need an extra package and change with GNOME versions: 1.x | D6 |
 | O11 | **Decided: supported platforms are Windows and Ubuntu; macOS is not supported in 1.0.** Minimums, x86-64 only: **Windows 10 22H2 and Windows 11**; **Ubuntu 22.04 LTS and 24.04 LTS**. Reasons: Tauri v2 needs webkit2gtk 4.1, first packaged in Ubuntu 22.04, which is therefore the floor, and the `.deb` is built on 22.04 so its glibc requirement matches; Windows 10 costs nothing extra because Microsoft services WebView2 on Windows 10 22H2 until at least October 2028 even though the OS itself left support in October 2025. Revisit both floors on those vendors' dates (Windows 10: October 2028 WebView2 horizon; Ubuntu 22.04: end of standard support, April 2027). ARM64 on either OS is post-1.0. Consequences: CI runs Windows and Ubuntu 22.04/24.04 only; installers are NSIS (Windows) and `.deb` (Ubuntu); `tauri-driver` covers both platforms, so every §23.3 requirement gets an automated E2E test and the macOS manual-checklist carve-out is gone. Known gap: GitHub-hosted Windows runners are Windows Server, so Windows 10/11 client behaviour (shell integration, WebView2 bootstrap) needs a documented release checklist or a self-hosted runner | D7 |
-| O12 | **Decided: claim only what the Windows APIs document.** **Creation decided as spec D13 (Annex B.2): exclusive temporary file, published without replacing an existing file. Windows stays `Unconfirmed` until gate G6. Implementation: `docs/b2-implementation-checklist.md`; evidence: gates G6–G7.** Appending to an existing archive (the common path) needs no directory flush: `FlushFileBuffers` on the file also flushes its metadata, including size. Creating or replacing a file uses `MoveFileExW(… MOVEFILE_WRITE_THROUGH)`, documented not to return until the move is on disk, then a best-effort `FlushFileBuffers` on a directory handle. That last step is reported to work on NTFS but is not documented as a guarantee, so if it fails the publish is reported as **degraded ("directory durability unconfirmed")**, never as durable. `sync_directory` stops being a silent no-op on Windows in C5. **C5 note:** C5 creates archives in place (`create_new`), not by rename, so the premise for accepting a successful best-effort flush does not hold yet; until creation-by-rename lands, Windows reports the creating commit's directory durability as unconfirmed even when the flush succeeds (stricter than this decision, never looser) | C5, D2 |
+| O12 | **Decided: claim only what the Windows APIs document.** **Creation decided as spec D13 (Annex B.2): exclusive temporary file, published without replacing an existing file. Windows stays `Unconfirmed` until gate G6. Implementation: `docs/b2-implementation-checklist.md`; evidence: gates G6–G7.** Appending to an existing archive (the common path) needs no directory flush: `FlushFileBuffers` on the file also flushes its metadata, including size. Creating or replacing a file uses `MoveFileExW(… MOVEFILE_WRITE_THROUGH)`, documented not to return until the move is on disk, then a best-effort `FlushFileBuffers` on a directory handle. **Superseded for creation by the T21 decision (owner, 2026-10-05):** Windows publishes the temporary file by hard link then unlink, the same no-replace mechanism as Linux's fallback, so `mochi-core` keeps `forbid(unsafe_code)`; directory durability stays `Unconfirmed` (checklist Q63). That last step is reported to work on NTFS but is not documented as a guarantee, so if it fails the publish is reported as **degraded ("directory durability unconfirmed")**, never as durable. `sync_directory` stops being a silent no-op on Windows in C5. **C5 note:** C5 creates archives in place (`create_new`), not by rename, so the premise for accepting a successful best-effort flush does not hold yet; until creation-by-rename lands, Windows reports the creating commit's directory durability as unconfirmed even when the flush succeeds (stricter than this decision, never looser) | C5, D2 |
 | O13 | *(raised in C0; **decided** in C2)* **Exit-code precedence.** When several conditions occur, the first that applies wins: **1** failure > **3** error > **4** unsupported > **2** degraded > **0** ok. Failure outranks everything because definite evidence of damage must never be masked (§5.4, §20.3), even by an I/O error later in the same run; error outranks unsupported and degraded because a compromised run makes any remaining pass untrustworthy; unsupported outranks degraded because a *required* check could not run at all, whereas degraded evidence exists but is weak. Implemented as `mochi_cli::exit::combine`, with tests. The JSON report stays authoritative. **Remainder decided as spec D15 (Annex B.2): evidence rollup, policy result, and exit code are separate; any `FAIL` exits 1; exit precedence 1 > 3 > 4 > 2 > 0; RFC 3339 UTC timestamps with nine fractional digits. Implementation: `docs/b2-implementation-checklist.md` (C7); evidence: gate G9.** | C7, C14 |
 | O14 | **Decided: MSRV 1.89** (`File::try_lock`); toolchain pinned to 1.91 | — |
 | O15 | *(raised in C0)* Error-code names in `mochi-core/src/error.rs` are drafts written to give reports and the CLI something stable to carry; the spec only shows two illustrative codes (§20.6). Final registry is ratification item R7 | C7 |

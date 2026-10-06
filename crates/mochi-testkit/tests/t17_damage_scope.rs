@@ -337,7 +337,9 @@ fn t17_damaged_snapshot_reads_continue_degraded() {
     report
         .dimensions
         .insert(Dimension::Recoverability, r.recoverability());
-    report.overall_status = Status::Fail;
+    report.conclude(false);
+    assert_eq!(report.overall_status, Status::Fail);
+    assert_eq!(report.exit_code, mochi_core::exit::FAILED);
     assert_eq!(report.dimensions[&Dimension::Integrity], Status::Fail);
     assert_eq!(
         report.dimensions[&Dimension::Recoverability],

@@ -28,17 +28,22 @@ pub mod commit;
 pub mod damage;
 pub mod descriptor;
 pub mod error;
+pub mod exit;
 pub mod image;
 pub mod job;
 pub mod manifest;
 pub mod object;
 pub mod publish;
+pub mod quarantine;
+pub mod read;
 pub mod recovery;
 pub mod report;
+pub mod restore;
 pub mod segment;
 pub mod state;
 pub mod status;
 pub mod storage;
+pub mod timestamp;
 
 pub use error::{ErrorCode, MochiError, Result};
 

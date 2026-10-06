@@ -26,6 +26,28 @@ impl Status {
     pub const fn is_pass(self) -> bool {
         matches!(self, Status::Pass)
     }
+
+    /// Rank in the Annex B.2 D15 rollup order, worst first:
+    /// `FAIL` > `UNSUPPORTED` > `DEGRADED` > `OVERDUE` > `UNKNOWN` > `PASS`.
+    const fn rank(self) -> u8 {
+        match self {
+            Status::Fail => 5,
+            Status::Unsupported => 4,
+            Status::Degraded => 3,
+            Status::Overdue => 2,
+            Status::Unknown => 1,
+            Status::Pass => 0,
+        }
+    }
+
+    /// The D15 rollup: the worst status present. An empty set is `UNKNOWN`,
+    /// never `PASS`: with no evidence, nothing has earned a pass.
+    pub fn rollup(statuses: impl IntoIterator<Item = Status>) -> Status {
+        statuses
+            .into_iter()
+            .max_by_key(|s| s.rank())
+            .unwrap_or(Status::Unknown)
+    }
 }
 
 /// Health dimensions reported separately (spec §20.3).
@@ -86,6 +108,24 @@ mod tests {
             assert!(!s.is_pass(), "{s:?} must never look like success");
         }
         assert!(Status::Pass.is_pass());
+    }
+
+    /// D15: `FAIL` > `UNSUPPORTED` > `DEGRADED` > `OVERDUE` > `UNKNOWN` >
+    /// `PASS`, whatever the input order; nothing rolls up to `PASS`.
+    #[test]
+    fn rollup_follows_the_d15_order() {
+        use Status::*;
+        let order = [Fail, Unsupported, Degraded, Overdue, Unknown, Pass];
+        for (i, worst) in order.iter().enumerate() {
+            let mut set = order[i..].to_vec();
+            for r in 0..set.len() {
+                set.rotate_left(1);
+                assert_eq!(Status::rollup(set.clone()), *worst, "{set:?} ({r})");
+            }
+        }
+        assert_eq!(Status::rollup([]), Unknown);
+        assert_eq!(Status::rollup([Pass, Pass]), Pass);
+        assert_eq!(Status::rollup([Pass, Unknown]), Unknown);
     }
 
     #[test]

@@ -261,6 +261,13 @@ impl SimStorage {
     }
 }
 
+impl SimStorage {
+    /// Whether `other` is a handle onto the same simulated file.
+    pub fn same_file(&self, other: &SimStorage) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+}
+
 impl ReadStorage for SimStorage {
     fn size(&self) -> Result<u64, StorageError> {
         let inner = self.lock_inner();

@@ -76,7 +76,10 @@ pub fn exit_code_for(code: ErrorCode) -> u8 {
         | ErrorCode::CapacityExceeded
         | ErrorCode::CheckpointMismatch
         | ErrorCode::QuarantineFailed
-        | ErrorCode::DurabilityUnconfirmed => exit::ERROR,
+        | ErrorCode::DurabilityUnconfirmed
+        | ErrorCode::NameCollision
+        | ErrorCode::NameUnsupported
+        | ErrorCode::AttributeNotRestored => exit::ERROR,
     }
 }
 

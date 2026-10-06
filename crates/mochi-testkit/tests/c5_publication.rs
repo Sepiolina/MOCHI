@@ -385,7 +385,7 @@ fn truncation_at_every_byte_accepts_no_invalid_commit() {
                 assert_eq!(loc.committed_len, ends[k], "len {l}");
                 let exact = l == ends[k];
                 assert_eq!(loc.source == HeadSource::Eof, exact, "len {l}");
-                // A cut-short commit is always provably uncommitted.
+                // A cut-short commit is always eligible (D14).
                 if !exact {
                     assert!(
                         matches!(loc.tail, TailState::Uncommitted { .. }),
@@ -438,7 +438,7 @@ fn an_uncommitted_tail_is_removed_only_explicitly_and_audited() {
         s.clone(),
         ids(3),
         test_options(),
-        TailPolicy::TruncateUncommitted,
+        TailPolicy::TruncateWithoutQuarantine,
     )
     .unwrap();
     let t = t.expect("an audit record");
@@ -477,7 +477,7 @@ fn a_corrupted_latest_footer_is_never_truncated() {
         damaged.clone(),
         ids(3),
         test_options(),
-        TailPolicy::TruncateUncommitted,
+        TailPolicy::TruncateWithoutQuarantine,
     )
     .unwrap_err();
     assert_eq!(e.code, ErrorCode::TailUnresolved);
@@ -515,7 +515,7 @@ fn a_damaged_commit_hidden_from_the_walk_is_still_found() {
         damaged.clone(),
         ids(3),
         test_options(),
-        TailPolicy::TruncateUncommitted,
+        TailPolicy::TruncateWithoutQuarantine,
     )
     .unwrap_err();
     assert_eq!(e.code, ErrorCode::TailUnresolved);

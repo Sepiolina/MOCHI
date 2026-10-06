@@ -176,3 +176,31 @@ fn b2_codes_have_their_table_exit_codes() {
         assert_eq!(exit_code_for(*code), want, "{name}");
     }
 }
+
+/// Q10 (owner, 2026-10-06): `create --exceed-default-limits` is deferred.
+/// It is refused by name wherever it appears, never ignored.
+#[test]
+fn exceed_default_limits_is_refused_by_name() {
+    for cmd in [
+        &["create", "--exceed-default-limits", "a.mochi", "dir"][..],
+        &["create", "a.mochi", "dir", "--exceed-default-limits"],
+        &["create", "a.mochi", "--exceed-default-limits=yes"],
+    ] {
+        let (code, _, err) = go(cmd);
+        assert_eq!(code, exit::ERROR, "{cmd:?}");
+        assert!(err.contains("NOT_IMPLEMENTED"), "{cmd:?}: {err}");
+        assert!(err.contains("--exceed-default-limits"), "{cmd:?}: {err}");
+        assert!(err.contains("deferred"), "{cmd:?}: {err}");
+    }
+    let (code, out, _) = go(&["create", "a.mochi", "--exceed-default-limits", "--json"]);
+    assert_eq!(code, exit::ERROR);
+    let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(v["error"]["code"], "NOT_IMPLEMENTED");
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("--exceed-default-limits"));
+    // Only `create` takes it; elsewhere it is no more meaningful than before.
+    let (_, _, err) = go(&["append", "a.mochi", "--exceed-default-limits"]);
+    assert!(!err.contains("deferred"), "{err}");
+}

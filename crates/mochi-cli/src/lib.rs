@@ -83,6 +83,33 @@ pub fn exit_code_for(code: ErrorCode) -> u8 {
     }
 }
 
+/// Options the spec names that this milestone defers. Each is refused by
+/// name, never accepted and ignored, so nobody believes it took effect.
+///
+/// `create --exceed-default-limits` (spec Annex B.2.3, plan T29) is deferred
+/// by owner decision Q10 (2026-10-06): B.2.3 does not yet say which limits a
+/// writer may raise or by how much (spec Annex B, D16). Every writer keeps
+/// the reader defaults. This stays in force when `create` itself is built.
+fn deferred_option(command: &Command) -> Option<MochiError> {
+    const EXCEED: &str = "--exceed-default-limits";
+    let Command::Create(args) = command else {
+        return None;
+    };
+    let asked = args
+        .args
+        .iter()
+        .any(|a| a == EXCEED || a.starts_with("--exceed-default-limits="));
+    asked.then(|| {
+        MochiError::new(
+            ErrorCode::NotImplemented,
+            format!(
+                "`{EXCEED}` is deferred in this build (spec Annex B, D16 is open); \
+                 archives are created with the default limits only, and nothing was created"
+            ),
+        )
+    })
+}
+
 fn error_for(command: &Command) -> MochiError {
     match command.scope() {
         Scope::PostOneDotZero => MochiError::new(
@@ -154,7 +181,7 @@ where
     // it, so honour `--json` wherever it appears.
     let json = cli.json || cli.command.pending_args().iter().any(|a| a == "--json");
 
-    let err = error_for(&cli.command);
+    let err = deferred_option(&cli.command).unwrap_or_else(|| error_for(&cli.command));
     render_error(&err, json, out, errw);
     exit_code_for(err.code)
 }

@@ -9,7 +9,8 @@
 //! *reader-default* limit on everything it emits, whatever limits it was
 //! configured to read with. Writers therefore use [`Limits::WRITER_DEFAULT`],
 //! never a caller's raised reader limits. Opting out is a creation-time
-//! choice (`create --exceed-default-limits`, plan T29), not implemented yet.
+//! choice (`create --exceed-default-limits`, plan T29), deferred by owner
+//! decision Q10 (2026-10-06; spec Annex B, D16): every writer keeps these.
 
 /// Default skippable payload *S* (B.2.3): 256 MiB. The wire maximum is
 /// 4 GiB − 1.

@@ -45,10 +45,40 @@
 //!   including publication of a locked temporary file and refusal of an
 //!   existing destination.
 //!
-//! **Locking.** `try_lock_exclusive` is `File::try_lock` (Linux `flock`,
-//! Windows `LockFileEx`). Advisory on Linux: a process that ignores it is not
-//! stopped, which is why the writer also re-checks the file size before each
-//! commit (spec §12.5: `O_APPEND` alone is insufficient).
+//! **Locking (spec §12.2 step 1; owner decision Q54, spec Annex B D17 and
+//! B.2.7).** An archive's publication lock is an OS lock (`File::try_lock`:
+//! Linux `flock`, Windows `LockFileEx`) on a **separate lock file**,
+//! [`lock_file_path`]: `<archive file name>.mochi-lock` in the archive's
+//! directory, both taken from the canonical path. Locking the archive itself
+//! is not enough on Windows, where byte-range locks are mandatory and a lock
+//! over the archive fails every other handle's reads (error 33), so nothing
+//! could verify or read an archive during an append.
+//! * **Existence is not ownership.** The lock file is created if missing,
+//!   never truncated, never written, and never removed, by unlock or
+//!   otherwise. Only the OS lock on it counts; the OS drops it when the
+//!   holder exits, so a crashed writer leaves nothing to clean up.
+//! * **Aliases.** The path is canonicalized first (`std::fs::canonicalize`),
+//!   so relative paths, `.`/`..`, symbolic links, and Windows short (8.3)
+//!   names all reach one lock file; names a filesystem treats as equal (case,
+//!   on a case-insensitive filesystem) reach the same lock file the same way
+//!   they reach the same archive. **Hard links** have no canonical name: on
+//!   Unix the writer also takes `flock` on the archive itself (advisory, so
+//!   readers are unaffected), which covers them; on Windows two hard-link
+//!   names of one archive are **not** excluded from each other (no stable,
+//!   safe API gives a file's identity; recorded in B.2.7).
+//! * Temporary files (D13) and sidecars (D14) are locked on themselves:
+//!   nobody reads them while they are held, and cleanup tests their own
+//!   lock. [`OsDir::publish_archive`] takes the final name's lock file before
+//!   a created archive becomes visible.
+//! * **Readers take no lock.** Concurrent reads are correct because a reader
+//!   interprets only what a valid footer commits (the size is taken once,
+//!   §12.2: "Readers MUST NOT assume the only recoverable commit is at
+//!   physical EOF"), not because of the lock.
+//! * Advisory on Linux: a process that ignores the lock is not stopped,
+//!   which is why the writer also re-checks the file size before each commit
+//!   (spec §12.5: `O_APPEND` alone is insufficient).
+//! * If the lock file cannot be created (a read-only directory), the writer
+//!   fails before writing anything.
 //!
 //! **Network filesystems** (NFS, SMB) are not supported for writing: their
 //! locking and flush semantics vary, and none of the above is assumed there.
@@ -161,16 +191,79 @@ impl ReadStorage for OsReadStorage {
     }
 }
 
+/// Suffix of an archive's writer lock file (Q54; spec Annex B.2.7).
+pub const LOCK_FILE_SUFFIX: &str = ".mochi-lock";
+
+/// The writer lock file of the archive at `archive`, which must exist:
+/// `<file name>.mochi-lock` beside the canonical path, so every alias that
+/// resolves to the same name reaches the same lock file (see "Locking").
+pub fn lock_file_path(archive: &Path) -> Result<PathBuf, StorageError> {
+    let canonical = std::fs::canonicalize(archive)?;
+    let (Some(dir), Some(name)) = (canonical.parent(), canonical.file_name()) else {
+        return Err(StorageError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} has no parent directory", canonical.display()),
+        )));
+    };
+    Ok(named_lock_file(dir, name))
+}
+
+fn named_lock_file(canonical_dir: &Path, name: &std::ffi::OsStr) -> PathBuf {
+    let mut lock = name.to_os_string();
+    lock.push(LOCK_FILE_SUFFIX);
+    canonical_dir.join(lock)
+}
+
+/// Take `File::try_lock`, mapping contention to [`StorageError::LockHeld`].
+fn try_lock_file(file: &File) -> Result<(), StorageError> {
+    match file.try_lock() {
+        Ok(()) => Ok(()),
+        Err(std::fs::TryLockError::WouldBlock) => Err(StorageError::LockHeld),
+        Err(std::fs::TryLockError::Error(e)) => Err(StorageError::Io(e)),
+    }
+}
+
+/// Open (creating if missing, never truncating) and lock a writer lock file.
+fn acquire_lock_file(path: &Path) -> Result<File, StorageError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|e| {
+            StorageError::Io(io::Error::new(
+                e.kind(),
+                format!("writer lock file {}: {e}", path.display()),
+            ))
+        })?;
+    try_lock_file(&file)?;
+    Ok(file)
+}
+
+/// What [`Storage::try_lock_exclusive`] locks for an [`OsStorage`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockRole {
+    /// An archive: its lock file (plus, on Unix, the archive itself).
+    Archive,
+    /// A temporary file or sidecar: the file itself.
+    Itself,
+}
+
 /// Read-write handle for a single writer.
 #[derive(Debug)]
 pub struct OsStorage {
     file: File,
     path: PathBuf,
-    /// Whether this handle holds the publication lock. Taking it again is a
-    /// no-op: `flock` (Linux) allows that, but `LockFileEx` (Windows) refuses
-    /// an overlapping lock even from the same handle, so the state is kept
-    /// here rather than asked of the OS (found by T22 on `windows-latest`).
-    locked: bool,
+    role: LockRole,
+    /// The held writer lock file ([`LockRole::Archive`]).
+    lock_file: Option<File>,
+    /// Whether this handle holds an OS lock on `file` itself. Taking a lock
+    /// again is a no-op: `flock` (Linux) allows that, but `LockFileEx`
+    /// (Windows) refuses an overlapping lock even from the same handle, so
+    /// the state is kept here rather than asked of the OS (found by T22 on
+    /// `windows-latest`).
+    file_locked: bool,
 }
 
 impl OsStorage {
@@ -182,22 +275,72 @@ impl OsStorage {
             .write(true)
             .create_new(true)
             .open(&path)?;
-        Ok(Self {
-            file,
-            path,
-            locked: false,
-        })
+        Ok(Self::archive(file, path))
     }
 
     /// Open an existing file for reading and writing.
     pub fn open_existing(path: impl AsRef<Path>) -> Result<Self, StorageError> {
         let path = path.as_ref().to_path_buf();
         let file = OpenOptions::new().read(true).write(true).open(&path)?;
-        Ok(Self {
+        Ok(Self::archive(file, path))
+    }
+
+    fn archive(file: File, path: PathBuf) -> Self {
+        Self {
             file,
             path,
-            locked: false,
-        })
+            role: LockRole::Archive,
+            lock_file: None,
+            file_locked: false,
+        }
+    }
+
+    fn itself(file: File, path: PathBuf) -> Self {
+        Self {
+            role: LockRole::Itself,
+            ..Self::archive(file, path)
+        }
+    }
+
+    fn lock_itself(&mut self) -> Result<(), StorageError> {
+        if !self.file_locked {
+            try_lock_file(&self.file)?;
+            self.file_locked = true;
+        }
+        Ok(())
+    }
+
+    fn unlock_itself(&mut self) -> Result<(), StorageError> {
+        if self.file_locked {
+            self.file.unlock()?;
+            self.file_locked = false;
+        }
+        Ok(())
+    }
+
+    /// Take the archive lock through the lock file at `lock_path`. On Unix,
+    /// also `flock` the archive itself, which excludes hard-link aliases.
+    fn lock_archive_at(&mut self, lock_path: &Path) -> Result<(), StorageError> {
+        if self.lock_file.is_some() {
+            return Ok(());
+        }
+        let lock = acquire_lock_file(lock_path)?;
+        if cfg!(unix) {
+            if let Err(e) = self.lock_itself() {
+                let _ = lock.unlock();
+                return Err(e);
+            }
+        }
+        self.lock_file = Some(lock);
+        Ok(())
+    }
+
+    fn release_lock_file(&mut self) -> Result<(), StorageError> {
+        if let Some(lock) = self.lock_file.take() {
+            // Unlocked, never removed: existence is not ownership.
+            lock.unlock()?;
+        }
+        Ok(())
     }
 }
 
@@ -235,26 +378,20 @@ impl Storage for OsStorage {
     }
 
     fn try_lock_exclusive(&mut self) -> Result<(), StorageError> {
-        if self.locked {
-            return Ok(());
-        }
-        match self.file.try_lock() {
-            Ok(()) => {
-                self.locked = true;
-                Ok(())
+        match self.role {
+            LockRole::Itself => self.lock_itself(),
+            LockRole::Archive if self.lock_file.is_some() => Ok(()),
+            LockRole::Archive => {
+                let lock_path = lock_file_path(&self.path)?;
+                self.lock_archive_at(&lock_path)
             }
-            Err(std::fs::TryLockError::WouldBlock) => Err(StorageError::LockHeld),
-            Err(std::fs::TryLockError::Error(e)) => Err(StorageError::Io(e)),
         }
     }
 
     fn unlock(&mut self) -> Result<(), StorageError> {
-        if !self.locked {
-            return Ok(());
-        }
-        self.file.unlock()?;
-        self.locked = false;
-        Ok(())
+        let itself = self.unlock_itself();
+        let lock_file = self.release_lock_file();
+        itself.and(lock_file)
     }
 
     fn truncate(&mut self, new_len: u64) -> Result<(), StorageError> {
@@ -438,11 +575,7 @@ impl StorageDir for OsDir {
             .create_new(true)
             .open(&path)
             .map_err(exists_as(name))?;
-        let mut s = OsStorage {
-            file,
-            path,
-            locked: false,
-        };
+        let mut s = OsStorage::itself(file, path);
         s.try_lock_exclusive()?;
         Ok(s)
     }
@@ -450,6 +583,34 @@ impl StorageDir for OsDir {
     fn publish_no_replace(&mut self, from: &str, to: &str) -> Result<(), StorageError> {
         let (src, dst) = (self.entry(from)?, self.entry(to)?);
         self.last_publish = Some(publish_no_replace_at(&src, &dst, to)?);
+        Ok(())
+    }
+
+    /// Takes `to`'s writer lock file for `file` first, so the archive is
+    /// never visible unlocked; then publishes. On Windows the temporary
+    /// file's own lock is released afterwards: it is now the archive, and a
+    /// lock on it would block readers (Q54).
+    fn publish_archive(
+        &mut self,
+        file: &mut OsStorage,
+        from: &str,
+        to: &str,
+    ) -> Result<(), StorageError> {
+        let (src, dst) = (self.entry(from)?, self.entry(to)?);
+        let dir = std::fs::canonicalize(&self.path)?;
+        file.lock_archive_at(&named_lock_file(&dir, std::ffi::OsStr::new(to)))?;
+        match publish_no_replace_at(&src, &dst, to) {
+            Ok(m) => self.last_publish = Some(m),
+            Err(e) => {
+                let _ = file.release_lock_file();
+                return Err(e);
+            }
+        }
+        file.path = dst;
+        file.role = LockRole::Archive;
+        if cfg!(windows) {
+            file.unlock_itself()?;
+        }
         Ok(())
     }
 
@@ -469,10 +630,10 @@ impl StorageDir for OsDir {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(RemoveOutcome::Missing),
             Err(e) => return Err(e.into()),
         };
-        match file.try_lock() {
+        match try_lock_file(&file) {
             Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => return Ok(RemoveOutcome::Locked),
-            Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+            Err(StorageError::LockHeld) => return Ok(RemoveOutcome::Locked),
+            Err(e) => return Err(e),
         }
         std::fs::remove_file(&path)?;
         drop(file);
@@ -570,11 +731,7 @@ impl RestoreDir for OsRestoreDir {
             .create_new(true)
             .open(&path)
             .map_err(exists_as(&lossy))?;
-        Ok(OsStorage {
-            file,
-            path,
-            locked: false,
-        })
+        Ok(OsStorage::itself(file, path))
     }
 
     fn publish_no_replace(&mut self, from: &[u8], to: &[u8]) -> Result<(), StorageError> {

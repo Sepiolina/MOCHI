@@ -1823,6 +1823,18 @@ These are pending. None is satisfied by this text. Every gate's tests must pass 
   - The timestamp property test passes.
 
 
+#### B.2.7 Writer lock (D17; decided by the owner 2026-10-06, plan Q54)
+
+Not wire format: nothing is written into an archive. It is recorded here because two implementations that write the same archive exclude each other only if they take the same lock.
+
+- **Mechanism.** The §12.2 step 1 lock is an OS file lock (POSIX `flock`, Windows `LockFileEx`, through a safe API; no new `unsafe` in `mochi-core`) held on a separate **lock file**, never on the archive alone. On Windows a lock on the archive makes every other handle's reads fail, so nothing could verify or read an archive during an append.
+- **Name.** `<archive file name>.mochi-lock`, in the archive's directory, both taken from the canonical path (symbolic links, `.` and `..`, and Windows short names resolved).
+- **Ownership.** Only the OS lock counts. The lock file is created if missing, never written or truncated, and never removed, by unlock or otherwise; a leftover lock file nobody holds does not block. The OS releases the lock when its holder exits.
+- **Aliases.** Every path that canonicalizes to the same directory and name reaches the same lock file; names a filesystem treats as equal (for example case on a case-insensitive filesystem) reach the same lock file as they reach the same archive. Hard links have no canonical name: on Unix a writer also takes `flock` on the archive itself, which excludes them and does not affect readers; **on Windows, writers through two hard-link names of one archive are not excluded** (no stable, safe API gives the file's identity). This is a known limitation, not a guarantee.
+- **Creation (D13).** The final name's lock file is taken before the temporary file is published, so a new archive is never visible unlocked. A lock held by another process there is `LOCK_CONFLICT`, and nothing is created.
+- **Readers** take no lock. Concurrent reads are correct because a reader interprets only what a valid footer commits (§12.2), not because of the lock.
+- **A directory where the lock file cannot be created** (read-only) cannot be appended to; the writer fails before writing.
+
 ## Annex C. Document Lineage **[1.0 integration]**
 
 | Document | Status |

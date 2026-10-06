@@ -2375,7 +2375,7 @@ impl<S: Storage> ArchiveWriter<S> {
         };
 
         ctx.report(phase::PUBLISH, 0, None);
-        if let Err(e) = dir.publish_no_replace(&temp, name) {
+        if let Err(e) = dir.publish_archive(&mut w.storage, &temp, name) {
             drop(w);
             let _ = dir.remove_if_unlocked(&temp);
             return Err(match e {
@@ -2384,6 +2384,13 @@ impl<S: Storage> ArchiveWriter<S> {
                     format!(
                         "{name:?} already exists; creating an archive never replaces a file \
                          (D13). Nothing was changed."
+                    ),
+                ),
+                StorageError::LockHeld => MochiError::new(
+                    ErrorCode::LockConflict,
+                    format!(
+                        "another writer holds the publication lock of {name:?}; nothing was \
+                         created (spec §12.5: fail on conflict)"
                     ),
                 ),
                 other => nothing_created(other.into()),

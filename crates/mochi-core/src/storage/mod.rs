@@ -220,6 +220,23 @@ pub trait StorageDir {
     /// which cleanup resolves by removing `from` once its lock is free.
     fn publish_no_replace(&mut self, from: &str, to: &str) -> Result<(), StorageError>;
 
+    /// Publish `from`, held by `file`, as the archive `to`
+    /// ([`publish_no_replace`](Self::publish_no_replace)), with `file` then
+    /// holding `to`'s publication lock: taken **before** `to` becomes
+    /// visible, so no other writer can lock the new archive first
+    /// (`LockHeld` if one already holds it; nothing is published). The
+    /// default suits backends whose lock belongs to the file, which keeps it
+    /// under its new name; the OS backend locks a separate lock file (Q54).
+    fn publish_archive(
+        &mut self,
+        file: &mut Self::File,
+        from: &str,
+        to: &str,
+    ) -> Result<(), StorageError> {
+        let _ = file;
+        self.publish_no_replace(from, to)
+    }
+
     /// Remove a temporary file this process created and still holds (for
     /// example after a failed creation). Consumes the handle.
     fn discard(&mut self, file: Self::File, name: &str) -> Result<(), StorageError>;

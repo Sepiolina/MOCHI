@@ -30,6 +30,7 @@ pub mod descriptor;
 pub mod error;
 pub mod exit;
 pub mod image;
+pub mod import;
 pub mod job;
 pub mod manifest;
 pub mod object;

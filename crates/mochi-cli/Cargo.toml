@@ -23,6 +23,8 @@ serde_json.workspace = true
 
 [dev-dependencies]
 mochi-testkit.workspace = true
+tempfile.workspace = true
+blake3.workspace = true
 
 [lints]
 workspace = true

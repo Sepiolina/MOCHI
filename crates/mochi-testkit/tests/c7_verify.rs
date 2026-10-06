@@ -554,3 +554,36 @@ fn c7_restoration_reassembles_every_retained_version() {
         .iter()
         .any(|f| f.code == ErrorCode::ContentIntegrityFailed));
 }
+
+/// **R8 golden archives.** Every `reject-archive-*` fixture fails
+/// verification (a pre-batch draft is refused as unsupported, §26: exit 4;
+/// the rest exit 1) and every `valid-archive-*` fixture passes, with no
+/// error finding. Ties verification to the vectors the reader is held to.
+#[test]
+fn c7_golden_archives_verify_as_labelled() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/golden/c5");
+    let mut seen = (0, 0);
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if !name.ends_with(".mochi") {
+            continue;
+        }
+        let s = SimStorage::from_bytes(std::fs::read(&path).unwrap());
+        let r = run(&s, VerifyOptions::default()).report;
+        if name.starts_with("valid-archive-") {
+            seen.0 += 1;
+            assert_eq!(r.exit_code, exit::OK, "{name}: {:?}", r.findings);
+        } else if name.starts_with("reject-archive-") {
+            seen.1 += 1;
+            let want = if name == "reject-archive-legacy-v0.mochi" {
+                exit::UNSUPPORTED
+            } else {
+                exit::FAILED
+            };
+            assert_eq!(r.exit_code, want, "{name}: {:?}", r.findings);
+            assert_ne!(dim(&r, Dimension::Integrity), Status::Pass, "{name}");
+        }
+    }
+    assert!(seen.0 >= 3 && seen.1 >= 20, "fixtures found: {seen:?}");
+}

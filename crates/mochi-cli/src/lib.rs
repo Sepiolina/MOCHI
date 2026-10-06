@@ -1,4 +1,4 @@
-//! The `mochi` command-line tool (plan C14; skeleton at C0).
+//! The `mochi` command-line tool (plan C14).
 //!
 //! Thin client of `mochi-core`: parse arguments, call the core, render a typed
 //! result as text or JSON, and map it to an exit code (spec §23.2). No format
@@ -7,7 +7,10 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod cli;
+pub mod commands;
 pub mod exit;
+pub mod render;
+pub mod state;
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -16,7 +19,7 @@ use clap::error::ErrorKind;
 use clap::{CommandFactory, FromArgMatches};
 use mochi_core::{ErrorCode, MochiError};
 
-use cli::{Cli, Command, Scope};
+use cli::{Cli, Command, Scope, SnapshotCommand};
 
 fn long_version() -> String {
     format!(
@@ -85,33 +88,6 @@ pub fn exit_code_for(code: ErrorCode) -> u8 {
     }
 }
 
-/// Options the spec names that this milestone defers. Each is refused by
-/// name, never accepted and ignored, so nobody believes it took effect.
-///
-/// `create --exceed-default-limits` (spec Annex B.2.3, plan T29) is deferred
-/// by owner decision Q10 (2026-10-06): B.2.3 does not yet say which limits a
-/// writer may raise or by how much (spec Annex B, D16). Every writer keeps
-/// the reader defaults. This stays in force when `create` itself is built.
-fn deferred_option(command: &Command) -> Option<MochiError> {
-    const EXCEED: &str = "--exceed-default-limits";
-    let Command::Create(args) = command else {
-        return None;
-    };
-    let asked = args
-        .args
-        .iter()
-        .any(|a| a == EXCEED || a.starts_with("--exceed-default-limits="));
-    asked.then(|| {
-        MochiError::new(
-            ErrorCode::NotImplemented,
-            format!(
-                "`{EXCEED}` is deferred in this build (spec Annex B, D16 is open); \
-                 archives are created with the default limits only, and nothing was created"
-            ),
-        )
-    })
-}
-
 fn error_for(command: &Command) -> MochiError {
     match command.scope() {
         Scope::PostOneDotZero => MochiError::new(
@@ -122,7 +98,7 @@ fn error_for(command: &Command) -> MochiError {
                 command.name()
             ),
         ),
-        Scope::InScope => MochiError::new(
+        Scope::InScope | Scope::Built => MochiError::new(
             ErrorCode::NotImplemented,
             format!(
                 "`mochi {}` is in the 1.0 scope but is not implemented in this development build",
@@ -178,12 +154,52 @@ where
         }
     };
 
-    // The spec's own examples put the flag last (`mochi verify a.mochi --json`,
-    // spec §23.1), but until C14 defines real arguments the catch-all swallows
-    // it, so honour `--json` wherever it appears.
+    // Commands that are not built take a catch-all, which would swallow a
+    // trailing `--json` (the spec's examples put it last, §23.1), so honour
+    // it wherever it appears.
     let json = cli.json || cli.command.pending_args().iter().any(|a| a == "--json");
 
-    let err = deferred_option(&cli.command).unwrap_or_else(|| error_for(&cli.command));
-    render_error(&err, json, out, errw);
-    exit_code_for(err.code)
+    if cli.command.scope() != Scope::Built {
+        let err = error_for(&cli.command);
+        render_error(&err, json, out, errw);
+        return exit_code_for(err.code);
+    }
+
+    let read = match commands::read_options(&cli.limits) {
+        Ok(r) => r,
+        Err(e) => {
+            render_error(&e, json, out, errw);
+            return exit_code_for(e.code);
+        }
+    };
+    let store = if cli.no_local_history {
+        None
+    } else {
+        state::HeadStore::locate(cli.state_dir.as_deref())
+    };
+    let mut env = commands::Env {
+        json,
+        out,
+        err: errw,
+        read,
+        store,
+    };
+    let result = match &cli.command {
+        Command::Create(a) => commands::create(&mut env, a),
+        Command::Append(a) => commands::append(&mut env, a),
+        Command::List(a) => commands::list_cmd(&mut env, a),
+        Command::Get(a) => commands::get(&mut env, a),
+        Command::Snapshot(SnapshotCommand::List(a)) => commands::snapshot_list(&mut env, a),
+        Command::Verify(a) => commands::verify_cmd(&mut env, a, false),
+        Command::Fsck(a) => commands::verify_cmd(&mut env, a, true),
+        Command::RestoreTest(a) => commands::restore_test(&mut env, a),
+        other => Err(error_for(other)),
+    };
+    match result {
+        Ok(code) => code,
+        Err(e) => {
+            render_error(&e, json, env.out, env.err);
+            exit_code_for(e.code)
+        }
+    }
 }

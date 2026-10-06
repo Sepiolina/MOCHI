@@ -14,7 +14,7 @@ use mochi_core::job::{CancellationToken, JobContext, NullProgress};
 use mochi_core::manifest::{Attributes, Mtime, PosixAttributes};
 use mochi_core::object::{decode_verified, load_stored};
 use mochi_core::publish::{
-    ArchiveWriter, CommitOutcome, OpenedHead, ReadOptions, Transaction, WriterOptions,
+    ArchiveWriter, CommitOutcome, Dedup, OpenedHead, ReadOptions, Transaction, WriterOptions,
 };
 use mochi_core::storage::{ReadStorage, Storage};
 use mochi_core::{ErrorCode, MochiError, Result};
@@ -67,6 +67,7 @@ pub fn test_options() -> WriterOptions {
         record_time: false,
         profile: None,
         checkpoint_trigger: None,
+        dedup: Dedup::default(),
     }
 }
 

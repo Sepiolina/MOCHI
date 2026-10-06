@@ -98,13 +98,14 @@
 //!   (D10.11): `CAPACITY_EXCEEDED`, before the footer, so the previous head
 //!   stays.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mochi_format::cbor::{self, CborLimits, Value};
 use mochi_format::codec::{EncodeParams, Protection};
 use mochi_format::digest::{
-    file_content_hash, stored_object_hash, CommitId, StoredObjectHash, TailQuarantineHash,
+    chunk_content_hash, file_content_hash, stored_object_hash, ChunkContentHash, CommitId,
+    StoredObjectHash, TailQuarantineHash,
 };
 use mochi_format::envelope::RecordIdentity;
 use mochi_format::error::FormatError;
@@ -128,7 +129,7 @@ use crate::job::JobContext;
 use crate::manifest::{
     Attributes, ChunkEntry, FileVersionEntry, Manifest, ManifestKind, Mtime, ParentLink,
 };
-use crate::object::{build_object, ArchiveId, IdSource};
+use crate::object::{build_object, decode_verified, load_stored, ArchiveId, IdSource, ObjectId};
 use crate::quarantine::SidecarMetadata;
 use crate::recovery::{
     catalog_from_snapshot, recover_from_manifests, ManifestRecovery, RecoveryScope,
@@ -182,6 +183,55 @@ pub struct WriterOptions {
     /// The checkpoint trigger's α and *F* (Annex B.2.3). `None` means the
     /// defaults. Writer policy: not recorded in the archive.
     pub checkpoint_trigger: Option<CheckpointTrigger>,
+    /// In-archive deduplication (spec §9.4, §9.5). Writer policy: not
+    /// recorded in the archive, and readers cannot tell the difference.
+    pub dedup: Dedup,
+}
+
+/// Write-path deduplication (spec §9.4, §9.5; plan C9). A chunk whose
+/// decoded bytes are already stored, unprotected and without dependencies,
+/// at the published head is referenced instead of stored again (reuse by
+/// reference, D10.4). The rules:
+///
+/// - **Head only (§9.5 rule 1).** Candidates come from the head catalog the
+///   writer validated under its lock, never from the transaction being
+///   written: two identical chunks within one commit are each stored (rule
+///   2; the writer streams chunks before publication, so it does not take
+///   the buffered-transaction exception).
+/// - **Validated (§9.4).** A candidate must match on decoded length and
+///   chunk content hash, and then on the bytes themselves: it is read back,
+///   hash-verified as stored and decoded, and compared byte for byte. A
+///   candidate that fails is never referenced; the chunk is stored anew and
+///   the failure is counted ([`DedupStats::candidates_rejected`]), so a
+///   damaged chunk is not spread to new file versions.
+/// - **In-archive only.** Cross-archive deduplication does not exist (§9.4).
+/// - **Unprotected only.** Encrypted archives (C11) must disclose that
+///   deduplication reveals content equality before enabling it (§9.5 rule
+///   3); until then protected chunks are never candidates.
+///
+/// The index is a rebuildable accelerator built from the head catalog on
+/// first use and extended with each published commit's chunks; it is
+/// never consulted for reachability.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Dedup {
+    /// Reference identical chunks already at the head (the default; spec D4
+    /// keeps deduplication in the default profile).
+    #[default]
+    InArchive,
+    /// Store every chunk.
+    Off,
+}
+
+/// What deduplication did in one commit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct DedupStats {
+    /// Chunks referenced instead of stored.
+    pub chunks_reused: u64,
+    /// Decoded bytes those chunks hold.
+    pub bytes_reused: u64,
+    /// Candidates that matched the index but failed read-back validation
+    /// (damaged or inconsistent); their chunks were stored anew.
+    pub candidates_rejected: u64,
 }
 
 /// The checkpoint trigger (Annex B.2.3, writer policy, not wire format): a
@@ -1904,6 +1954,7 @@ pub struct CommitOutcome {
     pub footer_offset: u64,
     pub committed_len: u64,
     pub objects_written: u64,
+    pub dedup: DedupStats,
 }
 
 /// Namespace changes for one commit, applied in order.
@@ -2014,6 +2065,62 @@ struct Prepared {
     catalog: Catalog,
     attributes: BTreeMap<FileVersionId, Attributes>,
     objects: u64,
+    dedup: DedupStats,
+    /// Chunks this commit stored, for the dedup index once it is published.
+    new_chunks: Vec<(DedupKey, ObjectId)>,
+    checkpoint: bool,
+}
+
+type DedupKey = (u64, ChunkContentHash);
+
+/// The dedup index for a writer at `catalog`'s head: every unprotected,
+/// dependency-free, located chunk the head's namespace reaches.
+///
+/// **Why only reachable chunks.** Baseline recovery (D10.8) replays the
+/// segment from the base's snapshot manifest alone, which holds only the
+/// chunks its namespace reaches (`Manifest::snapshot_from_catalog`); the
+/// catalog image holds every chunk ever stored. A delta that referenced a
+/// chunk reachable at no point a baseline replay sees would open through the
+/// image but fail baseline recovery. What a segment's replay sees is S(*b*)
+/// plus every chunk introduced since *b*; the head's reachable chunks are a
+/// subset of that in any archive whose baseline recovery works, and the
+/// writer adds each delta's own chunks after publishing it and rebuilds
+/// after each checkpoint. Content of a file deleted before the base is
+/// therefore stored again if it returns, which costs space, never recovery.
+fn dedup_index_at_head(catalog: &Catalog) -> Result<HashMap<DedupKey, ObjectId>> {
+    let mut reached = std::collections::BTreeSet::new();
+    for (_, entry) in catalog.replay(None)?.iter() {
+        let Some((_, extents)) = catalog.file_version(&entry.version)? else {
+            return Err(MochiError::new(
+                ErrorCode::CatalogInvalid,
+                "the head names a version the catalog does not hold",
+            ));
+        };
+        for e in extents {
+            if let ExtentSource::Chunk { chunk, .. } = e.source {
+                reached.insert(chunk);
+            }
+        }
+    }
+    let mut index = HashMap::new();
+    for id in reached {
+        let Some(record) = catalog.object(&id)? else {
+            return Err(MochiError::new(
+                ErrorCode::CatalogInvalid,
+                "an extent names a chunk the catalog does not hold",
+            ));
+        };
+        if record.protection != Protection::None
+            || !record.dependencies.is_empty()
+            || catalog.object_location(&id)?.is_none()
+        {
+            continue;
+        }
+        index
+            .entry((record.decoded_len, record.content_hash))
+            .or_insert(id);
+    }
+    Ok(index)
 }
 
 /// Progress phases reported by [`ArchiveWriter::commit`], in order.
@@ -2072,6 +2179,9 @@ pub struct ArchiveWriter<S: Storage> {
     #[cfg(any(test, feature = "test-controls"))]
     tamper: Option<CheckpointTamper>,
     needs_directory_sync: bool,
+    dedup: Dedup,
+    /// Dedup index over the head (see [`Dedup`]); `None` until first used.
+    dedup_index: Option<HashMap<DedupKey, ObjectId>>,
     poisoned: Option<String>,
     audit: Vec<AuditEvent>,
 }
@@ -2303,6 +2413,8 @@ impl<S: Storage> ArchiveWriter<S> {
             #[cfg(any(test, feature = "test-controls"))]
             tamper: None,
             needs_directory_sync: true,
+            dedup: opts.dedup,
+            dedup_index: None,
             poisoned: None,
             audit: Vec::new(),
         })
@@ -2525,6 +2637,8 @@ impl<S: Storage> ArchiveWriter<S> {
                         #[cfg(any(test, feature = "test-controls"))]
                         tamper: None,
                         needs_directory_sync: false,
+                        dedup: opts.dedup,
+                        dedup_index: None,
                         poisoned: None,
                         audit,
                     },
@@ -2898,6 +3012,16 @@ impl<S: Storage> ArchiveWriter<S> {
             base_bytes: prepared.base_bytes,
         });
         self.checkpoint_requested = false;
+        // A checkpoint's snapshot manifest holds only what its namespace
+        // reaches, so the index is rebuilt from it; after a delta, the
+        // delta's own chunks join (see `dedup_index_at_head`).
+        if prepared.checkpoint {
+            self.dedup_index = None;
+        } else if let Some(index) = self.dedup_index.as_mut() {
+            for (key, id) in prepared.new_chunks {
+                index.entry(key).or_insert(id);
+            }
+        }
         self.catalog = prepared.catalog;
         self.attributes = prepared.attributes;
         self.new_descriptor = None;
@@ -2909,6 +3033,7 @@ impl<S: Storage> ArchiveWriter<S> {
             footer_offset,
             committed_len,
             objects_written: prepared.objects,
+            dedup: prepared.dedup,
         })
     }
 
@@ -2944,6 +3069,8 @@ impl<S: Storage> ArchiveWriter<S> {
         let mut objects = 0u64;
         let mut ops = Vec::new();
         let mut chunks = Vec::new();
+        let mut new_chunks = Vec::new();
+        let mut dedup = DedupStats::default();
         let mut versions = Vec::new();
         let mut attributes = self.attributes.clone();
 
@@ -2988,15 +3115,34 @@ impl<S: Storage> ArchiveWriter<S> {
                     let mut extents = Vec::new();
                     let piece = usize::try_from(self.params.chunk_size).unwrap_or(usize::MAX);
                     for (i, part) in content.chunks(piece).enumerate() {
-                        let obj = build_object(
-                            &DecodedBytes::new(part.to_vec()),
-                            &encode,
-                            Protection::None,
-                            self.ids.as_mut(),
-                            &self.read.limits,
-                        )?;
-                        let offset = self.storage.append(obj.stored.as_bytes())?;
-                        cat.insert_object(&obj.record, Some(offset))?;
+                        let decoded = DecodedBytes::new(part.to_vec());
+                        let key = (decoded.len(), chunk_content_hash(&decoded));
+                        let chunk = match self.reusable_chunk(&key, part, &mut dedup)? {
+                            Some(id) => {
+                                dedup.chunks_reused += 1;
+                                dedup.bytes_reused += decoded.len();
+                                id
+                            }
+                            None => {
+                                let obj = build_object(
+                                    &decoded,
+                                    &encode,
+                                    Protection::None,
+                                    self.ids.as_mut(),
+                                    &self.read.limits,
+                                )?;
+                                let offset = self.storage.append(obj.stored.as_bytes())?;
+                                cat.insert_object(&obj.record, Some(offset))?;
+                                let id = obj.record.id;
+                                new_chunks.push((key, id));
+                                chunks.push(ChunkEntry {
+                                    record: obj.record,
+                                    location: Some(offset),
+                                });
+                                objects += 1;
+                                id
+                            }
+                        };
                         extents.push(Extent {
                             ordinal: u32::try_from(i).map_err(|_| {
                                 MochiError::new(
@@ -3007,15 +3153,10 @@ impl<S: Storage> ArchiveWriter<S> {
                             logical_offset: done_offset(i, self.params.chunk_size)?,
                             length: part.len() as u64,
                             source: ExtentSource::Chunk {
-                                chunk: obj.record.id,
+                                chunk,
                                 chunk_offset: 0,
                             },
                         });
-                        chunks.push(ChunkEntry {
-                            record: obj.record,
-                            location: Some(offset),
-                        });
-                        objects += 1;
                         done += part.len() as u64;
                         ctx.report(phase::CONTENT, done, Some(total));
                         ctx.check_cancelled()?;
@@ -3293,7 +3434,64 @@ impl<S: Storage> ArchiveWriter<S> {
             catalog: cat,
             attributes,
             objects,
+            dedup,
+            new_chunks,
+            checkpoint,
         })
+    }
+
+    /// A chunk at the published head holding exactly `part`, validated by
+    /// read-back (see [`Dedup`]); `None` means store it. Only an I/O error
+    /// or cancellation propagates: a candidate that fails any check is
+    /// dropped from the index and counted, and the chunk is stored anew,
+    /// which is always safe.
+    fn reusable_chunk(
+        &mut self,
+        key: &DedupKey,
+        part: &[u8],
+        stats: &mut DedupStats,
+    ) -> Result<Option<ObjectId>> {
+        let Some(head) = self.head else {
+            return Ok(None);
+        };
+        if self.dedup == Dedup::Off {
+            return Ok(None);
+        }
+        if self.dedup_index.is_none() {
+            self.dedup_index = Some(dedup_index_at_head(&self.catalog)?);
+        }
+        let Some(id) = self.dedup_index.as_ref().and_then(|i| i.get(key)).copied() else {
+            return Ok(None);
+        };
+        let check = (|| -> Result<bool> {
+            let record = self.catalog.object(&id)?.ok_or_else(|| {
+                MochiError::new(ErrorCode::CatalogInvalid, "dedup candidate has no record")
+            })?;
+            let offset = self.catalog.object_location(&id)?.ok_or_else(|| {
+                MochiError::new(ErrorCode::CatalogInvalid, "dedup candidate has no location")
+            })?;
+            let end = offset.checked_add(record.stored_len);
+            if end.is_none_or(|end| end > head.committed_len) {
+                return Err(MochiError::new(
+                    ErrorCode::OutOfBounds,
+                    "dedup candidate lies outside the committed archive",
+                ));
+            }
+            let stored = load_stored(&self.storage, offset, &record, &self.read.limits)?;
+            let decoded = decode_verified(&record, &stored, &self.read.limits)?;
+            Ok(decoded.as_bytes() == part)
+        })();
+        match check {
+            Ok(true) => Ok(Some(id)),
+            Err(e) if matches!(e.code, ErrorCode::IoError | ErrorCode::Cancelled) => Err(e),
+            Ok(false) | Err(_) => {
+                stats.candidates_rejected += 1;
+                if let Some(index) = self.dedup_index.as_mut() {
+                    index.remove(key);
+                }
+                Ok(None)
+            }
+        }
     }
 
     /// Append one stored object and return its reference.

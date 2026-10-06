@@ -237,6 +237,25 @@ Each phase ends with a working, tested artifact. "Fault-matrix rows" refers to t
 - Retained roots and holds; GC as `plan` then `apply`, marking transitively from all roots in §18.3, quarantine before deletion, auditable deletion batches.
 - **Exit:** fault-matrix rows *compaction interrupted*, *GC overlaps publication*, *retention expires under legal hold*. Compacted output restores identically (file hashes and namespaces) to its source.
 
+- **Status (C9 dedup, 2026-10-06; owner chose C9 for this session while C7/C14 proceed in Sepiolina/MOCHI#7).** Checkpointing (§18.1) already exists from Annex B.2: the B.2.3 trigger, forced checkpoints (`ArchiveWriter::request_checkpoint`), and D10.7 adoption. What it lacks is the `checkpoint` command (C14). New here: **write-path deduplication** (`publish::Dedup`, default `InArchive`; `CommitOutcome::dedup` reports chunks and bytes reused and candidates rejected).
+  - **Rules:**
+    - Lookups use only the head the writer validated under its lock (§9.5 rule 1). Identical chunks within one commit are each stored (rule 2): chunks are streamed before publication, so the buffered-transaction exception is not taken.
+    - Candidates match on decoded length and chunk content hash. They are then read back, verified as stored and decoded, and compared byte for byte (§9.4). A failing candidate is never referenced: the chunk is stored anew and the candidate leaves the index.
+    - Only unprotected chunks without dependencies are candidates; C11 must add the §9.5 rule 3 disclosure before encrypted archives deduplicate. Nothing is deduplicated across archives.
+  - **Reference scope (found here, checklist Q64):** the index holds only chunks reachable at the head when it is built, plus chunks introduced since, and is rebuilt after each checkpoint. Referencing any chunk in the catalog image would make baseline recovery (D10.8) fail, because S(*b*) holds only what *b* reaches. A test shows this; the spec gap is recorded in Q64 with a recommendation.
+  - **No wire change:** reuse by reference is already D10.4. Readers cannot tell a deduplicated archive from one written without dedup, except by the shared chunk IDs.
+  - **Tests:** `c9_dedup.rs` (6) covers:
+    - reuse in the same session and after reopening;
+    - no reuse within one commit;
+    - per-chunk partial overlap;
+    - `Off`;
+    - a damaged candidate never referenced, with the good copy reused next;
+    - reuse limited to what baseline recovery sees, with baseline recovery and recovery from manifests reading every file exactly.
+
+    The whole workspace passes with dedup on by default.
+  - **Mutations:** 9. Seven were killed: no reset at a checkpoint, no index extension after a delta, no read-back, `Off` ignored, a rejected candidate kept, every error propagated, and an index over every catalog chunk (it fails baseline recovery with `EXTENT_INVALID`). Two survive as defense in depth: the byte comparison (needs a hash collision) and the committed-range check (the head catalog is verified at open). The file was restored byte-identical (md5).
+  - **Still open in C9:** retention state (roots, holds, expiry), compaction, and GC. They need decisions the spec leaves open: their manifest schema version (D10.3); whether compaction keeps commit IDs, which bind footer offsets; and what "delete" means in a single-file append-only archive. They are listed with options for the owner before any code.
+
 ### C10 — TAR-compatibility profile
 - Writer mode meeting every §7.2 constraint (no reference-only representations, no MOCHI-specific fragmentation, no external dictionaries unless the documented invocation supplies them).
 - Interop tests against pinned tool versions: GNU tar, bsdtar/libarchive (also what Windows ships as `tar.exe`), and the `zstd` CLI.

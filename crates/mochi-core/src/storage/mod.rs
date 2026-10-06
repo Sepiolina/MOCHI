@@ -3,7 +3,8 @@
 //! **All I/O in `mochi-core` goes through these traits.** Direct `std::fs` use
 //! in core logic makes fault injection impossible and is rejected by
 //! `ci/check-invariants.sh`; the one OS-backed implementation lives in
-//! [`os`] and is the only file allowed to use it.
+//! [`os`] (with its per-platform submodules) and is the only module allowed
+//! to use it.
 //!
 //! The interface is split in two on purpose:
 //!

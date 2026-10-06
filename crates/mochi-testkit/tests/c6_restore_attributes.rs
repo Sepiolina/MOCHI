@@ -8,7 +8,6 @@ use mochi_core::publish::{
 };
 use mochi_core::report::Severity;
 use mochi_core::restore::{restore, RestoreOptions, RestoreReport};
-#[cfg(target_os = "linux")]
 use mochi_core::storage::os::OsRestoreDir;
 use mochi_core::storage::{AttributeKind, RestoreDir};
 use mochi_core::ErrorCode;
@@ -180,10 +179,9 @@ fn c6_attributes_unavailable_content_still_restored() {
 }
 
 /// On the real filesystem: the time (to the nanosecond where the filesystem
-/// keeps it) and the mode. Ownership applies when privileged and is
-/// reported otherwise. Linux only: elsewhere restoration to the filesystem
-/// is refused (`c6_restore::c6_os_restore_is_refused_where_unsupported`).
-#[cfg(target_os = "linux")]
+/// keeps it) and, on Linux, the mode. Ownership applies when privileged and
+/// is reported otherwise; on Windows a POSIX owner and mode are reported and
+/// the read-only bit follows the POSIX write bits.
 #[test]
 fn c6_os_attributes() {
     let s = archive_with(&[
@@ -214,6 +212,7 @@ fn c6_os_attributes() {
         .iter()
         .map(|e| e.issue.attribute)
         .collect();
+    #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let mode = |p: &str| {
@@ -238,6 +237,21 @@ fn c6_os_attributes() {
             );
             assert_eq!(kinds.len(), 3);
         }
+    }
+    #[cfg(windows)]
+    {
+        assert!(std::fs::metadata(dir.path().join("ro"))
+            .unwrap()
+            .permissions()
+            .readonly());
+        assert!(!std::fs::metadata(dir.path().join("d/f"))
+            .unwrap()
+            .permissions()
+            .readonly());
+        assert!(kinds
+            .iter()
+            .all(|k| matches!(k, AttributeKind::Ownership | AttributeKind::Mode)));
+        assert_eq!(kinds.len(), 6);
     }
 }
 

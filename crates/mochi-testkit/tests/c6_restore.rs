@@ -357,21 +357,40 @@ fn c6_restore_cancellation() {
 
 /// On the real filesystem: the head restores; a second restore into the same
 /// directory collides everywhere and changes nothing, including a file the
-/// user edited in between. Linux only: elsewhere restoration to the
-/// filesystem is refused ([`c6_os_restore_is_refused_where_unsupported`]);
-/// Windows naming rules are covered on `SimTree`.
-#[cfg(target_os = "linux")]
+/// user edited in between. On Windows the hostile fixture name is reported
+/// as unsupported instead of restored, the filesystem is case-insensitive,
+/// and directory durability is unconfirmed (O12).
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn c6_os_restore_and_restore_again() {
     let s = scripted();
     let dir = tempfile::tempdir().unwrap();
     let r = run(&s, None, OsRestoreDir::open(dir.path()).unwrap());
     let model = &scripted_history()[2].after;
-    assert!(r.complete(), "{:?}", r.exceptions);
-    assert_eq!(r.directory_durability, DirectoryDurability::Confirmed);
-    assert_eq!(r.case_behavior, CaseBehavior::Sensitive);
+    let hostile = "<img src=x onerror=alert(1)>";
+    if cfg!(windows) {
+        assert_eq!(
+            exception(&r, hostile),
+            Some(ExceptionKind::UnsupportedName(NameIssue::IllegalCharacter(
+                b'<'
+            )))
+        );
+        assert_eq!(r.exceptions.len(), 1, "{:?}", r.exceptions);
+        assert!(matches!(
+            r.directory_durability,
+            DirectoryDurability::Unconfirmed(_)
+        ));
+        assert_eq!(r.case_behavior, CaseBehavior::Insensitive);
+    } else {
+        assert!(r.complete(), "{:?}", r.exceptions);
+        assert_eq!(r.directory_durability, DirectoryDurability::Confirmed);
+        assert_eq!(r.case_behavior, CaseBehavior::Sensitive);
+    }
     for (k, c) in model {
         let p = String::from_utf8(k.clone()).unwrap();
+        if cfg!(windows) && p == hostile {
+            continue;
+        }
         let on_disk = dir.path().join(&p);
         match c {
             Content::Dir => assert!(on_disk.is_dir(), "{p}"),
@@ -400,10 +419,10 @@ fn c6_os_restore_and_restore_again() {
     no_temporaries(&left);
 }
 
-/// Where race-resistant restoration is not implemented (every platform but
-/// Linux; Windows included), opening a restore destination fails clearly,
+/// Where race-resistant restoration is not implemented (neither Linux nor
+/// Windows, which MOCHI 1.0 does not support), opening a restore destination fails clearly,
 /// `UNSUPPORTED_FEATURE` (exit 4), and nothing is written.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 #[test]
 fn c6_os_restore_is_refused_where_unsupported() {
     let dir = tempfile::tempdir().unwrap();

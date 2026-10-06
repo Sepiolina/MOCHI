@@ -8,11 +8,13 @@ cd "$(dirname "$0")/.."
 fail=0
 report() { echo "invariant violated: $1"; echo "$2" | sed 's/^/    /'; fail=1; }
 
-# 1. All I/O in mochi-core goes through the Storage trait. std::fs is allowed in
-#    exactly one file: the OS-backed implementation. (Comment lines are ignored.)
+# 1. All I/O in mochi-core goes through the Storage trait. std::fs is allowed
+#    only in the OS-backed implementation: storage/os.rs and its per-platform
+#    submodules in storage/os/ (restore destinations). (Comment lines are
+#    ignored.)
 hits=$(grep -rnE --include='*.rs' '^[^/]*\bstd::fs\b' crates/mochi-core/src \
-        | grep -v '^crates/mochi-core/src/storage/os.rs:' || true)
-[ -n "$hits" ] && report "std::fs used in mochi-core outside storage/os.rs (AGENTS.md: Publication and safety)" "$hits"
+        | grep -vE '^crates/mochi-core/src/storage/os(\.rs|/[a-z_]+\.rs):' || true)
+[ -n "$hits" ] && report "std::fs used in mochi-core outside storage/os.rs and storage/os/ (AGENTS.md: Publication and safety)" "$hits"
 
 # 2. Frame magic literals live only in mochi-format's registry module.
 hits=$(grep -rniE --include='*.rs' '0x184D_?2A[0-9A-F]{2}|0xFD2F_?B528' crates apps 2>/dev/null \

@@ -202,6 +202,7 @@ Recorded once; reopened only for a concrete correctness, compatibility, or speci
 1. **Q54 (writer lock):** separate lock file with an OS lock through a safe API; existence is not ownership; never removed on unlock; naming and aliases defined (spec Annex B D17, B.2.7). Implemented; see Q54 above.
 2. **Q10 (`create --exceed-default-limits`):** deferred and removed from this milestone; limits unchanged; the flag is refused by name; the specification gap is spec Annex B D16. G4 stays open.
 3. **C6:** race-resistant restore, destination case detection, and collision preflight before writing; where safe restoration is unsupported, fail before writing (Windows: refused); exactly the §27 read benchmarks, recorded. See plan C6 "C6 safety" and `docs/benchmarks/c6-read.md`.
+3a. **Windows restore (delegated to the implementer, 2026-10-06):** restore with pinned directory handles, `std` only, no `unsafe`, with the concessions W1–W6 in `docs/c6-restore-platforms.md` and a separate-crate remedy recorded there. This replaces the earlier refusal on Windows.
 4. **Ownership of the remaining items:** T29 and `mochi get`/`list` stay with C14; T33 with G6 and Windows hardware; the GC hold test (G2) with C9.
 
 ### What G2 still needs (recorded 2026-10-04 [delegated])

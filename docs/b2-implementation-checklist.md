@@ -195,6 +195,15 @@ The repository had no `.gitattributes`. Git on Windows, including GitHub's `wind
 * **G8 Truncation:** T23, T24, T25 have CI evidence (runs 37305468777, 37307422728); T29's truncation path (`mochi append --truncate-tail`) is still open.
 * **G9 Reports: criteria met 2026-10-05 [delegated]** (runs 37305468777, 37308851339). First-sight `UNKNOWN` freshness exits 0, the five mixed outcomes give their codes, and the timestamp property test passes (T26, T27, T28). They are met at library level: no command emits a report before C7's `verify`. C7 must take `verify`'s exit code from `Report::conclude`, not from a separate path; until then, G9 does not show that the CLI obeys D15.
 
+### Owner decisions (2026-10-06)
+
+Recorded once; reopened only for a concrete correctness, compatibility, or specification blocker. **Deferred never means passed or waived.**
+
+1. **Q54 (writer lock):** separate lock file with an OS lock through a safe API; existence is not ownership; never removed on unlock; naming and aliases defined (spec Annex B D17, B.2.7). Implemented; see Q54 above.
+2. **Q10 (`create --exceed-default-limits`):** deferred and removed from this milestone; limits unchanged; the flag is refused by name; the specification gap is spec Annex B D16. G4 stays open.
+3. **C6:** race-resistant restore, destination case detection, and collision preflight before writing; where safe restoration is unsupported, fail before writing (Windows: refused); exactly the §27 read benchmarks, recorded. See plan C6 "C6 safety" and `docs/benchmarks/c6-read.md`.
+4. **Ownership of the remaining items:** T29 and `mochi get`/`list` stay with C14; T33 with G6 and Windows hardware; the GC hold test (G2) with C9.
+
 ### What G2 still needs (recorded 2026-10-04 [delegated])
 
 Earlier status reports described G2 as waiting on CI and native-Windows evidence for T11/T12. That understated it. G2 also maps **T13, T15, T16, T17**, none of which is started. G2 closes only when all of these hold:

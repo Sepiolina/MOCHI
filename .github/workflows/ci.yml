@@ -117,6 +117,39 @@ jobs:
       - name: Cut power at every creation step
         run: sudo bash ci/g7-powercut.sh target/debug/examples/g7_powercut
 
+  casefold:
+    # Plan C6: case-insensitive destination detection and the collision
+    # preflight on a real case-folding filesystem (ext4 casefold over a
+    # loop file). Needs root for the mount and a kernel with CONFIG_UNICODE,
+    # which GitHub's Ubuntu runners have.
+    name: restore to ext4 casefold (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the test
+        run: cargo test --locked -p mochi-testkit --test c6_restore_races --no-run
+      - name: Mount ext4 with casefold
+        run: |
+          truncate -s 64M "$RUNNER_TEMP/cf.img"
+          mkfs.ext4 -q -O casefold "$RUNNER_TEMP/cf.img"
+          sudo mkdir -p /mnt/cf
+          sudo mount -o loop "$RUNNER_TEMP/cf.img" /mnt/cf
+          sudo mkdir /mnt/cf/d
+          sudo chattr +F /mnt/cf/d
+          sudo chown "$(id -u):$(id -g)" /mnt/cf/d
+          lsattr -d /mnt/cf/d
+      - name: Detect case-insensitivity and preflight collisions
+        env:
+          MOCHI_CASEFOLD_DIR: /mnt/cf/d
+        run: cargo test --locked -p mochi-testkit --test c6_restore_races -- --ignored --exact c6_casefold_destination
+
   doc-nightly:
     # Stable rustdoc ignores the error code in `compile_fail,E0308`; nightly
     # enforces it. The C2 representation-type guarantees (repr.rs) depend on

@@ -8,6 +8,7 @@ use mochi_core::publish::{
 };
 use mochi_core::report::Severity;
 use mochi_core::restore::{restore, RestoreOptions, RestoreReport};
+#[cfg(target_os = "linux")]
 use mochi_core::storage::os::OsRestoreDir;
 use mochi_core::storage::{AttributeKind, RestoreDir};
 use mochi_core::ErrorCode;
@@ -108,6 +109,7 @@ fn c6_setid_only_on_request() {
         tree.clone(),
         RestoreOptions {
             restore_setid: true,
+            ..RestoreOptions::default()
         },
     );
     assert!(r.attributes_complete(), "{:?}", r.attribute_exceptions);
@@ -178,8 +180,10 @@ fn c6_attributes_unavailable_content_still_restored() {
 }
 
 /// On the real filesystem: the time (to the nanosecond where the filesystem
-/// keeps it) and, on Unix, the mode. Ownership applies when privileged and
-/// is reported otherwise; on Windows a POSIX owner and mode are reported.
+/// keeps it) and the mode. Ownership applies when privileged and is
+/// reported otherwise. Linux only: elsewhere restoration to the filesystem
+/// is refused (`c6_restore::c6_os_restore_is_refused_where_unsupported`).
+#[cfg(target_os = "linux")]
 #[test]
 fn c6_os_attributes() {
     let s = archive_with(&[
@@ -210,7 +214,6 @@ fn c6_os_attributes() {
         .iter()
         .map(|e| e.issue.attribute)
         .collect();
-    #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let mode = |p: &str| {
@@ -236,27 +239,12 @@ fn c6_os_attributes() {
             assert_eq!(kinds.len(), 3);
         }
     }
-    #[cfg(windows)]
-    {
-        assert!(std::fs::metadata(dir.path().join("ro"))
-            .unwrap()
-            .permissions()
-            .readonly());
-        assert!(!std::fs::metadata(dir.path().join("d/f"))
-            .unwrap()
-            .permissions()
-            .readonly());
-        assert!(kinds
-            .iter()
-            .all(|k| matches!(k, AttributeKind::Ownership | AttributeKind::Mode)));
-        assert_eq!(kinds.len(), 6);
-    }
 }
 
 /// Windows-authored attributes restored on Unix: read-only clears the
 /// write bits, hidden has no equivalent and is reported, and the time is
 /// set.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn c6_os_windows_authored_on_unix() {
     use mochi_core::manifest::{WINDOWS_ARCHIVE, WINDOWS_HIDDEN, WINDOWS_READONLY};

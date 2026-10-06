@@ -22,7 +22,8 @@ getrandom.workspace = true
 rusqlite.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix.workspace = true
+# `process`: `geteuid`, for the restore root's ownership check (plan C6).
+rustix = { workspace = true, features = ["process"] }
 
 [dev-dependencies]
 # `trace`: the T13 work-bound tests count SQL statements and full-scan steps

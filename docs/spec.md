@@ -1471,6 +1471,8 @@ Each decision blocks the listed work until recorded in this annex. D1–D9 are r
 | D13 | Archive creation (plan O12) | In place; or a temporary file published without replacement | C5 follow-up; D2 |
 | D14 | Tail truncation eligibility and audit (plan O28) | Audit in the report or in the archive; eligibility rule | C7; C14 |
 | D15 | Report status layers and timestamps (plan O13) | Single rollup; or separate evidence, policy, and exit layers | C7; C14 |
+| D16 | **Open.** Raising writer limits at creation (`create --exceed-default-limits`, B.2.3). B.2.3 says the choice records key 6 and prints a warning, but not which limits a writer may raise, by how much (any ceiling below the wire maxima), whether key 6 must equal what the writer then enforces, which report field shows it, or whether a reader with lower limits reports `LIMIT_EXCEEDED` naming the declared value as soon as it opens the archive or only when an object exceeds its own limit (plan checklist Q10). Today a reader decodes key 6 and does not act on it. **Deferred by the owner on 2026-10-06 (plan Q10):** builds keep the reader defaults for every writer and refuse the flag by name; nothing writes key 6 | Values allowed per limit; ceiling; report field | T29 opt-in path; G4 opt-in item |
+| D17 | **Decided by the owner on 2026-10-06 (plan Q54); not wire format.** The §12.2 step 1 publication lock is an OS lock on a separate lock file, not on the archive (on Windows a lock on the archive blocks every other handle's reads). The lock file's existence never means ownership, and normal unlock never removes it. Naming and alias handling: see B.2.7 | — | C6 Windows reads during append |
 
 Status of the open questions from the original v1.2 review: chunk-hash ordering — resolved (9.2); concurrent writers — resolved for Core (12.5); `content_index` schema — superseded, DDL is a ratification artifact (10.1); version-byte mapping — reframed by Section 26 and D1; Windows attribute defaults — D6.
 
@@ -1820,6 +1822,18 @@ These are pending. None is satisfied by this text. Every gate's tests must pass 
   - The mixed outcomes each give their expected exit code: `FAIL` with an I/O error, 1; a `FAIL` in a dimension that is not required, 1; a required `UNSUPPORTED` with an I/O error, 3; a required `UNSUPPORTED` with a required `UNKNOWN`, 4; an `UNSUPPORTED` that is not required with a required `DEGRADED`, 2.
   - The timestamp property test passes.
 
+
+#### B.2.7 Writer lock (D17; decided by the owner 2026-10-06, plan Q54)
+
+Not wire format: nothing is written into an archive. It is recorded here because two implementations that write the same archive exclude each other only if they take the same lock.
+
+- **Mechanism.** The §12.2 step 1 lock is an OS file lock (POSIX `flock`, Windows `LockFileEx`, through a safe API; no new `unsafe` in `mochi-core`) held on a separate **lock file**, never on the archive alone. On Windows a lock on the archive makes every other handle's reads fail, so nothing could verify or read an archive during an append.
+- **Name.** `<archive file name>.mochi-lock`, in the archive's directory, both taken from the canonical path (symbolic links, `.` and `..`, and Windows short names resolved).
+- **Ownership.** Only the OS lock counts. The lock file is created if missing, never written or truncated, and never removed, by unlock or otherwise; a leftover lock file nobody holds does not block. The OS releases the lock when its holder exits.
+- **Aliases.** Every path that canonicalizes to the same directory and name reaches the same lock file; names a filesystem treats as equal (for example case on a case-insensitive filesystem) reach the same lock file as they reach the same archive. Hard links have no canonical name: on Unix a writer also takes `flock` on the archive itself, which excludes them and does not affect readers; **on Windows, writers through two hard-link names of one archive are not excluded** (no stable, safe API gives the file's identity). This is a known limitation, not a guarantee.
+- **Creation (D13).** The final name's lock file is taken before the temporary file is published, so a new archive is never visible unlocked. A lock held by another process there is `LOCK_CONFLICT`, and nothing is created.
+- **Readers** take no lock. Concurrent reads are correct because a reader interprets only what a valid footer commits (§12.2), not because of the lock.
+- **A directory where the lock file cannot be created** (read-only) cannot be appended to; the writer fails before writing.
 
 ## Annex C. Document Lineage **[1.0 integration]**
 

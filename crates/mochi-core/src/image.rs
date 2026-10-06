@@ -25,7 +25,8 @@
 //! ([`Limits::WRITER_DEFAULT`], B.2.3 "writer default rule"), whatever limits
 //! the writer was configured to *read* with. An image over budget is
 //! `CAPACITY_EXCEEDED` and nothing is published (D10.11). The opt-in path
-//! (`create --exceed-default-limits`) is plan T29.
+//! (`create --exceed-default-limits`, plan T29) is deferred (Q10; spec
+//! Annex B, D16), so no writer exceeds the defaults.
 //!
 //! **Effective capacity.** A published catalog is a whole number of 4096-byte
 //! pages (§10.5), and the budget is not a multiple of 4096. The largest image

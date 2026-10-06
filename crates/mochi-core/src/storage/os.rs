@@ -45,10 +45,40 @@
 //!   including publication of a locked temporary file and refusal of an
 //!   existing destination.
 //!
-//! **Locking.** `try_lock_exclusive` is `File::try_lock` (Linux `flock`,
-//! Windows `LockFileEx`). Advisory on Linux: a process that ignores it is not
-//! stopped, which is why the writer also re-checks the file size before each
-//! commit (spec §12.5: `O_APPEND` alone is insufficient).
+//! **Locking (spec §12.2 step 1; owner decision Q54, spec Annex B D17 and
+//! B.2.7).** An archive's publication lock is an OS lock (`File::try_lock`:
+//! Linux `flock`, Windows `LockFileEx`) on a **separate lock file**,
+//! [`lock_file_path`]: `<archive file name>.mochi-lock` in the archive's
+//! directory, both taken from the canonical path. Locking the archive itself
+//! is not enough on Windows, where byte-range locks are mandatory and a lock
+//! over the archive fails every other handle's reads (error 33), so nothing
+//! could verify or read an archive during an append.
+//! * **Existence is not ownership.** The lock file is created if missing,
+//!   never truncated, never written, and never removed, by unlock or
+//!   otherwise. Only the OS lock on it counts; the OS drops it when the
+//!   holder exits, so a crashed writer leaves nothing to clean up.
+//! * **Aliases.** The path is canonicalized first (`std::fs::canonicalize`),
+//!   so relative paths, `.`/`..`, symbolic links, and Windows short (8.3)
+//!   names all reach one lock file; names a filesystem treats as equal (case,
+//!   on a case-insensitive filesystem) reach the same lock file the same way
+//!   they reach the same archive. **Hard links** have no canonical name: on
+//!   Unix the writer also takes `flock` on the archive itself (advisory, so
+//!   readers are unaffected), which covers them; on Windows two hard-link
+//!   names of one archive are **not** excluded from each other (no stable,
+//!   safe API gives a file's identity; recorded in B.2.7).
+//! * Temporary files (D13) and sidecars (D14) are locked on themselves:
+//!   nobody reads them while they are held, and cleanup tests their own
+//!   lock. [`OsDir::publish_archive`] takes the final name's lock file before
+//!   a created archive becomes visible.
+//! * **Readers take no lock.** Concurrent reads are correct because a reader
+//!   interprets only what a valid footer commits (the size is taken once,
+//!   §12.2: "Readers MUST NOT assume the only recoverable commit is at
+//!   physical EOF"), not because of the lock.
+//! * Advisory on Linux: a process that ignores the lock is not stopped,
+//!   which is why the writer also re-checks the file size before each commit
+//!   (spec §12.5: `O_APPEND` alone is insufficient).
+//! * If the lock file cannot be created (a read-only directory), the writer
+//!   fails before writing anything.
 //!
 //! **Network filesystems** (NFS, SMB) are not supported for writing: their
 //! locking and flush semantics vary, and none of the above is assumed there.
@@ -58,8 +88,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::{
-    check_file_name, windows_name_issue, AttributeIssue, AttributeKind, DirectoryDurability,
-    NameIssue, ReadStorage, RemoveOutcome, RestoreDir, Storage, StorageDir, StorageError,
+    check_file_name, AttributeIssue, AttributeKind, DirectoryDurability, NameIssue, ReadStorage,
+    RemoveOutcome, RestoreDir, Storage, StorageDir, StorageError,
 };
 use crate::catalog::namespace::EntryKind;
 use crate::manifest::{Attributes, Mtime, WINDOWS_HIDDEN, WINDOWS_READONLY, WINDOWS_SYSTEM};
@@ -161,16 +191,79 @@ impl ReadStorage for OsReadStorage {
     }
 }
 
+/// Suffix of an archive's writer lock file (Q54; spec Annex B.2.7).
+pub const LOCK_FILE_SUFFIX: &str = ".mochi-lock";
+
+/// The writer lock file of the archive at `archive`, which must exist:
+/// `<file name>.mochi-lock` beside the canonical path, so every alias that
+/// resolves to the same name reaches the same lock file (see "Locking").
+pub fn lock_file_path(archive: &Path) -> Result<PathBuf, StorageError> {
+    let canonical = std::fs::canonicalize(archive)?;
+    let (Some(dir), Some(name)) = (canonical.parent(), canonical.file_name()) else {
+        return Err(StorageError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} has no parent directory", canonical.display()),
+        )));
+    };
+    Ok(named_lock_file(dir, name))
+}
+
+fn named_lock_file(canonical_dir: &Path, name: &std::ffi::OsStr) -> PathBuf {
+    let mut lock = name.to_os_string();
+    lock.push(LOCK_FILE_SUFFIX);
+    canonical_dir.join(lock)
+}
+
+/// Take `File::try_lock`, mapping contention to [`StorageError::LockHeld`].
+fn try_lock_file(file: &File) -> Result<(), StorageError> {
+    match file.try_lock() {
+        Ok(()) => Ok(()),
+        Err(std::fs::TryLockError::WouldBlock) => Err(StorageError::LockHeld),
+        Err(std::fs::TryLockError::Error(e)) => Err(StorageError::Io(e)),
+    }
+}
+
+/// Open (creating if missing, never truncating) and lock a writer lock file.
+fn acquire_lock_file(path: &Path) -> Result<File, StorageError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|e| {
+            StorageError::Io(io::Error::new(
+                e.kind(),
+                format!("writer lock file {}: {e}", path.display()),
+            ))
+        })?;
+    try_lock_file(&file)?;
+    Ok(file)
+}
+
+/// What [`Storage::try_lock_exclusive`] locks for an [`OsStorage`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockRole {
+    /// An archive: its lock file (plus, on Unix, the archive itself).
+    Archive,
+    /// A temporary file or sidecar: the file itself.
+    Itself,
+}
+
 /// Read-write handle for a single writer.
 #[derive(Debug)]
 pub struct OsStorage {
     file: File,
     path: PathBuf,
-    /// Whether this handle holds the publication lock. Taking it again is a
-    /// no-op: `flock` (Linux) allows that, but `LockFileEx` (Windows) refuses
-    /// an overlapping lock even from the same handle, so the state is kept
-    /// here rather than asked of the OS (found by T22 on `windows-latest`).
-    locked: bool,
+    role: LockRole,
+    /// The held writer lock file ([`LockRole::Archive`]).
+    lock_file: Option<File>,
+    /// Whether this handle holds an OS lock on `file` itself. Taking a lock
+    /// again is a no-op: `flock` (Linux) allows that, but `LockFileEx`
+    /// (Windows) refuses an overlapping lock even from the same handle, so
+    /// the state is kept here rather than asked of the OS (found by T22 on
+    /// `windows-latest`).
+    file_locked: bool,
 }
 
 impl OsStorage {
@@ -182,22 +275,72 @@ impl OsStorage {
             .write(true)
             .create_new(true)
             .open(&path)?;
-        Ok(Self {
-            file,
-            path,
-            locked: false,
-        })
+        Ok(Self::archive(file, path))
     }
 
     /// Open an existing file for reading and writing.
     pub fn open_existing(path: impl AsRef<Path>) -> Result<Self, StorageError> {
         let path = path.as_ref().to_path_buf();
         let file = OpenOptions::new().read(true).write(true).open(&path)?;
-        Ok(Self {
+        Ok(Self::archive(file, path))
+    }
+
+    fn archive(file: File, path: PathBuf) -> Self {
+        Self {
             file,
             path,
-            locked: false,
-        })
+            role: LockRole::Archive,
+            lock_file: None,
+            file_locked: false,
+        }
+    }
+
+    fn itself(file: File, path: PathBuf) -> Self {
+        Self {
+            role: LockRole::Itself,
+            ..Self::archive(file, path)
+        }
+    }
+
+    fn lock_itself(&mut self) -> Result<(), StorageError> {
+        if !self.file_locked {
+            try_lock_file(&self.file)?;
+            self.file_locked = true;
+        }
+        Ok(())
+    }
+
+    fn unlock_itself(&mut self) -> Result<(), StorageError> {
+        if self.file_locked {
+            self.file.unlock()?;
+            self.file_locked = false;
+        }
+        Ok(())
+    }
+
+    /// Take the archive lock through the lock file at `lock_path`. On Unix,
+    /// also `flock` the archive itself, which excludes hard-link aliases.
+    fn lock_archive_at(&mut self, lock_path: &Path) -> Result<(), StorageError> {
+        if self.lock_file.is_some() {
+            return Ok(());
+        }
+        let lock = acquire_lock_file(lock_path)?;
+        if cfg!(unix) {
+            if let Err(e) = self.lock_itself() {
+                let _ = lock.unlock();
+                return Err(e);
+            }
+        }
+        self.lock_file = Some(lock);
+        Ok(())
+    }
+
+    fn release_lock_file(&mut self) -> Result<(), StorageError> {
+        if let Some(lock) = self.lock_file.take() {
+            // Unlocked, never removed: existence is not ownership.
+            lock.unlock()?;
+        }
+        Ok(())
     }
 }
 
@@ -235,26 +378,20 @@ impl Storage for OsStorage {
     }
 
     fn try_lock_exclusive(&mut self) -> Result<(), StorageError> {
-        if self.locked {
-            return Ok(());
-        }
-        match self.file.try_lock() {
-            Ok(()) => {
-                self.locked = true;
-                Ok(())
+        match self.role {
+            LockRole::Itself => self.lock_itself(),
+            LockRole::Archive if self.lock_file.is_some() => Ok(()),
+            LockRole::Archive => {
+                let lock_path = lock_file_path(&self.path)?;
+                self.lock_archive_at(&lock_path)
             }
-            Err(std::fs::TryLockError::WouldBlock) => Err(StorageError::LockHeld),
-            Err(std::fs::TryLockError::Error(e)) => Err(StorageError::Io(e)),
         }
     }
 
     fn unlock(&mut self) -> Result<(), StorageError> {
-        if !self.locked {
-            return Ok(());
-        }
-        self.file.unlock()?;
-        self.locked = false;
-        Ok(())
+        let itself = self.unlock_itself();
+        let lock_file = self.release_lock_file();
+        itself.and(lock_file)
     }
 
     fn truncate(&mut self, new_len: u64) -> Result<(), StorageError> {
@@ -438,11 +575,7 @@ impl StorageDir for OsDir {
             .create_new(true)
             .open(&path)
             .map_err(exists_as(name))?;
-        let mut s = OsStorage {
-            file,
-            path,
-            locked: false,
-        };
+        let mut s = OsStorage::itself(file, path);
         s.try_lock_exclusive()?;
         Ok(s)
     }
@@ -450,6 +583,34 @@ impl StorageDir for OsDir {
     fn publish_no_replace(&mut self, from: &str, to: &str) -> Result<(), StorageError> {
         let (src, dst) = (self.entry(from)?, self.entry(to)?);
         self.last_publish = Some(publish_no_replace_at(&src, &dst, to)?);
+        Ok(())
+    }
+
+    /// Takes `to`'s writer lock file for `file` first, so the archive is
+    /// never visible unlocked; then publishes. On Windows the temporary
+    /// file's own lock is released afterwards: it is now the archive, and a
+    /// lock on it would block readers (Q54).
+    fn publish_archive(
+        &mut self,
+        file: &mut OsStorage,
+        from: &str,
+        to: &str,
+    ) -> Result<(), StorageError> {
+        let (src, dst) = (self.entry(from)?, self.entry(to)?);
+        let dir = std::fs::canonicalize(&self.path)?;
+        file.lock_archive_at(&named_lock_file(&dir, std::ffi::OsStr::new(to)))?;
+        match publish_no_replace_at(&src, &dst, to) {
+            Ok(m) => self.last_publish = Some(m),
+            Err(e) => {
+                let _ = file.release_lock_file();
+                return Err(e);
+            }
+        }
+        file.path = dst;
+        file.role = LockRole::Archive;
+        if cfg!(windows) {
+            file.unlock_itself()?;
+        }
         Ok(())
     }
 
@@ -469,10 +630,10 @@ impl StorageDir for OsDir {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(RemoveOutcome::Missing),
             Err(e) => return Err(e.into()),
         };
-        match file.try_lock() {
+        match try_lock_file(&file) {
             Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => return Ok(RemoveOutcome::Locked),
-            Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+            Err(StorageError::LockHeld) => return Ok(RemoveOutcome::Locked),
+            Err(e) => return Err(e),
         }
         std::fs::remove_file(&path)?;
         drop(file);
@@ -487,127 +648,354 @@ impl StorageDir for OsDir {
 /// A restore destination directory on the local filesystem (plan C6;
 /// [`RestoreDir`]).
 ///
-/// Names are converted without loss or they are refused. On Unix they are
-/// the bytes as they are; on Windows, WTF-8 decoded to UTF-16 (plan O24),
-/// checked against [`windows_name_issue`] first. Creation is exclusive and
-/// publication never replaces (the [`OsDir`] mechanisms).
+/// **Race resistance (Linux).** Every operation is relative to a directory
+/// descriptor this restoration holds, never to a path, so replacing a
+/// directory on the path with a symbolic link redirects nothing:
+/// * the root is opened once (`O_DIRECTORY`); later changes to the path
+///   that led to it do not matter;
+/// * directories are made with `mkdirat` mode `0700` and opened with
+///   `openat(O_DIRECTORY | O_NOFOLLOW)`; files are created with
+///   `openat(O_CREAT | O_EXCL | O_NOFOLLOW)` mode `0600`, so an existing
+///   entry or a planted symbolic link is a collision, never followed or
+///   written through;
+/// * publication is `renameat2(RENAME_NOREPLACE)` (or `linkat` then
+///   `unlinkat`, as [`OsDir`]) inside the held directory; attributes are
+///   applied through a descriptor opened with `O_NOFOLLOW` (`futimens`,
+///   `fchown`, `fchmod`), the promised modes only at the end.
+/// * **Nobody else can rename or remove entries in between.** Everything
+///   below the root is private to the restoring user until attributes are
+///   applied, and the root must be one that other users cannot modify: owned
+///   by the restoring user or by root, and not writable by group or others
+///   unless sticky (as `/tmp`). Any other root is refused before anything is
+///   written (`UNSUPPORTED_FEATURE`); restore into a private directory
+///   inside it instead. The check is made on the held descriptor, whose
+///   owner and mode only its owner or root can change.
 ///
-/// **Path-based:** each operation joins names onto the directory's path.
-/// Every directory on that path below the restore root was created by this
-/// restoration, exclusively. A local process that replaces one of them with
-/// a symbolic link between two operations could redirect later writes;
-/// descriptor-relative operations (`openat` with `O_NOFOLLOW`) are the
-/// remedy, recorded for C6.
-#[derive(Debug, Clone)]
+/// **Other platforms (Windows included) are refused** with
+/// `UNSUPPORTED_FEATURE` before anything is written: `std` offers no
+/// handle-relative creation there, and `mochi-core` makes no `unsafe` calls
+/// (plan C6 open item).
+///
+/// Names are the archive's bytes, unaltered (plan O24).
+#[derive(Debug)]
 pub struct OsRestoreDir {
     path: PathBuf,
+    #[cfg(target_os = "linux")]
+    fd: std::os::fd::OwnedFd,
+    #[cfg(not(target_os = "linux"))]
+    never: std::convert::Infallible,
 }
 
+/// Why restoring into a directory other users can modify is refused.
+#[cfg(target_os = "linux")]
+const UNSAFE_ROOT: &str = "restoring into a directory that other users can modify (not owned by \
+     you or root, or writable by group or others without the sticky bit) is not supported: \
+     entries could be swapped while they are restored. Nothing was written; restore into a \
+     private directory instead";
+
+/// Why restoring on this platform is refused.
+#[cfg(not(target_os = "linux"))]
+const UNSUPPORTED_PLATFORM: &str = "race-resistant restoration to the filesystem is not \
+     available on this platform in this build (plan C6). Nothing was written";
+
 impl OsRestoreDir {
-    /// The existing directory at `path`.
+    /// The existing directory at `path`, as a restore root. Refused, before
+    /// anything is written, where safe restoration is unsupported.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
-        let dir = OsDir::open(path)?;
-        Ok(Self { path: dir.path })
+        Self::open_root(path.as_ref())
     }
 
-    /// Where this directory is.
+    #[cfg(not(target_os = "linux"))]
+    fn open_root(_path: &Path) -> Result<Self, StorageError> {
+        Err(StorageError::Unsupported(UNSUPPORTED_PLATFORM))
+    }
+
+    /// Where this directory is (for messages; operations never use it).
     pub fn path(&self) -> &Path {
         &self.path
     }
-
-    fn entry(&self, name: &[u8]) -> Result<PathBuf, StorageError> {
-        if let Some(issue) = self.name_issue(name) {
-            return Err(StorageError::InvalidName {
-                name: format!("{} ({issue})", String::from_utf8_lossy(name)),
-            });
-        }
-        Ok(self.path.join(os_name(name)?))
-    }
 }
 
-#[cfg(unix)]
-fn os_name(name: &[u8]) -> Result<std::ffi::OsString, StorageError> {
-    use std::os::unix::ffi::OsStrExt;
-    Ok(std::ffi::OsStr::from_bytes(name).to_os_string())
-}
-
-#[cfg(windows)]
-fn os_name(name: &[u8]) -> Result<std::ffi::OsString, StorageError> {
-    use std::os::windows::ffi::OsStringExt;
-    crate::catalog::path::utf16_from_wtf8(name)
-        .map(|w| std::ffi::OsString::from_wide(&w))
-        .ok_or_else(|| StorageError::InvalidName {
-            name: String::from_utf8_lossy(name).into_owned(),
-        })
-}
-
+#[cfg(not(target_os = "linux"))]
 impl RestoreDir for OsRestoreDir {
     type File = OsStorage;
+    fn name_issue(&self, _: &[u8]) -> Option<NameIssue> {
+        match self.never {}
+    }
+    fn create_dir(&mut self, _: &[u8]) -> Result<Self, StorageError> {
+        match self.never {}
+    }
+    fn create_file(&mut self, _: &[u8]) -> Result<OsStorage, StorageError> {
+        match self.never {}
+    }
+    fn publish_no_replace(&mut self, _: &[u8], _: &[u8]) -> Result<(), StorageError> {
+        match self.never {}
+    }
+    fn discard(&mut self, _: OsStorage, _: &[u8]) -> Result<(), StorageError> {
+        match self.never {}
+    }
+    fn sync_directory(&mut self) -> Result<DirectoryDurability, StorageError> {
+        match self.never {}
+    }
+    fn case_behavior(&mut self) -> Result<super::CaseBehavior, StorageError> {
+        match self.never {}
+    }
+    fn entry_exists(&mut self, _: &[u8]) -> Result<bool, StorageError> {
+        match self.never {}
+    }
+    fn apply_attributes(&mut self, _: &[u8], _: EntryKind, _: &Attributes) -> Vec<AttributeIssue> {
+        match self.never {}
+    }
+}
 
-    fn name_issue(&self, name: &[u8]) -> Option<NameIssue> {
-        if cfg!(windows) {
-            windows_name_issue(name)
+#[cfg(target_os = "linux")]
+mod fd_restore {
+    use std::ffi::OsStr;
+    use std::os::fd::OwnedFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags};
+    use rustix::io::Errno;
+
+    use super::*;
+    use crate::storage::CaseBehavior;
+
+    fn os(name: &[u8]) -> &OsStr {
+        OsStr::from_bytes(name)
+    }
+
+    fn io(e: Errno) -> StorageError {
+        StorageError::Io(e.into())
+    }
+
+    fn exists_or_io(name: &[u8], e: Errno) -> StorageError {
+        if e == Errno::EXIST {
+            StorageError::Exists {
+                name: String::from_utf8_lossy(name).into_owned(),
+            }
         } else {
-            // Unix: archive components already exclude NUL and `/`, and any
-            // other byte is a valid name byte.
+            io(e)
+        }
+    }
+
+    const PRIVATE_FILE: Mode = Mode::RUSR.union(Mode::WUSR);
+    const NEW_FILE: OFlags = OFlags::RDWR
+        .union(OFlags::CREATE)
+        .union(OFlags::EXCL)
+        .union(OFlags::NOFOLLOW)
+        .union(OFlags::CLOEXEC);
+    const OPEN_DIR: OFlags = OFlags::RDONLY
+        .union(OFlags::DIRECTORY)
+        .union(OFlags::NOFOLLOW)
+        .union(OFlags::CLOEXEC);
+
+    fn euid() -> u32 {
+        rustix::process::geteuid().as_raw()
+    }
+
+    impl OsRestoreDir {
+        pub(super) fn open_root(path: &Path) -> Result<Self, StorageError> {
+            let fd = rustix::fs::open(
+                path,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(io)?;
+            let st = rustix::fs::fstat(&fd).map_err(io)?;
+            let owner_ok = st.st_uid == euid() || st.st_uid == 0;
+            let shared = st.st_mode & 0o022 != 0;
+            let sticky = st.st_mode & 0o1000 != 0;
+            if !owner_ok || (shared && !sticky) {
+                return Err(StorageError::Unsupported(UNSAFE_ROOT));
+            }
+            Ok(Self {
+                path: path.to_path_buf(),
+                fd,
+            })
+        }
+
+        fn open_entry(&self, name: &[u8], kind: EntryKind) -> Result<File, StorageError> {
+            let mut flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
+            if kind == EntryKind::Directory {
+                flags |= OFlags::DIRECTORY;
+            }
+            let fd: OwnedFd =
+                rustix::fs::openat(&self.fd, os(name), flags, Mode::empty()).map_err(io)?;
+            Ok(File::from(fd))
+        }
+    }
+
+    impl RestoreDir for OsRestoreDir {
+        type File = OsStorage;
+
+        fn name_issue(&self, _name: &[u8]) -> Option<NameIssue> {
+            // Archive components already exclude NUL and `/`; any other
+            // byte is a valid Linux name byte.
             None
         }
-    }
 
-    fn create_dir(&mut self, name: &[u8]) -> Result<Self, StorageError> {
-        let path = self.entry(name)?;
-        let lossy = String::from_utf8_lossy(name);
-        std::fs::create_dir(&path).map_err(exists_as(&lossy))?;
-        Ok(Self { path })
-    }
-
-    fn create_file(&mut self, name: &[u8]) -> Result<OsStorage, StorageError> {
-        let path = self.entry(name)?;
-        let lossy = String::from_utf8_lossy(name);
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(exists_as(&lossy))?;
-        Ok(OsStorage {
-            file,
-            path,
-            locked: false,
-        })
-    }
-
-    fn publish_no_replace(&mut self, from: &[u8], to: &[u8]) -> Result<(), StorageError> {
-        let (src, dst) = (self.entry(from)?, self.entry(to)?);
-        publish_no_replace_at(&src, &dst, &String::from_utf8_lossy(to))?;
-        Ok(())
-    }
-
-    fn discard(&mut self, file: OsStorage, name: &[u8]) -> Result<(), StorageError> {
-        let path = self.entry(name)?;
-        drop(file);
-        Ok(std::fs::remove_file(path)?)
-    }
-
-    fn sync_directory(&mut self) -> Result<DirectoryDurability, StorageError> {
-        sync_dir(&self.path)
-    }
-
-    fn apply_attributes(
-        &mut self,
-        name: &[u8],
-        kind: EntryKind,
-        attributes: &Attributes,
-    ) -> Vec<AttributeIssue> {
-        let mut issues = Vec::new();
-        match self.entry(name) {
-            Ok(path) => apply_os_attributes(&path, kind, attributes, &mut issues),
-            Err(e) => issues.push(AttributeIssue {
-                attribute: AttributeKind::Mtime,
-                reason: e.to_string(),
-            }),
+        fn create_dir(&mut self, name: &[u8]) -> Result<Self, StorageError> {
+            rustix::fs::mkdirat(&self.fd, os(name), Mode::RWXU)
+                .map_err(|e| exists_or_io(name, e))?;
+            let fd = rustix::fs::openat(&self.fd, os(name), OPEN_DIR, Mode::empty()).map_err(io)?;
+            // Nobody else can rename entries here (see the type's docs);
+            // this only confirms it, on the descriptor now held.
+            if rustix::fs::fstat(&fd).map_err(io)?.st_uid != euid() {
+                return Err(StorageError::Io(io::Error::other(
+                    "a directory this restoration created was replaced",
+                )));
+            }
+            Ok(Self {
+                path: self.path.join(os(name)),
+                fd,
+            })
         }
-        issues
+
+        fn create_file(&mut self, name: &[u8]) -> Result<OsStorage, StorageError> {
+            let fd = rustix::fs::openat(&self.fd, os(name), NEW_FILE, PRIVATE_FILE)
+                .map_err(|e| exists_or_io(name, e))?;
+            Ok(OsStorage::itself(File::from(fd), self.path.join(os(name))))
+        }
+
+        fn publish_no_replace(&mut self, from: &[u8], to: &[u8]) -> Result<(), StorageError> {
+            let renamed = rustix::fs::renameat_with(
+                &self.fd,
+                os(from),
+                &self.fd,
+                os(to),
+                RenameFlags::NOREPLACE,
+            );
+            let Err(e) = renamed else {
+                return Ok(());
+            };
+            match classify_rename_errno(e.raw_os_error()) {
+                RenameOutcome::Exists => Err(exists_or_io(to, Errno::EXIST)),
+                RenameOutcome::Failed => Err(io(e)),
+                RenameOutcome::Unsupported => {
+                    rustix::fs::linkat(&self.fd, os(from), &self.fd, os(to), AtFlags::empty())
+                        .map_err(|e| exists_or_io(to, e))?;
+                    rustix::fs::unlinkat(&self.fd, os(from), AtFlags::empty()).map_err(io)
+                }
+            }
+        }
+
+        fn discard(&mut self, file: OsStorage, name: &[u8]) -> Result<(), StorageError> {
+            drop(file);
+            rustix::fs::unlinkat(&self.fd, os(name), AtFlags::empty()).map_err(io)
+        }
+
+        fn sync_directory(&mut self) -> Result<DirectoryDurability, StorageError> {
+            rustix::fs::fsync(&self.fd).map_err(io)?;
+            Ok(DirectoryDurability::Confirmed)
+        }
+
+        /// Creates a probe file of its own (exclusively, `0600`), looks it
+        /// up under its upper-case name without following links, and
+        /// removes it. The same file under both names means insensitive.
+        fn case_behavior(&mut self) -> Result<CaseBehavior, StorageError> {
+            for n in 0..16u32 {
+                let lower = format!(".mochi-case-probe.{}.{n}", std::process::id());
+                let upper = lower.to_ascii_uppercase();
+                let fd = match rustix::fs::openat(&self.fd, lower.as_str(), NEW_FILE, PRIVATE_FILE)
+                {
+                    Ok(fd) => fd,
+                    Err(Errno::EXIST) => continue,
+                    Err(e) => return Err(io(e)),
+                };
+                let mine = rustix::fs::fstat(&fd).map_err(io);
+                let seen = rustix::fs::statat(&self.fd, upper.as_str(), AtFlags::SYMLINK_NOFOLLOW);
+                drop(fd);
+                rustix::fs::unlinkat(&self.fd, lower.as_str(), AtFlags::empty()).map_err(io)?;
+                let mine = mine?;
+                match seen {
+                    Ok(st) if (st.st_dev, st.st_ino) == (mine.st_dev, mine.st_ino) => {
+                        return Ok(CaseBehavior::Insensitive)
+                    }
+                    // Another entry has the upper-case name: inconclusive.
+                    Ok(_) => continue,
+                    Err(Errno::NOENT) => return Ok(CaseBehavior::Sensitive),
+                    Err(e) => return Err(io(e)),
+                }
+            }
+            Err(StorageError::Io(io::Error::other(
+                "could not determine whether the destination is case-sensitive",
+            )))
+        }
+
+        fn entry_exists(&mut self, name: &[u8]) -> Result<bool, StorageError> {
+            match rustix::fs::statat(&self.fd, os(name), AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(_) => Ok(true),
+                Err(Errno::NOENT) => Ok(false),
+                Err(e) => Err(io(e)),
+            }
+        }
+
+        fn apply_attributes(
+            &mut self,
+            name: &[u8],
+            kind: EntryKind,
+            attributes: &Attributes,
+        ) -> Vec<AttributeIssue> {
+            let mut issues = Vec::new();
+            match self.open_entry(name, kind) {
+                Ok(file) => apply_fd_attributes(&file, kind, attributes, &mut issues),
+                Err(e) => issue(&mut issues, AttributeKind::Mtime, e),
+            }
+            issues
+        }
+    }
+
+    /// POSIX (plan O6), through the entry's own descriptor: the time first,
+    /// then the owner (which clears setuid and setgid), then the mode. An
+    /// entry without POSIX attributes gets spec §10.4.1's defaults, `0644`
+    /// for files and `0755` for directories (it was created private). The
+    /// Windows read-only bit clears the write bits; hidden and system have no
+    /// POSIX equivalent and are reported. The Windows archive bit is a backup
+    /// marker with no meaning here and is ignored.
+    fn apply_fd_attributes(
+        file: &File,
+        kind: EntryKind,
+        a: &Attributes,
+        issues: &mut Vec<AttributeIssue>,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(m) = a.mtime {
+            let set = system_time(m)
+                .ok_or_else(|| "the time is out of this platform's range".to_string())
+                .and_then(|t| file.set_modified(t).map_err(|e| e.to_string()));
+            if let Err(e) = set {
+                issue(issues, AttributeKind::Mtime, e);
+            }
+        }
+        let readonly = a.windows.is_some_and(|w| w & WINDOWS_READONLY != 0);
+        if let Some(w) = a.windows {
+            if w & (WINDOWS_HIDDEN | WINDOWS_SYSTEM) != 0 {
+                issue(issues, AttributeKind::HiddenOrSystem, "no POSIX equivalent");
+            }
+        }
+        let mut mode = match a.posix {
+            Some(p) => {
+                // -1 means "leave unchanged" to chown: never pass it on.
+                if p.uid == u32::MAX || p.gid == u32::MAX {
+                    issue(
+                        issues,
+                        AttributeKind::Ownership,
+                        "an owner or group of -1 cannot be set",
+                    );
+                } else if let Err(e) = std::os::unix::fs::fchown(file, Some(p.uid), Some(p.gid)) {
+                    issue(issues, AttributeKind::Ownership, e);
+                }
+                p.mode & 0o7777
+            }
+            None if kind == EntryKind::Directory => 0o755,
+            None => 0o644,
+        };
+        if readonly {
+            mode &= !0o222;
+        }
+        if let Err(e) = file.set_permissions(std::fs::Permissions::from_mode(mode)) {
+            issue(issues, AttributeKind::Mode, e);
+        }
     }
 }
 
@@ -637,6 +1025,10 @@ fn system_time(m: Mtime) -> Option<std::time::SystemTime> {
 }
 
 /// Set the modification time through a handle (files and directories).
+/// Windows only, and unused while Windows restoration is refused: kept for
+/// a handle-relative Windows restore (plan C6 open item).
+#[cfg(windows)]
+#[allow(dead_code)]
 fn set_mtime(path: &Path, m: Mtime) -> Result<(), String> {
     let t = system_time(m).ok_or("the time is out of this platform's range")?;
     #[cfg(unix)]
@@ -655,59 +1047,14 @@ fn set_mtime(path: &Path, m: Mtime) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// POSIX (plan O6): the time first, then the owner (which clears setuid and
-/// setgid), then the mode. The Windows read-only bit clears the write bits;
-/// hidden and system have no POSIX equivalent and are reported. The
-/// Windows archive bit is a backup marker with no meaning here and is
-/// ignored.
-#[cfg(unix)]
-fn apply_os_attributes(
-    path: &Path,
-    _kind: EntryKind,
-    a: &Attributes,
-    issues: &mut Vec<AttributeIssue>,
-) {
-    use std::os::unix::fs::PermissionsExt;
-    if let Some(m) = a.mtime {
-        if let Err(e) = set_mtime(path, m) {
-            issue(issues, AttributeKind::Mtime, e);
-        }
-    }
-    let readonly = a.windows.is_some_and(|w| w & WINDOWS_READONLY != 0);
-    if let Some(w) = a.windows {
-        if w & (WINDOWS_HIDDEN | WINDOWS_SYSTEM) != 0 {
-            issue(issues, AttributeKind::HiddenOrSystem, "no POSIX equivalent");
-        }
-    }
-    let mode = match a.posix {
-        Some(p) => {
-            if let Err(e) = std::os::unix::fs::chown(path, Some(p.uid), Some(p.gid)) {
-                issue(issues, AttributeKind::Ownership, e);
-            }
-            Some(p.mode & 0o7777)
-        }
-        None => std::fs::metadata(path)
-            .ok()
-            .map(|m| m.permissions().mode() & 0o7777),
-    };
-    if let Some(mut mode) = mode {
-        if readonly {
-            mode &= !0o222;
-        }
-        if a.posix.is_some() || readonly {
-            if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) {
-                issue(issues, AttributeKind::Mode, e);
-            }
-        }
-    }
-}
-
 /// Windows (plan O6): the time, then the read-only bit (from the Windows
 /// bits, or from POSIX write bits when the entry was authored on POSIX).
 /// Hidden and system need `SetFileAttributesW`, which `mochi-core` does
 /// not call (no `unsafe`, T21's decision), so they are reported; so are a
-/// POSIX owner and the POSIX bits Windows cannot hold.
+/// POSIX owner and the POSIX bits Windows cannot hold. Unused while Windows
+/// restoration is refused (see [`OsRestoreDir`]); kept for its successor.
 #[cfg(windows)]
+#[allow(dead_code)]
 fn apply_os_attributes(
     path: &Path,
     kind: EntryKind,

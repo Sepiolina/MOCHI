@@ -22,6 +22,7 @@ use crate::catalog::{Catalog, FileVersion};
 use crate::error::{ErrorCode, MochiError, Result};
 use crate::manifest::{Attributes, Manifest, ManifestKind};
 use crate::object::{ObjectId, ObjectRecord};
+use crate::retention::RetentionState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthoritativeState {
@@ -34,6 +35,9 @@ pub struct AuthoritativeState {
     /// image until C6, checklist Q6). Comparing `Some` with `None` is a
     /// difference.
     pub attributes: Option<BTreeMap<FileVersionId, Attributes>>,
+    /// `None`: this representation carries no retention state (a catalog
+    /// image; spec Annex B D18 keeps retention in manifests only).
+    pub retention: Option<RetentionState>,
 }
 
 fn invalid(msg: impl Into<String>) -> MochiError {
@@ -103,6 +107,7 @@ impl AuthoritativeState {
             versions,
             chunks,
             attributes: Some(attributes),
+            retention: Some(m.retention.clone()),
         })
     }
 
@@ -145,7 +150,21 @@ impl AuthoritativeState {
             versions,
             chunks,
             attributes: None,
+            retention: None,
         })
+    }
+
+    pub fn with_retention(mut self, r: RetentionState) -> Self {
+        self.retention = Some(r);
+        self
+    }
+
+    /// Without the state only manifests carry (attributes and retention),
+    /// for comparison with a catalog image.
+    pub fn without_manifest_only_state(mut self) -> Self {
+        self.attributes = None;
+        self.retention = None;
+        self
     }
 
     pub fn with_attributes(mut self, a: BTreeMap<FileVersionId, Attributes>) -> Self {
@@ -224,6 +243,29 @@ impl AuthoritativeState {
                 &mut out,
                 max,
             ),
+        }
+        match (&self.retention, &other.retention) {
+            (None, None) => {}
+            (Some(_), None) | (None, Some(_)) => {
+                push("retention: one side carries none".to_string(), &mut out)
+            }
+            (Some(a), Some(b)) => {
+                if a.expired != b.expired {
+                    push(
+                        format!("expired snapshots {:?} vs {:?}", a.expired, b.expired),
+                        &mut out,
+                    );
+                }
+                diff_maps(
+                    "hold",
+                    &a.holds,
+                    &b.holds,
+                    |l| String::from_utf8_lossy(l).into_owned(),
+                    |x, y| format!("snapshot {x} vs {y}"),
+                    &mut out,
+                    max,
+                );
+            }
         }
         out
     }
@@ -407,7 +449,8 @@ mod tests {
             let attrs = from_snap.attributes.clone().unwrap();
             let from_cat = AuthoritativeState::from_catalog(&b.cat, seq)
                 .unwrap()
-                .with_attributes(attrs);
+                .with_attributes(attrs)
+                .with_retention(Default::default());
             assert_eq!(from_snap, from_cat, "commit {seq}");
             assert!(from_snap.differences(&from_cat, 8).is_empty());
         }
@@ -498,6 +541,7 @@ mod tests {
             versions: BTreeMap::new(),
             chunks: BTreeMap::new(),
             attributes: None,
+            retention: None,
         };
         assert_eq!(base.differences(&empty, 2).len(), 2);
         assert!(base.differences(&empty, 100).len() > 2);

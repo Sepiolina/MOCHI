@@ -592,6 +592,7 @@ use mochi_core::manifest::{
     PosixAttributes, WINDOWS_ARCHIVE, WINDOWS_READONLY,
 };
 use mochi_core::object::{ArchiveId, ObjectId, ObjectRecord};
+use mochi_core::retention::RetentionOp;
 use mochi_format::cbor::{self as cbor_codec, Value};
 use mochi_format::codec::{Encoding, Protection};
 use mochi_format::digest::{
@@ -722,6 +723,8 @@ fn c4_root() -> Manifest {
         ],
         entries: vec![],
         required_features: vec![],
+        retention_ops: Vec::new(),
+        retention: Default::default(),
     }
 }
 
@@ -753,6 +756,8 @@ fn c4_child(parent_delta_hash: StoredObjectHash) -> Manifest {
         ],
         entries: vec![],
         required_features: vec![],
+        retention_ops: Vec::new(),
+        retention: Default::default(),
     }
 }
 
@@ -774,6 +779,8 @@ fn c4_snapshot() -> Manifest {
             (c4_path("docs/renamed.bin"), C4_FILE),
         ],
         required_features: vec![],
+        retention_ops: Vec::new(),
+        retention: Default::default(),
     }
 }
 
@@ -834,6 +841,20 @@ pub fn c4_manifest_vectors() -> Vec<ManifestVector> {
     let child_bytes = c4_frame(&child);
     let snapshot = c4_snapshot();
     let snapshot_bytes = c4_frame(&snapshot);
+    let mut retention_delta = child.clone();
+    retention_delta.retention_ops = vec![
+        RetentionOp::Hold {
+            label: b"legal".to_vec(),
+            seq: 1,
+        },
+        RetentionOp::Expire { seq: 0 },
+    ];
+    let mut retention_snapshot = snapshot.clone();
+    retention_snapshot.retention.expired.insert(0);
+    retention_snapshot
+        .retention
+        .holds
+        .insert(b"legal".to_vec(), 1);
 
     let mut v = vec![
         ManifestVector {
@@ -854,6 +875,18 @@ pub fn c4_manifest_vectors() -> Vec<ManifestVector> {
             bytes: snapshot_bytes,
             expect: ManifestExpect::Valid,
         },
+        ManifestVector {
+            name: "valid-manifest-retention-delta",
+            description: "schema 2: delta(1) also holding snapshot 1 and expiring snapshot 0",
+            bytes: c4_frame(&retention_delta),
+            expect: ManifestExpect::Valid,
+        },
+        ManifestVector {
+            name: "valid-manifest-retention-snapshot",
+            description: "schema 2: S(1) with snapshot 0 expired and hold \"legal\" on 1",
+            bytes: c4_frame(&retention_snapshot),
+            expect: ManifestExpect::Valid,
+        },
     ];
     let reject = |name, description, bytes, code| ManifestVector {
         name,
@@ -861,6 +894,116 @@ pub fn c4_manifest_vectors() -> Vec<ManifestVector> {
         bytes,
         expect: ManifestExpect::Rejected(code),
     };
+
+    // ---- retention (schema 2, C9)
+    let ops = |r: &mut Vec<(u64, Value)>, ops: Vec<Value>| *c4_field(r, 11) = Value::Array(ops);
+    let u = |n: u64| Value::Uint(n);
+    let b = |x: &[u8]| Value::Bytes(x.to_vec());
+    v.push(reject(
+        "reject-manifest-retention-schema-2-empty",
+        "schema 2 with no retention data (schema 2 is used exactly when there is some)",
+        c4_edit(&child, |r| {
+            *c4_field(r, 0) = u(2);
+            r.push((11, Value::Array(vec![])));
+        }),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-retention-schema-2-missing-key",
+        "schema 2 without key 11",
+        c4_edit(&child, |r| *c4_field(r, 0) = u(2)),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-retention-expire-self",
+        "delta(1) expires snapshot 1: only earlier snapshots can expire",
+        c4_edit(&retention_delta, |r| {
+            ops(r, vec![Value::Array(vec![u(0), u(1)])])
+        }),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-retention-hold-future",
+        "delta(1) holds snapshot 2",
+        c4_edit(&retention_delta, |r| {
+            ops(r, vec![Value::Array(vec![u(1), b(b"legal"), u(2)])])
+        }),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-retention-empty-label",
+        "a hold with an empty label",
+        c4_edit(&retention_delta, |r| {
+            ops(r, vec![Value::Array(vec![u(1), b(b""), u(1)])])
+        }),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-retention-unknown-op",
+        "retention operation kind 3",
+        c4_edit(&retention_delta, |r| {
+            ops(r, vec![Value::Array(vec![u(3), u(0)])])
+        }),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-retention-state-in-delta",
+        "a delta whose key 11 is a retention state, not operations",
+        c4_edit(&retention_delta, |r| {
+            *c4_field(r, 11) = Value::Map(vec![
+                (0, Value::Array(vec![u(0)])),
+                (1, Value::Array(vec![])),
+            ])
+        }),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-retention-ops-in-snapshot",
+        "a snapshot whose key 11 is operations, not a state",
+        c4_edit(&retention_snapshot, |r| {
+            ops(r, vec![Value::Array(vec![u(0), u(0)])])
+        }),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-retention-expired-duplicate",
+        "S(1) lists expired snapshot 0 twice",
+        c4_edit(&retention_snapshot, |r| {
+            *c4_field(r, 11) = Value::Map(vec![
+                (0, Value::Array(vec![u(0), u(0)])),
+                (1, Value::Array(vec![])),
+            ])
+        }),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-retention-holds-unsorted",
+        "S(1) lists holds out of label order",
+        c4_edit(&retention_snapshot, |r| {
+            *c4_field(r, 11) = Value::Map(vec![
+                (0, Value::Array(vec![])),
+                (
+                    1,
+                    Value::Array(vec![
+                        Value::Array(vec![b(b"b"), u(1)]),
+                        Value::Array(vec![b(b"a"), u(1)]),
+                    ]),
+                ),
+            ])
+        }),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-retention-expired-not-earlier",
+        "S(1) with snapshot 1 expired",
+        c4_edit(&retention_snapshot, |r| {
+            *c4_field(r, 11) = Value::Map(vec![
+                (0, Value::Array(vec![u(1)])),
+                (1, Value::Array(vec![])),
+            ])
+        }),
+        "RECORD_INVALID",
+    ));
 
     // ---- closed schema and versions
     v.push(reject(
@@ -889,8 +1032,8 @@ pub fn c4_manifest_vectors() -> Vec<ManifestVector> {
     ));
     v.push(reject(
         "reject-manifest-schema-version",
-        "schema version 2",
-        c4_edit(&root, |r| *c4_field(r, 0) = Value::Uint(2)),
+        "schema version 3 (schema 2 adds retention, C9)",
+        c4_edit(&root, |r| *c4_field(r, 0) = Value::Uint(3)),
         "UNSUPPORTED_FEATURE",
     ));
     v.push(reject(

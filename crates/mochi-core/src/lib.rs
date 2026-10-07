@@ -39,6 +39,7 @@ pub mod read;
 pub mod recovery;
 pub mod report;
 pub mod restore;
+pub mod retention;
 pub mod segment;
 pub mod state;
 pub mod status;

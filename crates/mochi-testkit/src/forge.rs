@@ -166,6 +166,8 @@ pub fn empty_delta(prev: &HistoryEntry, txid: [u8; 16]) -> Manifest {
         ops: Vec::new(),
         entries: Vec::new(),
         required_features: Vec::new(),
+        retention_ops: Vec::new(),
+        retention: Default::default(),
     }
 }
 

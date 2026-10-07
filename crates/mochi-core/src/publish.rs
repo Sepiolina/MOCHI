@@ -135,6 +135,7 @@ use crate::recovery::{
     catalog_from_snapshot, recover_from_manifests, ManifestRecovery, RecoveryScope,
 };
 use crate::report::{Finding, Severity};
+use crate::retention::{RetentionOp, RetentionState};
 use crate::segment::{check_delta_parent_link, walk_segment, SegmentInfo};
 use crate::state::AuthoritativeState;
 use crate::storage::{
@@ -871,6 +872,19 @@ pub fn promised_attributes(
     head: &OpenedHead,
     opts: &ReadOptions,
 ) -> Result<BTreeMap<FileVersionId, Attributes>> {
+    Ok(segment_state(src, head, opts)?.attributes)
+}
+
+/// An opened commit's [`SegmentState`]: promised attributes and retention,
+/// rebuilt from S(*b*) and the segment's deltas, every manifest
+/// hash-verified against its commit before it is decoded. Any missing,
+/// unverified, or invalid manifest is an error; nothing is guessed and no
+/// earlier checkpoint is tried (D10.10).
+pub fn segment_state(
+    src: &dyn ReadStorage,
+    head: &OpenedHead,
+    opts: &ReadOptions,
+) -> Result<SegmentState> {
     let head_entry = HistoryEntry {
         footer_offset: head.location.footer.footer_offset,
         commit_offset: head.location.footer.fields.commit_offset,
@@ -892,11 +906,7 @@ pub fn promised_attributes(
         ManifestKind::Snapshot,
         opts,
     )?;
-    let mut map: BTreeMap<FileVersionId, Attributes> = s_b
-        .file_versions
-        .iter()
-        .map(|v| (v.version.id, v.attributes))
-        .collect();
+    let mut state = SegmentState::from_snapshot(&s_b);
     for pair in entries.windows(2) {
         let (prev, e) = (&pair[0], &pair[1]);
         let delta = read_bound_manifest(
@@ -908,20 +918,9 @@ pub fn promised_attributes(
             opts,
         )?;
         check_delta_parent_link(&delta, &prev.commit)?;
-        for v in &delta.file_versions {
-            if map.insert(v.version.id, v.attributes).is_some() {
-                return Err(MochiError::new(
-                    ErrorCode::RecordInvalid,
-                    format!(
-                        "delta manifest {} introduces a version the base snapshot already \
-                         lists (D10.4)",
-                        delta.commit_seq
-                    ),
-                ));
-            }
-        }
+        state.apply_delta(&delta)?;
     }
-    reachable_attributes(&head.catalog.replay(None)?, map)
+    state.complete(&head.catalog.replay(None)?)
 }
 
 /// D12: a descriptor that cannot be loaded, hash-verified, or decoded, or
@@ -1034,17 +1033,73 @@ enum OpenMode {
 
 /// What [`replay_segment`] produces: the catalog at the head, the segment
 /// it was opened through, and (append only) the reconstructed attributes.
-type Replayed = (
-    Catalog,
-    SegmentInfo,
-    Option<BTreeMap<FileVersionId, Attributes>>,
-    CatalogSource,
-);
+type Replayed = (Catalog, SegmentInfo, Option<SegmentState>, CatalogSource);
+
+/// State the catalog image does not hold and the manifests do: promised
+/// attributes (B.2 checklist question 6) and retention (spec Annex B D18).
+/// Rebuilt the same way for both: the segment base's snapshot manifest
+/// S(*b*), then each delta of the segment in order (D10.4, D10.10).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SegmentState {
+    /// Promised attributes. While replaying, every version S(*b*) and the
+    /// deltas introduce; once complete, exactly the versions the head
+    /// reaches.
+    pub attributes: BTreeMap<FileVersionId, Attributes>,
+    pub retention: RetentionState,
+}
+
+impl SegmentState {
+    fn from_snapshot(s_b: &Manifest) -> Self {
+        SegmentState {
+            attributes: s_b
+                .file_versions
+                .iter()
+                .map(|v| (v.version.id, v.attributes))
+                .collect(),
+            retention: s_b.retention.clone(),
+        }
+    }
+
+    /// Add what delta manifest `delta` changes. Versions are immutable and
+    /// introduced once: a delta's attributes are those of the versions it
+    /// introduces, and a reintroduction is `RECORD_INVALID` (D10.4).
+    /// Retention operations apply in order, atomically.
+    fn apply_delta(&mut self, delta: &Manifest) -> Result<()> {
+        for v in &delta.file_versions {
+            if self.attributes.contains_key(&v.version.id) {
+                return Err(MochiError::new(
+                    ErrorCode::RecordInvalid,
+                    format!(
+                        "delta manifest {} introduces a version the base snapshot already \
+                         lists (D10.4)",
+                        delta.commit_seq
+                    ),
+                ));
+            }
+        }
+        let mut retention = self.retention.clone();
+        retention.apply(&delta.retention_ops, delta.commit_seq)?;
+        for v in &delta.file_versions {
+            self.attributes.insert(v.version.id, v.attributes);
+        }
+        self.retention = retention;
+        Ok(())
+    }
+
+    /// Keep only the attributes of versions `reachable` names, refusing if
+    /// any of them has none (D10.3).
+    fn complete(self, reachable: &Snapshot) -> Result<Self> {
+        Ok(SegmentState {
+            attributes: reachable_attributes(reachable, self.attributes)?,
+            retention: self.retention,
+        })
+    }
+}
 
 struct Opened {
     head: OpenedHead,
     /// `Some` exactly in [`OpenMode::Append`].
-    attributes: Option<BTreeMap<FileVersionId, Attributes>>,
+    state: Option<SegmentState>,
 }
 
 fn open_at(
@@ -1089,7 +1144,7 @@ fn open_at(
         commit: commit.clone(),
         commit_id,
     };
-    let (catalog, segment, attributes, catalog_source) = match commit.metadata {
+    let (catalog, segment, state, catalog_source) = match commit.metadata {
         Metadata::Checkpoint { image, .. } => {
             let (catalog, source) = base_catalog(
                 src,
@@ -1113,7 +1168,7 @@ fn open_at(
                 delta_bytes,
                 base_bytes,
             };
-            let attributes = match mode {
+            let state = match mode {
                 OpenMode::Read => None,
                 OpenMode::Append => {
                     let snapshot = read_bound_manifest(
@@ -1125,19 +1180,18 @@ fn open_at(
                         opts,
                     )
                     .map_err(append_needs_snapshot)?;
-                    let map = snapshot
-                        .file_versions
-                        .iter()
-                        .map(|v| (v.version.id, v.attributes))
-                        .collect();
                     // Same completeness rule as for a delta head (decision
                     // 21, checklist Q24): refuse at open, not at the next
                     // checkpoint.
                     let reachable = catalog.replay(None)?;
-                    Some(reachable_attributes(&reachable, map).map_err(attributes_incomplete)?)
+                    Some(
+                        SegmentState::from_snapshot(&snapshot)
+                            .complete(&reachable)
+                            .map_err(attributes_incomplete)?,
+                    )
                 }
             };
-            (catalog, segment, attributes, source)
+            (catalog, segment, state, source)
         }
         Metadata::Delta { .. } => {
             // A delta head's own delta manifest is in its segment, so the
@@ -1170,7 +1224,7 @@ fn open_at(
             catalog_source,
             segment,
         },
-        attributes,
+        state,
     })
 }
 
@@ -1344,7 +1398,7 @@ fn replay_segment(
 
     // Attributes, append only: S(b) first, before any delta is applied, so
     // a damaged S(b) refuses append without doing the replay work.
-    let mut attributes = match mode {
+    let mut state = match mode {
         OpenMode::Read => None,
         OpenMode::Append => {
             let s_b = read_bound_manifest(
@@ -1356,12 +1410,7 @@ fn replay_segment(
                 opts,
             )
             .map_err(append_needs_snapshot)?;
-            Some(
-                s_b.file_versions
-                    .iter()
-                    .map(|v| (v.version.id, v.attributes))
-                    .collect::<BTreeMap<FileVersionId, Attributes>>(),
-            )
+            Some(SegmentState::from_snapshot(&s_b))
         }
     };
 
@@ -1370,7 +1419,7 @@ fn replay_segment(
         &entries,
         Some(head_manifest),
         &mut applier,
-        attributes.as_mut(),
+        state.as_mut(),
         opts,
     )?;
 
@@ -1380,17 +1429,18 @@ fn replay_segment(
             "replay did not reach the head commit",
         ));
     }
-    let attributes = match attributes {
+    let state = match state {
         None => None,
-        Some(map) => {
-            Some(reachable_attributes(applier.namespace(), map).map_err(attributes_incomplete)?)
-        }
+        Some(st) => Some(
+            st.complete(applier.namespace())
+                .map_err(attributes_incomplete)?,
+        ),
     };
     let catalog = applier.into_catalog();
     if mode == OpenMode::Read {
         catalog.make_query_only()?;
     }
-    Ok((catalog, info, attributes, catalog_source))
+    Ok((catalog, info, state, catalog_source))
 }
 
 /// Apply deltas *b*+1 … *h* (from `entries`, which [`walk_segment`] produced,
@@ -1406,7 +1456,7 @@ fn apply_segment_deltas(
     entries: &[HistoryEntry],
     head_manifest: Option<&Manifest>,
     applier: &mut SegmentApplier,
-    mut attributes: Option<&mut BTreeMap<FileVersionId, Attributes>>,
+    mut state: Option<&mut SegmentState>,
     opts: &ReadOptions,
 ) -> Result<()> {
     let Some(last) = entries.last() else {
@@ -1431,22 +1481,8 @@ fn apply_segment_deltas(
         };
         check_delta_parent_link(delta, &prev.commit)?;
         applier.apply(delta)?;
-        if let Some(map) = attributes.as_deref_mut() {
-            // Versions are immutable and introduced once (the applier has
-            // just refused any reintroduction, D10.4): a delta's attributes
-            // are those of the versions it introduces, nothing else.
-            for v in &delta.file_versions {
-                if map.insert(v.version.id, v.attributes).is_some() {
-                    return Err(MochiError::new(
-                        ErrorCode::RecordInvalid,
-                        format!(
-                            "delta manifest {} introduces a version the base snapshot already \
-                             lists (D10.4)",
-                            delta.commit_seq
-                        ),
-                    ));
-                }
-            }
+        if let Some(st) = state.as_deref_mut() {
+            st.apply_delta(delta)?;
         }
     }
     Ok(())
@@ -1553,6 +1589,8 @@ pub struct BaselineRecovery {
     pub catalog: Catalog,
     /// Promised attributes of every version reachable at the head.
     pub attributes: BTreeMap<FileVersionId, Attributes>,
+    /// Retention state at the head (spec Annex B D18).
+    pub retention: RetentionState,
 }
 
 /// Baseline recovery for the commit whose footer is at `footer_offset`
@@ -1615,20 +1653,9 @@ fn recover_baseline(
         opts,
     )?;
     let catalog = catalog_from_snapshot(&s_b)?;
-    let mut attributes: BTreeMap<FileVersionId, Attributes> = s_b
-        .file_versions
-        .iter()
-        .map(|v| (v.version.id, v.attributes))
-        .collect();
+    let mut state = SegmentState::from_snapshot(&s_b);
     let mut applier = SegmentApplier::new(catalog)?;
-    apply_segment_deltas(
-        src,
-        &entries,
-        None,
-        &mut applier,
-        Some(&mut attributes),
-        opts,
-    )?;
+    apply_segment_deltas(src, &entries, None, &mut applier, Some(&mut state), opts)?;
     if applier.head() != last.commit.seq {
         return Err(MochiError::new(
             ErrorCode::RecordInvalid,
@@ -1637,7 +1664,10 @@ fn recover_baseline(
     }
     // §11.1: snapshot recovery includes promised attributes, so a version
     // with none is not a partial success (same code as checklist Q24).
-    let attributes = reachable_attributes(applier.namespace(), attributes).map_err(|e| {
+    let SegmentState {
+        attributes,
+        retention,
+    } = state.complete(applier.namespace()).map_err(|e| {
         MochiError::new(
             e.code,
             format!(
@@ -1655,6 +1685,7 @@ fn recover_baseline(
         segment,
         catalog,
         attributes,
+        retention,
     })
 }
 
@@ -1962,6 +1993,9 @@ pub struct CommitOutcome {
 pub struct Transaction {
     entries: Vec<TxEntry>,
     time: Option<Mtime>,
+    /// Retention operations (spec Annex B D18), applied after the
+    /// namespace changes, in order.
+    retention: Vec<RetentionOp>,
 }
 
 #[derive(Debug, Clone)]
@@ -2027,8 +2061,35 @@ impl Transaction {
         self
     }
 
+    /// Expire snapshot `seq`: it stops being retained by default (§16.3).
+    /// Only an earlier commit can be expired; a held one stays a root until
+    /// its holds are released.
+    pub fn expire(&mut self, seq: u64) -> &mut Self {
+        self.retention.push(RetentionOp::Expire { seq });
+        self
+    }
+
+    /// Place legal hold `label` (1–255 bytes, unique among active holds) on
+    /// snapshot `seq`, which may be this commit's own. A held snapshot is
+    /// never collected (§16.3).
+    pub fn hold(&mut self, label: &[u8], seq: u64) -> &mut Self {
+        self.retention.push(RetentionOp::Hold {
+            label: label.to_vec(),
+            seq,
+        });
+        self
+    }
+
+    /// Release legal hold `label`.
+    pub fn release(&mut self, label: &[u8]) -> &mut Self {
+        self.retention.push(RetentionOp::Release {
+            label: label.to_vec(),
+        });
+        self
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.is_empty() && self.retention.is_empty()
     }
 }
 
@@ -2064,6 +2125,7 @@ struct Prepared {
     descriptor: ObjectRef,
     catalog: Catalog,
     attributes: BTreeMap<FileVersionId, Attributes>,
+    retention: RetentionState,
     objects: u64,
     dedup: DedupStats,
     /// Chunks this commit stored, for the dedup index once it is published.
@@ -2149,7 +2211,7 @@ pub mod phase {
 type OpenedForAppend = (
     OpenedHead,
     WriterParams,
-    BTreeMap<FileVersionId, Attributes>,
+    SegmentState,
     Option<TailTruncation>,
 );
 
@@ -2167,6 +2229,8 @@ pub struct ArchiveWriter<S: Storage> {
     /// Promised attributes of every version reachable at `head` (the catalog
     /// holds none until C6; snapshot manifests must, D10.3).
     attributes: BTreeMap<FileVersionId, Attributes>,
+    /// Retention state at `head` (spec Annex B D18; manifests only).
+    retention: RetentionState,
     /// Written with the first commit; `None` once a head exists.
     new_descriptor: Option<Descriptor>,
     /// `EveryCommit` unless a test changed it (see [`CheckpointPolicy`]).
@@ -2405,6 +2469,7 @@ impl<S: Storage> ArchiveWriter<S> {
             head: None,
             catalog,
             attributes: BTreeMap::new(),
+            retention: RetentionState::default(),
             // The default profile is not TAR-compatible (spec D4); choosing
             // TAR compatibility at creation arrives with that profile.
             new_descriptor: Some(Descriptor::new(archive_id, false)),
@@ -2603,7 +2668,7 @@ impl<S: Storage> ArchiveWriter<S> {
     ) -> Result<(Self, Option<TailTruncation>)> {
         lock(&mut storage)?;
         match Self::open_locked(&mut storage, &opts, tail) {
-            Ok((head, params, attributes, truncation)) => {
+            Ok((head, params, state, truncation)) => {
                 let mut audit = Vec::new();
                 if let Some(t) = &truncation {
                     audit.push(AuditEvent::TailTruncated(t.clone()));
@@ -2628,7 +2693,8 @@ impl<S: Storage> ArchiveWriter<S> {
                             base_bytes: head.segment.base_bytes,
                         }),
                         catalog: head.catalog,
-                        attributes,
+                        attributes: state.attributes,
+                        retention: state.retention,
                         new_descriptor: None,
                         policy: CheckpointPolicy::Trigger(
                             opts.checkpoint_trigger.unwrap_or_default(),
@@ -2769,12 +2835,12 @@ impl<S: Storage> ArchiveWriter<S> {
                 truncation = Some(t);
             }
         }
-        let Opened { head, attributes } = open_at(storage, location, &opts.read, OpenMode::Append)?;
+        let Opened { head, state } = open_at(storage, location, &opts.read, OpenMode::Append)?;
         // The next snapshot must carry every reachable version's promised
         // attributes, which only snapshot manifests (and the deltas after
         // them) hold until C6 moves them into the catalog. open_at refused
         // already if they could not be reconstructed.
-        let attributes = attributes.ok_or_else(|| {
+        let state = state.ok_or_else(|| {
             MochiError::new(
                 ErrorCode::InvalidArgument,
                 "internal: an append open produced no attributes",
@@ -2803,7 +2869,7 @@ impl<S: Storage> ArchiveWriter<S> {
             }
         }
         params.validate(&opts.read.limits)?;
-        Ok((head, params, attributes, truncation))
+        Ok((head, params, state, truncation))
     }
 
     pub fn archive_id(&self) -> ArchiveId {
@@ -3024,6 +3090,7 @@ impl<S: Storage> ArchiveWriter<S> {
         }
         self.catalog = prepared.catalog;
         self.attributes = prepared.attributes;
+        self.retention = prepared.retention;
         self.new_descriptor = None;
         Ok(CommitOutcome {
             status: CommitStatus::LocalCommitted,
@@ -3045,6 +3112,15 @@ impl<S: Storage> ArchiveWriter<S> {
                 MochiError::new(ErrorCode::LimitExceeded, "commit sequence exhausted")
             })?,
         };
+        // Retention operations are checked before anything is written: an
+        // invalid one is the caller's error, and the archive is untouched.
+        let mut retention = self.retention.clone();
+        retention.apply(&tx.retention, seq).map_err(|e| {
+            MochiError::new(
+                ErrorCode::InvalidArgument,
+                format!("retention: {}", e.message),
+            )
+        })?;
         let mut cat = match self.head {
             None => Catalog::new_working()?,
             Some(_) => self.catalog.duplicate()?,
@@ -3257,6 +3333,8 @@ impl<S: Storage> ArchiveWriter<S> {
             ops,
             entries: Vec::new(),
             required_features: Vec::new(),
+            retention_ops: tx.retention.clone(),
+            retention: Default::default(),
         };
         manifest.canonicalize();
         let delta_manifest = self.append_object(&manifest.to_stored()?)?;
@@ -3283,12 +3361,14 @@ impl<S: Storage> ArchiveWriter<S> {
                 transaction_id,
                 &attributes,
             )?;
+            snapshot.retention = retention.clone();
             // The source of truth for adoption (D10.7): the writer's own
             // state, never re-derived from what is about to be serialized.
             // Attributes are kept only for versions still reachable.
             let reachable = reachable_attributes(&after, attributes.clone())?;
-            let source =
-                AuthoritativeState::from_catalog(&cat, seq)?.with_attributes(reachable.clone());
+            let source = AuthoritativeState::from_catalog(&cat, seq)?
+                .with_attributes(reachable.clone())
+                .with_retention(retention.clone());
             #[cfg(any(test, feature = "test-controls"))]
             if let Some(t) = self.tamper {
                 t.apply_to_snapshot(&mut snapshot)?;
@@ -3437,6 +3517,7 @@ impl<S: Storage> ArchiveWriter<S> {
             dedup,
             new_chunks,
             checkpoint,
+            retention,
         })
     }
 
@@ -3607,7 +3688,7 @@ fn adopt_checkpoint(
     }
     let got = AuthoritativeState::from_catalog(&img, seq).map_err(|e| remap("catalog image", e))?;
     // C6: include attributes once the image stores them (Q6, Q38).
-    let want = source.clone().without_attributes();
+    let want = source.clone().without_manifest_only_state();
     if got != want {
         return Err(mismatch(
             "catalog image",
@@ -3652,7 +3733,7 @@ pub(crate) fn compare_representations(
     image: &Catalog,
     seq: u64,
 ) -> Result<()> {
-    let from_snapshot = AuthoritativeState::from_snapshot(snapshot)?.without_attributes();
+    let from_snapshot = AuthoritativeState::from_snapshot(snapshot)?.without_manifest_only_state();
     let from_image = AuthoritativeState::from_catalog(image, seq)?;
     if from_snapshot != from_image {
         return Err(MochiError::new(
@@ -3768,6 +3849,9 @@ pub enum CheckpointTamper {
     /// XOR the POSIX mode of the first file version (by ID) that has POSIX
     /// attributes, in the serialized snapshot only.
     SnapshotAttributes,
+    /// Drop every hold from the serialized snapshot's retention state, or,
+    /// with none, mark snapshot 0 expired (a commit after 0 only).
+    SnapshotRetention,
     /// Drop the last namespace entry (by path) from the serialized snapshot,
     /// and its version and chunks when nothing else uses them. The result
     /// still passes the manifest's structure checks: the divergence is
@@ -3789,6 +3873,13 @@ impl CheckpointTamper {
                     .find_map(|v| v.attributes.posix.as_mut())
                 {
                     p.mode ^= 0o7;
+                }
+            }
+            CheckpointTamper::SnapshotRetention => {
+                if snapshot.retention.holds.is_empty() {
+                    snapshot.retention.expired.insert(0);
+                } else {
+                    snapshot.retention.holds.clear();
                 }
             }
             CheckpointTamper::SnapshotOmitsEntry => {

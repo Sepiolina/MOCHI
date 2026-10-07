@@ -522,6 +522,8 @@ mod tests {
             ops: vec![],
             entries: vec![],
             required_features: vec![],
+            retention_ops: Vec::new(),
+            retention: Default::default(),
         }
     }
 

@@ -61,7 +61,7 @@ use crate::publish::{
     commit_history, open_head, read_bound_manifest, segment_state, ArchiveWriter,
     CheckpointTrigger, Dedup, PublishDurability, ReadOptions, Transaction, WriterOptions,
 };
-use crate::read::read_version_in;
+use crate::read::read_version;
 use crate::retention::{RetentionOp, RetentionState};
 use crate::segment::check_delta_parent_link;
 use crate::storage::{ReadStorage, Storage, StorageDir};
@@ -530,7 +530,7 @@ where
                     continue;
                 }
                 ctx.check_cancelled()?;
-                read_version_in(
+                read_version(
                     out,
                     &new_head.catalog,
                     &id,

@@ -494,7 +494,7 @@ fn c9_silent_corruption_in_the_copy_is_caught_before_publication() {
         .unwrap()
         .iter()
         .filter(|id| {
-            mochi_core::read::read_version_in(
+            mochi_core::read::read_version(
                 &out,
                 &head.catalog,
                 id,

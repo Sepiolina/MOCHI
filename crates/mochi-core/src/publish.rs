@@ -127,9 +127,12 @@ use crate::error::{ErrorCode, MochiError, Result};
 use crate::image::{decode_image_record, encode_image_record};
 use crate::job::JobContext;
 use crate::manifest::{
-    Attributes, ChunkEntry, FileVersionEntry, Manifest, ManifestKind, Mtime, ParentLink,
+    Attributes, ChunkEntry, FileVersionEntry, Manifest, ManifestKind, Mtime, ParentLink, Provenance,
 };
-use crate::object::{build_object, decode_verified, load_stored, ArchiveId, IdSource, ObjectId};
+use crate::object::{
+    build_object, decode_verified, load_stored, verify_stored, ArchiveId, IdSource, ObjectId,
+    ObjectRecord,
+};
 use crate::quarantine::SidecarMetadata;
 use crate::recovery::{
     catalog_from_snapshot, recover_from_manifests, ManifestRecovery, RecoveryScope,
@@ -1986,6 +1989,8 @@ pub struct CommitOutcome {
     pub committed_len: u64,
     pub objects_written: u64,
     pub dedup: DedupStats,
+    /// Whether this commit is a checkpoint (D10).
+    pub checkpoint: bool,
 }
 
 /// Namespace changes for one commit, applied in order.
@@ -1996,6 +2001,8 @@ pub struct Transaction {
     /// Retention operations (spec Annex B D18), applied after the
     /// namespace changes, in order.
     retention: Vec<RetentionOp>,
+    /// Compaction only: delta(0)'s provenance.
+    provenance: Option<Provenance>,
 }
 
 #[derive(Debug, Clone)]
@@ -2013,6 +2020,13 @@ enum TxEntry {
     Rename {
         from: ArchivePath,
         to: ArchivePath,
+    },
+    /// Compaction (C9): put an existing version, identity preserved, with
+    /// the stored chunks it needs that the archive does not hold yet.
+    Copied {
+        path: ArchivePath,
+        version: FileVersionEntry,
+        chunks: Vec<(ObjectRecord, StoredObject)>,
     },
 }
 
@@ -2052,6 +2066,38 @@ impl Transaction {
     /// Non-recursive: renaming a non-empty directory fails validation.
     pub fn rename(&mut self, from: ArchivePath, to: ArchivePath) -> &mut Self {
         self.entries.push(TxEntry::Rename { from, to });
+        self
+    }
+
+    /// Compaction (C9): put `version` at `path` with its ID, extents, and
+    /// attributes preserved. `chunks` are the stored objects its extents
+    /// need, with their records; any the archive already holds are
+    /// referenced, the rest are appended byte for byte after their stored
+    /// hash is checked. A version the archive already holds is referenced
+    /// and must be identical.
+    pub(crate) fn put_copied(
+        &mut self,
+        path: ArchivePath,
+        version: FileVersionEntry,
+        chunks: Vec<(ObjectRecord, StoredObject)>,
+    ) -> &mut Self {
+        self.entries.push(TxEntry::Copied {
+            path,
+            version,
+            chunks,
+        });
+        self
+    }
+
+    /// Compaction (C9): a retention operation as is.
+    pub(crate) fn push_retention(&mut self, op: RetentionOp) -> &mut Self {
+        self.retention.push(op);
+        self
+    }
+
+    /// Compaction (C9): delta(0)'s provenance.
+    pub(crate) fn set_provenance(&mut self, p: Provenance) -> &mut Self {
+        self.provenance = Some(p);
         self
     }
 
@@ -2512,11 +2558,36 @@ impl<S: Storage> ArchiveWriter<S> {
     pub fn create_in<D: StorageDir<File = S>>(
         dir: &mut D,
         name: &str,
-        mut ids: Box<dyn IdSource>,
+        ids: Box<dyn IdSource>,
         opts: WriterOptions,
         first: Transaction,
         ctx: &JobContext<'_>,
     ) -> Result<(Self, CommitOutcome)> {
+        let (w, mut outcome, durability) =
+            Self::build_in(dir, name, ids, opts, ctx, |w| w.commit(first, ctx))?;
+        if let Some(d) = durability {
+            outcome.durability = d;
+        }
+        Ok((w, outcome))
+    }
+
+    /// [`ArchiveWriter::create_in`] with any number of commits: `build`
+    /// runs against the writer on the temporary file (it may commit several
+    /// times and check what it wrote), and only if it succeeds is the file
+    /// published at `name`, without replacing anything, and the directory
+    /// flushed. Every outcome in `create_in`'s table holds, with "the first
+    /// commit" read as "everything `build` wrote": a crash or any failure
+    /// before publication leaves nothing at `name`. Compaction (C9) builds a
+    /// whole new archive this way. Returns the writer, `build`'s result, and
+    /// `Some` durability when the directory flush was unconfirmed.
+    pub fn build_in<D: StorageDir<File = S>, T>(
+        dir: &mut D,
+        name: &str,
+        mut ids: Box<dyn IdSource>,
+        opts: WriterOptions,
+        ctx: &JobContext<'_>,
+        build: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<(Self, T, Option<PublishDurability>)> {
         check_file_name(name)?;
         let tag = ids.next_id()?;
         let temp = temporary_name(name, &tag);
@@ -2542,14 +2613,22 @@ impl<S: Storage> ArchiveWriter<S> {
         };
         // The new entry is flushed once, after publication (step 4).
         w.needs_directory_sync = false;
-        let mut outcome = match w.commit(first, ctx) {
-            Ok(o) => o,
+        let built = match build(&mut w) {
+            Ok(t) => t,
             Err(e) => {
                 drop(w);
                 let _ = dir.remove_if_unlocked(&temp);
                 return Err(nothing_created(e));
             }
         };
+        if w.head.is_none() {
+            drop(w);
+            let _ = dir.remove_if_unlocked(&temp);
+            return Err(MochiError::new(
+                ErrorCode::InvalidArgument,
+                format!("nothing was committed, so nothing was created at {name:?}"),
+            ));
+        }
 
         ctx.report(phase::PUBLISH, 0, None);
         if let Err(e) = dir.publish_archive(&mut w.storage, &temp, name) {
@@ -2575,10 +2654,10 @@ impl<S: Storage> ArchiveWriter<S> {
         }
 
         ctx.report(phase::DIRECTORY, 0, None);
-        match dir.sync_directory() {
-            Ok(DirectoryDurability::Confirmed) => {}
+        let durability = match dir.sync_directory() {
+            Ok(DirectoryDurability::Confirmed) => None,
             Ok(DirectoryDurability::Unconfirmed(why)) => {
-                outcome.durability = PublishDurability::DirectoryUnconfirmed(why);
+                Some(PublishDurability::DirectoryUnconfirmed(why))
             }
             Err(e) => {
                 let msg = format!(
@@ -2588,8 +2667,19 @@ impl<S: Storage> ArchiveWriter<S> {
                 w.poison(msg.clone());
                 return Err(MochiError::new(ErrorCode::CommitUnconfirmed, msg));
             }
-        }
-        Ok((w, outcome))
+        };
+        Ok((w, built, durability))
+    }
+
+    /// The storage this writer holds (and locks). Read access only.
+    pub fn storage(&self) -> &S {
+        &self.storage
+    }
+
+    /// The writer parameters recorded at creation: chunk size and zstd
+    /// level, as [`WriterOptions`] takes them.
+    pub fn recorded_parameters(&self) -> (u64, i32) {
+        (self.params.chunk_size, self.params.zstd_level)
     }
 
     /// Open an existing archive for appending (§12.2 steps 1–2).
@@ -3101,6 +3191,7 @@ impl<S: Storage> ArchiveWriter<S> {
             committed_len,
             objects_written: prepared.objects,
             dedup: prepared.dedup,
+            checkpoint: prepared.checkpoint,
         })
     }
 
@@ -3114,6 +3205,12 @@ impl<S: Storage> ArchiveWriter<S> {
         };
         // Retention operations are checked before anything is written: an
         // invalid one is the caller's error, and the archive is untouched.
+        if tx.provenance.is_some() && seq != 0 {
+            return Err(MochiError::new(
+                ErrorCode::InvalidArgument,
+                "provenance belongs to a new archive's first commit",
+            ));
+        }
         let mut retention = self.retention.clone();
         retention.apply(&tx.retention, seq).map_err(|e| {
             MochiError::new(
@@ -3278,6 +3375,53 @@ impl<S: Storage> ArchiveWriter<S> {
                     });
                 }
                 TxEntry::Delete(path) => ops.push(NamespaceOp::Delete { path: path.clone() }),
+                TxEntry::Copied {
+                    path,
+                    version: entry,
+                    chunks: stored,
+                } => {
+                    let id = entry.version.id;
+                    match cat.file_version(&id)? {
+                        Some((v, ex)) => {
+                            if v != entry.version || ex != entry.extents {
+                                return Err(MochiError::new(
+                                    ErrorCode::InvalidArgument,
+                                    format!("copied version {id:?} differs from the one held"),
+                                ));
+                            }
+                        }
+                        None => {
+                            for (record, bytes) in stored {
+                                if cat.object(&record.id)?.is_some() {
+                                    continue;
+                                }
+                                verify_stored(record, bytes)?;
+                                let offset = self.storage.append(bytes.as_bytes())?;
+                                cat.insert_object(record, Some(offset))?;
+                                chunks.push(ChunkEntry {
+                                    record: record.clone(),
+                                    location: Some(offset),
+                                });
+                                objects += 1;
+                                ctx.check_cancelled()?;
+                            }
+                            cat.insert_file_version(&entry.version, &entry.extents)?;
+                            versions.push(entry.clone());
+                        }
+                    }
+                    if let Some(a) = attributes.insert(id, entry.attributes) {
+                        if a != entry.attributes {
+                            return Err(MochiError::new(
+                                ErrorCode::InvalidArgument,
+                                format!("copied version {id:?} has other promised attributes"),
+                            ));
+                        }
+                    }
+                    ops.push(NamespaceOp::Put {
+                        path: path.clone(),
+                        version: id,
+                    });
+                }
                 TxEntry::Rename { from, to } => {
                     let version = before.get(from).map(|e| e.version).ok_or_else(|| {
                         MochiError::new(
@@ -3335,6 +3479,7 @@ impl<S: Storage> ArchiveWriter<S> {
             required_features: Vec::new(),
             retention_ops: tx.retention.clone(),
             retention: Default::default(),
+            provenance: tx.provenance.clone(),
         };
         manifest.canonicalize();
         let delta_manifest = self.append_object(&manifest.to_stored()?)?;

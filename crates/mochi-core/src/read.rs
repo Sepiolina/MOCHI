@@ -27,7 +27,7 @@ use std::io::Write;
 use mochi_format::digest::{FileContentHash, FileContentHasher};
 
 use crate::catalog::extent::{validate_extents, ExtentSource};
-use crate::catalog::namespace::EntryKind;
+use crate::catalog::namespace::{EntryKind, FileVersionId};
 use crate::catalog::path::{ArchivePath, SEPARATOR};
 use crate::catalog::Catalog;
 use crate::error::{ErrorCode, MochiError, Result};
@@ -151,9 +151,39 @@ pub fn read_file_in(
             ),
         ));
     }
+    read_version_in(src, cat, &entry.version, out, opts, ctx).map_err(|e| {
+        MochiError::new(
+            e.code,
+            format!(
+                "{:?}: {}",
+                String::from_utf8_lossy(path.as_stored()),
+                e.message
+            ),
+        )
+    })
+}
+
+/// Stream file version `id` from `cat` to `out`, verified exactly as
+/// [`read_file_in`] verifies a file: for versions that no path at the
+/// catalog's head names (a historical snapshot's, or every version when
+/// checking a whole archive). A directory version is `INVALID_ARGUMENT`.
+pub fn read_version_in(
+    src: &dyn ReadStorage,
+    cat: &Catalog,
+    id: &FileVersionId,
+    out: &mut dyn Write,
+    opts: &ReadOptions,
+    ctx: &JobContext<'_>,
+) -> Result<FileRead> {
     let (version, extents) = cat
-        .file_version(&entry.version)?
+        .file_version(id)?
         .ok_or_else(|| missing("snapshot names a missing file version"))?;
+    if version.kind == EntryKind::Directory {
+        return Err(MochiError::new(
+            ErrorCode::InvalidArgument,
+            "a directory version has no content to read",
+        ));
+    }
     let expected = version
         .content_hash
         .ok_or_else(|| missing("a file version has no content hash"))?;
@@ -237,8 +267,7 @@ pub fn read_file_in(
         return Err(MochiError::new(
             ErrorCode::ContentIntegrityFailed,
             format!(
-                "{:?}: the reassembled file does not match its file-content hash",
-                String::from_utf8_lossy(path.as_stored())
+                "file version {id:?}: the reassembled file does not match its file-content hash"
             ),
         ));
     }

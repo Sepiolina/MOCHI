@@ -32,7 +32,7 @@ use std::collections::BTreeSet;
 use mochi_format::cbor::{self, CborLimits, Fields, Value};
 use mochi_format::codec::{Encoding, Protection};
 use mochi_format::digest::{
-    stored_object_hash, ChunkContentHash, FileContentHash, StoredObjectHash,
+    stored_object_hash, ChunkContentHash, CommitId, FileContentHash, StoredObjectHash,
 };
 use mochi_format::envelope::{check_required_features, RecordIdentity};
 use mochi_format::frame::{encode_skippable_frame_within, walk_frame, FrameDetail};
@@ -149,6 +149,46 @@ pub struct Manifest {
     pub retention_ops: Vec<RetentionOp>,
     /// Snapshot only (schema 2, key 11): the complete retention state.
     pub retention: RetentionState,
+    /// Delta(0) of a compacted archive only (schema 2, key 12).
+    pub provenance: Option<Provenance>,
+}
+
+/// Where a compacted archive came from (spec Annex B D18; plan C9). Carried
+/// by the new archive's delta(0), the only place it can be: it is fixed when
+/// the archive is created, like the descriptor, and the descriptor holds
+/// identity only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Provenance {
+    pub source_archive_id: ArchiveId,
+    /// For new commit *i*, at index *i*: the source commit whose snapshot it
+    /// reproduces, as (sequence, commit ID). Strictly increasing by
+    /// sequence; the last is the source head.
+    pub commits: Vec<(u64, CommitId)>,
+    /// Source snapshots left out because no retained root protected them,
+    /// strictly increasing, each before the source head.
+    pub collected: Vec<u64>,
+}
+
+impl Provenance {
+    fn check(&self) -> Result<()> {
+        let Some((head, _)) = self.commits.last() else {
+            return Err(schema("provenance names no source commit"));
+        };
+        if !self.commits.windows(2).all(|w| w[0].0 < w[1].0) {
+            return Err(schema("provenance commits are not strictly increasing"));
+        }
+        if !self.collected.windows(2).all(|w| w[0] < w[1]) {
+            return Err(schema("collected snapshots are not strictly increasing"));
+        }
+        for c in &self.collected {
+            if c >= head || self.commits.iter().any(|(s, _)| s == c) {
+                return Err(schema(format!(
+                    "collected snapshot {c} is the source head, after it, or also kept"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn schema(msg: impl Into<String>) -> MochiError {
@@ -188,9 +228,9 @@ impl Manifest {
         Ok(self.to_value_unchecked())
     }
 
-    /// 2 when the manifest carries retention data, else 1.
+    /// 2 when the manifest carries retention data or provenance, else 1.
     pub fn schema_version(&self) -> u64 {
-        if self.retention_ops.is_empty() && self.retention.is_empty() {
+        if self.retention_ops.is_empty() && self.retention.is_empty() && self.provenance.is_none() {
             SCHEMA_VERSION
         } else {
             RETENTION_SCHEMA_VERSION
@@ -261,6 +301,9 @@ impl Manifest {
                     ManifestKind::Snapshot => retention_state_value(&self.retention),
                 },
             ));
+            if let Some(p) = &self.provenance {
+                fields.push((12, provenance_value(p)));
+            }
         }
         Value::Map(fields)
     }
@@ -399,6 +442,12 @@ impl Manifest {
                 }
             }
         }
+        if let Some(p) = &self.provenance {
+            if self.kind != ManifestKind::Delta || self.commit_seq != 0 {
+                return Err(schema("only delta(0) carries provenance"));
+            }
+            p.check()?;
+        }
         // Retention (schema 2): ops belong to deltas, state to snapshots.
         match self.kind {
             ManifestKind::Delta => {
@@ -515,6 +564,54 @@ fn retention_state_value(r: &RetentionState) -> Value {
             ),
         ),
     ])
+}
+
+fn provenance_value(p: &Provenance) -> Value {
+    Value::Map(vec![
+        (0, b32(p.source_archive_id.as_bytes())),
+        (
+            1,
+            Value::Array(
+                p.commits
+                    .iter()
+                    .map(|(s, id)| Value::Array(vec![Value::Uint(*s), b32(id.as_bytes())]))
+                    .collect(),
+            ),
+        ),
+        (
+            2,
+            Value::Array(p.collected.iter().map(|s| Value::Uint(*s)).collect()),
+        ),
+    ])
+}
+
+fn decode_provenance(v: &Value) -> Result<Provenance> {
+    let mut f = Fields::of(v, "provenance")?;
+    let source_archive_id = ArchiveId::from_bytes(f.req(0)?.bytes32("source archive id")?);
+    let commits = f
+        .req(1)?
+        .array("source commits")?
+        .iter()
+        .map(|c| {
+            let t = tuple(c, 2, "source commit")?;
+            Ok((
+                t[0].uint("source sequence")?,
+                CommitId::from_bytes(t[1].bytes32("source commit id")?),
+            ))
+        })
+        .collect::<Result<_>>()?;
+    let collected = f
+        .req(2)?
+        .array("collected snapshots")?
+        .iter()
+        .map(|c| c.uint("collected sequence").map_err(MochiError::from))
+        .collect::<Result<_>>()?;
+    f.finish()?;
+    Ok(Provenance {
+        source_archive_id,
+        commits,
+        collected,
+    })
 }
 
 fn decode_retention_op(v: &Value) -> Result<RetentionOp> {
@@ -924,6 +1021,7 @@ impl Manifest {
             .map_err(|_| schema("transaction id: expected exactly 16 bytes"))?;
         let mut retention_ops = Vec::new();
         let mut retention = RetentionState::default();
+        let mut provenance = None;
         if version == RETENTION_SCHEMA_VERSION {
             let v = f.req(11)?;
             match kind {
@@ -936,6 +1034,7 @@ impl Manifest {
                 }
                 ManifestKind::Snapshot => retention = decode_retention_state(v)?,
             }
+            provenance = f.opt(12).map(decode_provenance).transpose()?;
         }
         f.finish()?;
         let m = Manifest {
@@ -951,11 +1050,12 @@ impl Manifest {
             required_features,
             retention_ops,
             retention,
+            provenance,
         };
         if m.schema_version() != version {
             return Err(schema(
-                "schema 2 without retention data: a manifest uses schema 2 exactly when it \
-                 carries retention data",
+                "schema 2 without retention data or provenance: a manifest uses schema 2 \
+                 exactly when it carries either",
             ));
         }
         m.check_structure(limits)?;
@@ -1066,6 +1166,7 @@ impl Manifest {
             required_features: Vec::new(),
             retention_ops: Vec::new(),
             retention: Default::default(),
+            provenance: None,
         };
         m.canonicalize();
         m.check_structure(&Limits::WRITER_DEFAULT)?;

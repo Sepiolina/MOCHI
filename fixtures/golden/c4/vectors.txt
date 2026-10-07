@@ -5,6 +5,7 @@ valid-manifest-root-delta valid 29d41d20c6e3cd3540d5087f8bbfbd2c2898ac99db69b5d5
 valid-manifest-child-delta valid cbb1a56efce7fbc69f1b8839dc0851dd4172812aa7282a190bbad6dcf78d5b1e
 valid-manifest-snapshot valid 1fd2700bee81a5e0afa3103567f7e82ff876118971eeffa1a3ec6caeae5de0fb
 valid-manifest-retention-delta valid 31e4535cecfdb9f8bf2def2e9ddf2b59a1d3c26f0d032db5045d464c05bea951
+valid-manifest-provenance-root-delta valid 0074d72dd0901dac410bfb85cb186378f5d4ceeafbf74571c591f17f2c5ba001
 valid-manifest-retention-snapshot valid 01938c964461afdf06d7552b2737c8c2b0bdc0737cdc914c3942cdf395a1ea2b
 reject-manifest-retention-schema-2-empty rejects RECORD_INVALID
 reject-manifest-retention-schema-2-missing-key rejects RECORD_INVALID
@@ -17,6 +18,11 @@ reject-manifest-retention-ops-in-snapshot rejects RECORD_INVALID
 reject-manifest-retention-expired-duplicate rejects RECORD_INVALID
 reject-manifest-retention-holds-unsorted rejects RECORD_INVALID
 reject-manifest-retention-expired-not-earlier rejects RECORD_INVALID
+reject-manifest-provenance-not-root rejects RECORD_INVALID
+reject-manifest-provenance-empty rejects RECORD_INVALID
+reject-manifest-provenance-unsorted rejects RECORD_INVALID
+reject-manifest-provenance-collected-kept rejects RECORD_INVALID
+reject-manifest-provenance-collected-head rejects RECORD_INVALID
 reject-manifest-unknown-key rejects RECORD_INVALID
 reject-manifest-missing-key rejects RECORD_INVALID
 reject-manifest-missing-transaction-id rejects RECORD_INVALID

@@ -198,12 +198,30 @@ fn assert_manifest_v1_shape(m: &Manifest) {
             if let Some(p) = m.parent {
                 assert_eq!(p.seq + 1, m.commit_seq);
             }
+            // Schema 2 (C9): operations only, provenance only at 0.
+            assert!(m.retention.is_empty(), "accepted a delta with a state");
+            assert!(m.provenance.is_none() || m.commit_seq == 0);
+            for op in &m.retention_ops {
+                if let mochi_core::retention::RetentionOp::Expire { seq } = op {
+                    assert!(*seq < m.commit_seq, "accepted a non-earlier expiry");
+                }
+            }
         }
         ManifestKind::Snapshot => {
             assert!(m.parent.is_none(), "accepted a snapshot with a parent");
             assert!(m.ops.is_empty(), "accepted a snapshot with operations");
+            assert!(m.retention_ops.is_empty(), "accepted snapshot operations");
+            assert!(m.provenance.is_none(), "accepted snapshot provenance");
+            assert!(m.retention.expired.iter().all(|s| *s < m.commit_seq));
+            assert!(m.retention.holds.values().all(|s| *s <= m.commit_seq));
         }
     }
+    let has_data = !m.retention_ops.is_empty() || !m.retention.is_empty() || m.provenance.is_some();
+    assert_eq!(
+        m.schema_version() == 2,
+        has_data,
+        "schema 2 exactly with its data"
+    );
     assert!(
         m.required_features.is_empty(),
         "accepted an unknown feature"
@@ -212,7 +230,7 @@ fn assert_manifest_v1_shape(m: &Manifest) {
 
 /// Recovery manifests (C4, spec §11), both as a bare payload and as a stored
 /// frame. An accepted manifest re-encodes to exactly its input and has a
-/// schema-1 shape.
+/// valid schema-1 or schema-2 shape.
 pub fn exercise_manifest(data: &[u8]) {
     let cbor_limits = CborLimits {
         max_depth: 32,

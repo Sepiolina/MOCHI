@@ -456,7 +456,7 @@ fn c9_silent_corruption_in_the_copy_is_caught_before_publication() {
     };
     let source_writer = lock(&src, 2);
     let mut dir = SimDir::new();
-    dir.add_next_file_fault(fault.clone());
+    dir.add_next_file_fault(fault);
     let e = compact(
         &source_writer,
         &mut dir,

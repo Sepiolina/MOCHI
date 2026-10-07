@@ -316,6 +316,24 @@ pub fn restore<D: RestoreDir>(
     src: &dyn crate::storage::ReadStorage,
     head: &OpenedHead,
     under: Option<&ArchivePath>,
+    root: D,
+    options: &RestoreOptions,
+    opts: &ReadOptions,
+    ctx: &JobContext<'_>,
+) -> Result<RestoreReport> {
+    let selection: Vec<ArchivePath> = under.into_iter().cloned().collect();
+    restore_selected(src, head, &selection, root, options, opts, ctx)
+}
+
+/// [`restore`] of several subtrees in one job: every entry at or under any
+/// path in `selection`, with the directories above each, each restored
+/// once. An empty `selection` restores the whole commit. Every selected
+/// path must exist in the commit (`INVALID_ARGUMENT` otherwise, before
+/// anything is written).
+pub fn restore_selected<D: RestoreDir>(
+    src: &dyn crate::storage::ReadStorage,
+    head: &OpenedHead,
+    selection: &[ArchivePath],
     mut root: D,
     options: &RestoreOptions,
     opts: &ReadOptions,
@@ -323,7 +341,7 @@ pub fn restore<D: RestoreDir>(
 ) -> Result<RestoreReport> {
     let cat = &head.catalog;
     let snapshot = cat.replay(None)?;
-    if let Some(u) = under {
+    for u in selection {
         if snapshot.get(u).is_none() {
             return Err(MochiError::new(
                 ErrorCode::InvalidArgument,
@@ -337,9 +355,11 @@ pub fn restore<D: RestoreDir>(
     }
     let selected: Vec<Selected> = snapshot
         .iter()
-        .filter(|(p, _)| match under {
-            None => true,
-            Some(u) => p.is_descendant_of(u) || *p == u || u.is_descendant_of(p),
+        .filter(|(p, _)| {
+            selection.is_empty()
+                || selection
+                    .iter()
+                    .any(|u| p.is_descendant_of(u) || *p == u || u.is_descendant_of(p))
         })
         .map(|(p, e)| (p.clone(), e.kind, e.version))
         .collect();

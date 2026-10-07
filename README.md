@@ -44,8 +44,20 @@ cargo run -p mochi-cli -- --help
 
 Phases C1 (framing), C2 (object model and digests), C3 (catalog and
 namespace), C4 (recovery manifests), and C5 (commit and single-file
-publication) are implemented. The library can create, append to, and open a
-real `.mochi` file; the CLI does not expose that yet (C14).
+publication) are implemented; C6 (read and restore) and C7 (verification)
+are implemented with CI evidence pending. The `mochi` CLI creates, appends
+to, lists, extracts, and verifies real `.mochi` files:
+
+```bash
+mochi create photos.mochi ~/Pictures/2026      # one commit; never replaces a file
+mochi append photos.mochi new.jpg --delete 2026/old.jpg
+mochi list photos.mochi                         # or --snapshot 0 for history
+mochi get photos.mochi -C restored/             # verified before each file is published
+mochi verify photos.mochi --json                # read-only; per-dimension report
+```
+
+Command reference, exit codes, and current concessions: `docs/c14-cli.md`.
+Report format: `docs/report-schema-v1.md`.
 
 - Structural frame walker (spec §8.6): skippable and data frames, the RLE
   one-byte rule, reserved block types and header bit rejected, `Block_Maximum_Size`
@@ -142,12 +154,19 @@ a directory. It never overwrites or merges, reports collisions and
 unsupported names (Windows rules included) instead of renaming, and
 publishes a file only after it verifies. Promised attributes (O6) are
 restored where the platform allows, and every one that is not is reported.
-The CLI does not expose reading yet (C14).
 
-The phase after the batch is **C6: read path and extraction**. D0 (desktop shell) and D2 (create and add) can start. Until later phases land,
-`mochi verify` and friends exit `3` with `NOT_IMPLEMENTED`, and post-1.0 commands
-(`inventory`, `split`, `join`, `mount`) exit `4` with `UNSUPPORTED_FEATURE`, as
-spec §23.2 requires.
+**C7 (verification):** `mochi_core::verify` checks the whole retained history
+at the spec §20.1 levels, read-only, and reports each health dimension
+separately: integrity is `PASS` only when stored bytes were read, freshness is
+`UNKNOWN` without an anchor (a user-supplied expected head or this client's
+last-seen head), and an older copy of an archive is caught as a rollback.
+
+Commands not built yet (`search`, `health`, `repair`, `checkpoint`,
+`compact`, `gc`, `rekey`, `dump-index`, `snapshot retain`) exit `3` with
+`NOT_IMPLEMENTED`, and post-1.0 commands (`inventory`, `split`, `join`,
+`mount`) exit `4` with `UNSUPPORTED_FEATURE`, as spec §23.2 requires. Next:
+C8 (recovery and repair), C9 (checkpoint, compaction, GC), and the desktop
+shell (D0).
 
 ## License
 

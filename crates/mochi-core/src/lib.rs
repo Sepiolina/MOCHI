@@ -32,6 +32,7 @@ pub mod error;
 pub mod exit;
 pub mod gc;
 pub mod image;
+pub mod import;
 pub mod job;
 pub mod manifest;
 pub mod object;
@@ -47,6 +48,7 @@ pub mod state;
 pub mod status;
 pub mod storage;
 pub mod timestamp;
+pub mod verify;
 
 pub use error::{ErrorCode, MochiError, Result};
 

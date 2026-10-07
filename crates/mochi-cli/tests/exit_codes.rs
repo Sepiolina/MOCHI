@@ -1,4 +1,5 @@
-//! Exit-code behaviour of the skeleton (spec §23.2).
+//! Exit-code behaviour of the command surface (spec §23.2). The built
+//! commands' end-to-end behaviour is in `c14_commands.rs`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -34,16 +35,9 @@ fn post_1_0_commands_exit_4_not_3() {
 #[test]
 fn in_scope_but_unbuilt_commands_are_an_operational_error_never_success() {
     for cmd in [
-        &["create", "a.mochi", "dir"][..],
-        &["append", "a.mochi", "f"],
-        &["get", "a.mochi"],
-        &["list", "a.mochi"],
-        &["snapshot", "a.mochi"],
+        &["snapshot", "retain", "a.mochi"][..],
         &["search", "a.mochi", "invoice"],
-        &["verify", "a.mochi", "--level", "stored"],
-        &["fsck", "a.mochi"],
         &["health", "a.mochi"],
-        &["restore-test", "a.mochi"],
         &["repair", "plan", "a.mochi"],
         &["repair", "apply", "plan.json"],
         &["checkpoint", "a.mochi"],
@@ -59,12 +53,19 @@ fn in_scope_but_unbuilt_commands_are_an_operational_error_never_success() {
     }
 }
 
+/// A missing archive is an operational error with the JSON envelope, never
+/// a report that could be read as success.
 #[test]
-fn verify_never_reports_success_before_it_exists() {
-    let (code, out, _) = go(&["verify", "a.mochi", "--json"]);
-    assert_ne!(code, exit::OK);
+fn verify_of_a_missing_archive_is_an_error_not_a_result() {
+    let (code, out, _) = go(&[
+        "verify",
+        "no-such-archive.mochi",
+        "--json",
+        "--no-local-history",
+    ]);
+    assert_eq!(code, exit::ERROR);
     let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
-    assert_eq!(v["error"]["code"], "NOT_IMPLEMENTED");
+    assert_eq!(v["error"]["code"], "IO_ERROR");
 }
 
 #[test]
@@ -108,7 +109,8 @@ fn help_and_version_succeed_and_carry_the_draft_label() {
 
 #[test]
 fn every_1_0_command_from_spec_23_2_is_present() {
-    // Guards against silently dropping a command from the 1.0 scope.
+    // Guards against silently dropping a command from the 1.0 scope. Every
+    // one has help; the unbuilt ones still refuse with NOT_IMPLEMENTED.
     for name in [
         "create",
         "append",
@@ -120,6 +122,20 @@ fn every_1_0_command_from_spec_23_2_is_present() {
         "fsck",
         "health",
         "restore-test",
+        "repair",
+        "checkpoint",
+        "compact",
+        "gc",
+        "rekey",
+        "dump-index",
+    ] {
+        let (code, out, err) = go(&[name, "--help"]);
+        assert_eq!(code, exit::OK, "{name} --help: {err}");
+        assert!(out.contains("Usage"), "{name}: {out}");
+    }
+    for name in [
+        "search",
+        "health",
         "checkpoint",
         "compact",
         "rekey",
@@ -142,6 +158,8 @@ fn integrity_failures_exit_1_everything_else_is_classified() {
             // Spec Annex B.2.2 "New error codes" table.
             ErrorCode::DescriptorInvalid | ErrorCode::RetentionUnresolved => exit::FAILED,
             ErrorCode::ProfileChangeUnsupported => exit::UNSUPPORTED,
+            // C7: verification evidence that the archive is wrong.
+            ErrorCode::ReferenceInvalid | ErrorCode::FreshnessFailed => exit::FAILED,
             // CHECKPOINT_MISMATCH: 3 from a writer; a verify finding exits 1
             // through the report's FAIL dimension, not through this mapping.
             _ => exit::ERROR,

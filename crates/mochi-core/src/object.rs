@@ -77,6 +77,10 @@ impl ArchiveId {
     pub fn generate(ids: &mut dyn IdSource) -> Result<Self> {
         Ok(ArchiveId(ids.next_id()?))
     }
+    /// Lowercase hex of all 32 bytes, as reports carry it.
+    pub fn to_hex(&self) -> String {
+        self.0.iter().map(|b| format!("{b:02x}")).collect()
+    }
 }
 
 impl fmt::Debug for ArchiveId {

@@ -27,7 +27,7 @@ If the spec does not answer a question, **do not invent an answer.** Stop, state
 
 ## Commands
 
-Live today (plan phases C1–C5 complete):
+Live today (plan phases C1–C5 complete; C6, C7, and the first C14 slice implemented, `docs/c14-cli.md`):
 
 ```bash
 cargo fmt --all --check
@@ -50,10 +50,8 @@ Fuzzing (nightly plus `cargo install cargo-fuzz`; targets `frame_walker`, `foote
 cd fuzz && cargo +nightly fuzz run frame_walker corpus/frame_walker ../fixtures/golden/c1 ../fixtures/golden/c2 -- -max_total_time=60
 ```
 
-Not available yet (arrive with the phase noted):
-
 ```bash
-cargo run -p mochi-cli -- verify fixtures/golden/<file>.mochi --json   # verify: C7; whole-archive fixtures: C5+
+cargo run -p mochi-cli -- verify fixtures/golden/c5/<file>.mochi --json --no-local-history
 ```
 
 Desktop (React + TypeScript + Vite, pnpm, Node 24 LTS — plan decision O1; scaffold arrives with D0):

@@ -1,15 +1,15 @@
-//! Report schema **v0** (spec §20.5). Draft: the final schema is ratification
-//! item R7 and replaces this in phase C7 (schema v1).
+//! Report schema **v1** (spec §20.5; plan C7). Still a draft: the final
+//! schema is ratification item R7. v1 adds [`Report::freshness_anchor`]
+//! (spec Annex B.1 D8: "the report names the anchor used") to v0, and the
+//! timestamps it carries are D15 [`crate::timestamp::Timestamp`] strings.
+//! The field reference is `docs/report-schema-v1.md`.
 //!
-//! What v0 does provide is the *shape* and the reporting invariants, so that
-//! nothing built on top of it can start out lying:
+//! The shape carries the reporting invariants, so that nothing built on top
+//! of it can start out lying:
 //!
 //! * a new report starts with every dimension `UNKNOWN` (never `PASS`);
 //! * [`Report::validate`] rejects an overall status that hides a failing
 //!   dimension, or a `PASS` that contradicts skipped/failed evidence.
-//!
-//! Timestamps follow Annex B.2 D15 ([`crate::timestamp::Timestamp`], T28);
-//! the v0 fields still hold them as strings until C7's schema v1.
 //!
 //! # Three results (D15, T26)
 //!
@@ -37,7 +37,21 @@ use serde::{Deserialize, Serialize};
 use crate::error::ErrorCode;
 use crate::status::{Dimension, Status, VerificationLevel};
 
-pub const REPORT_SCHEMA_VERSION: u32 = 0;
+pub const REPORT_SCHEMA_VERSION: u32 = 1;
+
+/// Which freshness anchor a report was judged against (spec Annex B.1 D8).
+/// Serialized as `none`, `user`, or `local-history`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FreshnessAnchorKind {
+    /// No anchor: freshness is `UNKNOWN`.
+    #[default]
+    None,
+    /// An expected head supplied by the user.
+    User,
+    /// The head this client last saw for the archive ID.
+    LocalHistory,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolInfo {
@@ -182,6 +196,10 @@ pub struct Report {
     /// Independently recorded expected head (spec §5.7). Absent means freshness
     /// cannot be `PASS` (Annex B D8 default).
     pub expected_head: Option<String>,
+    /// The anchor `expected_head` came from (D8). `none` exactly when
+    /// `expected_head` is absent.
+    #[serde(default)]
+    pub freshness_anchor: FreshnessAnchorKind,
     pub tool: ToolInfo,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
@@ -250,6 +268,9 @@ pub enum ReportViolation {
     FreshnessRequirementMismatch {
         basis_requires: bool,
     },
+    /// An expected head without a named anchor, or an anchor without an
+    /// expected head (D8: the report names the anchor used).
+    FreshnessAnchorMismatch,
 }
 
 impl fmt::Display for ReportViolation {
@@ -299,6 +320,10 @@ impl fmt::Display for ReportViolation {
                     "not required"
                 }
             ),
+            Self::FreshnessAnchorMismatch => write!(
+                f,
+                "the expected head and the named freshness anchor disagree"
+            ),
         }
     }
 }
@@ -313,6 +338,7 @@ impl Report {
             archive_id: None,
             checked_commit: None,
             expected_head: None,
+            freshness_anchor: FreshnessAnchorKind::None,
             tool: ToolInfo::current(),
             started_at: None,
             completed_at: None,
@@ -395,6 +421,10 @@ impl Report {
             out.push(ReportViolation::FreshnessPassWithoutExpectedHead);
         }
 
+        if self.expected_head.is_some() != (self.freshness_anchor != FreshnessAnchorKind::None) {
+            out.push(ReportViolation::FreshnessAnchorMismatch);
+        }
+
         let evidence = Status::rollup(self.dimensions.values().copied());
         if self.overall_status != evidence {
             out.push(ReportViolation::EvidenceRollupMismatch {
@@ -443,6 +473,7 @@ mod tests {
         }
         r.overall_status = Status::Pass;
         r.expected_head = Some("head".into());
+        r.freshness_anchor = FreshnessAnchorKind::User;
         r
     }
 
@@ -452,7 +483,8 @@ mod tests {
         assert_eq!(r.overall_status, Status::Unknown);
         assert_eq!(r.dimensions.len(), Dimension::ALL.len());
         assert!(r.dimensions.values().all(|s| *s == Status::Unknown));
-        assert_eq!(r.schema_version, 0);
+        assert_eq!(r.schema_version, 1);
+        assert_eq!(r.freshness_anchor, FreshnessAnchorKind::None);
         assert!(r.validate().is_ok());
     }
 
@@ -521,8 +553,29 @@ mod tests {
     fn freshness_pass_requires_an_expected_head() {
         let mut r = all_pass(Report::new(VerificationLevel::Structural));
         r.expected_head = None;
+        r.freshness_anchor = FreshnessAnchorKind::None;
         let v = r.validate().unwrap_err();
         assert!(v.contains(&ReportViolation::FreshnessPassWithoutExpectedHead));
+    }
+
+    /// D8: an expected head always names its anchor, and an anchor always
+    /// comes with the head it supplied.
+    #[test]
+    fn the_anchor_and_the_expected_head_go_together() {
+        let mut r = Report::new(VerificationLevel::Structural);
+        r.expected_head = Some("head".into());
+        assert!(r
+            .validate()
+            .unwrap_err()
+            .contains(&ReportViolation::FreshnessAnchorMismatch));
+        r.expected_head = None;
+        r.freshness_anchor = FreshnessAnchorKind::LocalHistory;
+        assert!(r
+            .validate()
+            .unwrap_err()
+            .contains(&ReportViolation::FreshnessAnchorMismatch));
+        let json = serde_json::to_string(&FreshnessAnchorKind::LocalHistory).unwrap();
+        assert_eq!(json, "\"local-history\"");
     }
 
     /// A required dimension the map does not mention has no evidence: it
@@ -540,7 +593,7 @@ mod tests {
     #[test]
     fn wrong_schema_version_is_rejected() {
         let mut r = Report::new(VerificationLevel::Structural);
-        r.schema_version = 1;
+        r.schema_version = 0;
         assert!(r.validate().is_err());
     }
 

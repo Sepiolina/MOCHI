@@ -137,6 +137,18 @@ pub enum ErrorCode {
     /// file's content was restored. Spec §10.4.1. A report finding; exit 3 if
     /// ever returned as an error. Added in C6.
     AttributeNotRestored,
+    /// Verification: an object reference does not resolve. A catalog object
+    /// without a location, a dependency on an object the catalog does not
+    /// hold, or a location that does not lie inside the committed prefix
+    /// before the head's commit frame as exactly one data frame of the
+    /// recorded length (spec §5.1, §5.2, §20.1 "referential"). Exit 1.
+    /// Added in C7.
+    ReferenceInvalid,
+    /// Verification: the archive's verified history does not contain the
+    /// freshness anchor (a user-supplied expected head, or the head this
+    /// client last saw for the archive ID), so it was rolled back or
+    /// substituted (spec §5.7, Annex B.1 D8). Exit 1. Added in C7.
+    FreshnessFailed,
 }
 
 impl ErrorCode {
@@ -179,6 +191,8 @@ impl ErrorCode {
         ErrorCode::NameCollision,
         ErrorCode::NameUnsupported,
         ErrorCode::AttributeNotRestored,
+        ErrorCode::ReferenceInvalid,
+        ErrorCode::FreshnessFailed,
     ];
 
     /// The stable string form. Independent of serde so it cannot drift silently;
@@ -222,6 +236,8 @@ impl ErrorCode {
             ErrorCode::NameCollision => "NAME_COLLISION",
             ErrorCode::NameUnsupported => "NAME_UNSUPPORTED",
             ErrorCode::AttributeNotRestored => "ATTRIBUTE_NOT_RESTORED",
+            ErrorCode::ReferenceInvalid => "REFERENCE_INVALID",
+            ErrorCode::FreshnessFailed => "FRESHNESS_FAILED",
         }
     }
 }
@@ -347,6 +363,9 @@ mod tests {
         "NAME_COLLISION",
         "NAME_UNSUPPORTED",
         "ATTRIBUTE_NOT_RESTORED",
+        // Appended in C7.
+        "REFERENCE_INVALID",
+        "FRESHNESS_FAILED",
     ];
 
     #[test]

@@ -702,6 +702,22 @@ impl Catalog {
     /// `None` = head). Deterministic: order comes only from the commit chain
     /// and operation sequence, never from row storage order.
     pub fn replay(&self, upto: Option<u64>) -> Result<Snapshot> {
+        self.replay_with(upto, |_, _| Ok(()))
+    }
+
+    /// Replay every commit once, calling `visit` with each commit's
+    /// sequence and the namespace right after it, in order. One pass, so
+    /// visiting every snapshot of a history costs one replay, not one per
+    /// snapshot. Returns the head's namespace.
+    pub fn replay_each(&self, visit: impl FnMut(u64, &Snapshot) -> Result<()>) -> Result<Snapshot> {
+        self.replay_with(None, visit)
+    }
+
+    fn replay_with(
+        &self,
+        upto: Option<u64>,
+        mut visit: impl FnMut(u64, &Snapshot) -> Result<()>,
+    ) -> Result<Snapshot> {
         #[cfg(test)]
         REPLAYS.with(|n| n.set(n.get() + 1));
         let mut stmt = self
@@ -734,6 +750,7 @@ impl Catalog {
                     let e = MochiError::from(f);
                     MochiError::new(e.code, format!("replaying commit {seq}: {}", e.message))
                 })?;
+            visit(to_u64(seq, "commit sequence")?, &snapshot)?;
             prev = Some(seq);
         }
         if let Some(limit) = upto {
@@ -857,6 +874,44 @@ impl Catalog {
         let snapshot = self.replay(None)?;
         snapshot.validate_all().map_err(MochiError::from)
     }
+
+    /// Every file-version ID in the catalog, sorted.
+    pub fn file_version_ids(&self) -> Result<Vec<FileVersionId>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT file_version_id FROM file_versions ORDER BY file_version_id")
+            .map_err(sql)?;
+        let ids = stmt
+            .query_map([], |r| r.get::<_, Vec<u8>>(0))
+            .map_err(sql)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sql)?;
+        ids.into_iter()
+            .map(|b| Ok(FileVersionId::from_bytes(id32(b, "file version ID")?)))
+            .collect()
+    }
+
+    /// Every object ID in the catalog, sorted: GC's universe (C9) and tests
+    /// that check each recorded object independently (T12).
+    pub fn object_ids(&self) -> Result<Vec<ObjectId>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT object_id FROM objects ORDER BY object_id")
+            .map_err(sql)?;
+        let ids = stmt
+            .query_map([], |r| r.get::<_, Vec<u8>>(0))
+            .map_err(sql)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sql)?;
+        ids.into_iter()
+            .map(|b| {
+                let a: [u8; 32] = b
+                    .try_into()
+                    .map_err(|_| invalid("object ID is not 32 bytes"))?;
+                Ok(ObjectId::from_bytes(a))
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -915,29 +970,6 @@ impl Catalog {
     /// Q25); unlike `publish`, it does not write to the source connection.
     pub fn writable_copy_for_tests(&self) -> Result<Self> {
         self.duplicate()
-    }
-
-    /// Every object ID in the catalog, sorted. For tests that check each
-    /// recorded object independently (the T12 oracle's physical-location
-    /// validation, review amendment 4).
-    pub fn object_ids(&self) -> Result<Vec<ObjectId>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT object_id FROM objects ORDER BY object_id")
-            .map_err(sql)?;
-        let ids = stmt
-            .query_map([], |r| r.get::<_, Vec<u8>>(0))
-            .map_err(sql)?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(sql)?;
-        ids.into_iter()
-            .map(|b| {
-                let a: [u8; 32] = b
-                    .try_into()
-                    .map_err(|_| invalid("object ID is not 32 bytes"))?;
-                Ok(ObjectId::from_bytes(a))
-            })
-            .collect()
     }
 }
 

@@ -25,10 +25,12 @@
 
 pub mod catalog;
 pub mod commit;
+pub mod compact;
 pub mod damage;
 pub mod descriptor;
 pub mod error;
 pub mod exit;
+pub mod gc;
 pub mod image;
 pub mod job;
 pub mod manifest;
@@ -39,6 +41,7 @@ pub mod read;
 pub mod recovery;
 pub mod report;
 pub mod restore;
+pub mod retention;
 pub mod segment;
 pub mod state;
 pub mod status;

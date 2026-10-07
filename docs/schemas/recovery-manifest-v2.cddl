@@ -1,0 +1,117 @@
+; MOCHI recovery manifest, schema version 2 (DRAFT; ratification item R3).
+; Decisions: spec Annex B.2 D10, D11, and Annex B D18 (retention, plan C9).
+; Extends recovery-manifest-v1.cddl with key 11, retention. Readers accept
+; schema 1 and schema 2.
+;
+; Schema 2 is used EXACTLY when a manifest carries retention data: a delta
+; with at least one retention operation, or a snapshot whose retention state
+; is not empty. Every other manifest is schema 1, byte for byte as before, so
+; one logical manifest keeps exactly one encoding. A schema-2 manifest
+; without retention data, or a schema-1 manifest with key 11, is refused.
+;
+; Retention semantics (D18):
+;   * Every commit is retained by default. A delta's operations apply in
+;     order, after its namespace operations, atomically, each judged against
+;     the state the previous one left. Readers rebuild the state at a commit
+;     from S(b), key 11, plus every delta's key 11 after b (D10.10).
+;   * expire s: s < this commit's sequence, and s not already expired.
+;   * hold label s: 1 <= label length <= 255; s <= this commit's sequence;
+;     label not already active.
+;   * release label: label active.
+;   * Roots at head h: h, every commit not expired, every held commit.
+;   * The catalog image holds no retention state (like promised
+;     attributes); D10.7 compares it through the snapshot manifest only.
+;
+manifest = delta-manifest / snapshot-manifest
+
+delta-manifest = {
+  0: 1 / 2,                   ; schema version (2 exactly when key 11 is present)
+  1: archive-id,
+  2: seq,
+  3: opt-parent,              ; null exactly when sequence = 0 (checked in code)
+  4: 0,                       ; kind: delta
+  5: [* chunk],               ; chunks new in this commit
+  6: [* file-version],        ; file versions new in this commit
+  7: [* op],                  ; namespace operations, in order
+  8: [],                      ; empty for a delta
+  9: features,                ; required features; unknown entry => refuse
+  10: txid,                   ; transaction ID of commit `2`
+  ? 11: [+ retention-op],     ; schema 2 only (required there), in order
+}
+
+snapshot-manifest = {
+  0: 1 / 2,
+  1: archive-id,
+  2: seq,
+  3: null,                    ; a snapshot is a self-contained baseline
+  4: 1,                       ; kind: snapshot
+  5: [* chunk],               ; every chunk referenced
+  6: [* file-version],        ; every file version referenced
+  7: [],                      ; empty for a snapshot
+  8: [* entry],               ; the complete namespace
+  9: features,
+  10: txid,
+  ? 11: retention-state,      ; schema 2 only (required there; not empty)
+}
+
+opt-parent = parent / null
+parent = { 0: seq, 1: hash32 }   ; parent sequence (= this - 1), parent commit's delta-manifest hash
+
+chunk = {
+  0: hash32,                  ; object ID
+  1: 0,                       ; encoding: one Zstandard frame (plan O21)
+  2: protection,
+  3: uint,                    ; stored length (> 0)
+  4: hash32,                  ; stored-object hash
+  5: uint,                    ; decoded length
+  6: hash32,                  ; chunk content hash
+  7: [* dependency],          ; sorted, no duplicates
+  8: opt-offset,              ; stored offset in a monolithic archive; null = rediscover by scan + stored hash
+}
+protection = 0 / 1            ; 0 none, 1 AEAD
+opt-offset = uint / null
+dependency = [dep-kind, hash32]
+dep-kind = 0 / 1              ; 0 dictionary, 1 key envelope; object ID
+
+file-version = {
+  0: hash32,                  ; file-version ID
+  1: fv-kind,
+  2: uint,                    ; logical length (0 for a directory)
+  3: opt-hash,                ; plain BLAKE3 file-content hash (plan O20); null exactly for a directory
+  4: [* extent],              ; must cover exactly [0, logical length) (§10.3)
+  5: attributes,
+}
+fv-kind = 0 / 1               ; 0 file, 1 directory (2 = symbolic link: reserved until C6)
+opt-hash = hash32 / null
+extent = [uint, uint, opt-chunk, uint]   ; logical offset, length (> 0), chunk ID or null for a hole, chunk offset (0 for a hole)
+opt-chunk = hash32 / null
+
+attributes = {
+  ? 0: [uint, uint, uint],    ; POSIX: permission bits (<= 0o7777), uid, gid
+  ? 1: uint,                  ; Windows attributes, mask 0x27 only
+  ? 2: [int, nanos],          ; mtime
+}
+
+op = put / delete
+put = [0, bstr, hash32]       ; path (stored form, §10.4 / plan O24), file-version ID
+delete = [1, bstr]            ; path
+entry = [bstr, hash32]        ; path, file-version ID
+
+archive-id = bstr .size 32
+txid = bstr .size 16
+hash32 = bstr .size 32
+seq = uint
+features = [* feature]        ; strictly increasing
+feature = uint
+nanos = uint .lt 1000000000
+
+retention-op = expire / hold / release
+expire = [0, seq]             ; seq < this commit's sequence
+hold = [1, label, seq]        ; seq <= this commit's sequence
+release = [2, label]
+label = bstr .size (1..255)
+
+retention-state = {
+  0: [* seq],                 ; expired, strictly increasing, each < this sequence
+  1: [* [label, seq]],        ; active holds, strictly increasing by label (bytewise), seq <= this sequence
+}

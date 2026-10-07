@@ -587,13 +587,16 @@ use mochi_core::catalog::extent::{Extent, ExtentSource};
 use mochi_core::catalog::namespace::{EntryKind, FileVersionId, NamespaceOp};
 use mochi_core::catalog::path::ArchivePath;
 use mochi_core::catalog::FileVersion;
+use mochi_core::manifest::Provenance;
 use mochi_core::manifest::{
     Attributes, ChunkEntry, FileVersionEntry, Manifest, ManifestKind, Mtime, ParentLink,
     PosixAttributes, WINDOWS_ARCHIVE, WINDOWS_READONLY,
 };
 use mochi_core::object::{ArchiveId, ObjectId, ObjectRecord};
+use mochi_core::retention::RetentionOp;
 use mochi_format::cbor::{self as cbor_codec, Value};
 use mochi_format::codec::{Encoding, Protection};
+use mochi_format::digest::CommitId;
 use mochi_format::digest::{
     stored_object_hash, ChunkContentHash, FileContentHash, StoredObjectHash,
 };
@@ -722,6 +725,9 @@ fn c4_root() -> Manifest {
         ],
         entries: vec![],
         required_features: vec![],
+        retention_ops: Vec::new(),
+        retention: Default::default(),
+        provenance: None,
     }
 }
 
@@ -753,6 +759,9 @@ fn c4_child(parent_delta_hash: StoredObjectHash) -> Manifest {
         ],
         entries: vec![],
         required_features: vec![],
+        retention_ops: Vec::new(),
+        retention: Default::default(),
+        provenance: None,
     }
 }
 
@@ -774,6 +783,9 @@ fn c4_snapshot() -> Manifest {
             (c4_path("docs/renamed.bin"), C4_FILE),
         ],
         required_features: vec![],
+        retention_ops: Vec::new(),
+        retention: Default::default(),
+        provenance: None,
     }
 }
 
@@ -834,6 +846,29 @@ pub fn c4_manifest_vectors() -> Vec<ManifestVector> {
     let child_bytes = c4_frame(&child);
     let snapshot = c4_snapshot();
     let snapshot_bytes = c4_frame(&snapshot);
+    let mut retention_delta = child.clone();
+    retention_delta.retention_ops = vec![
+        RetentionOp::Hold {
+            label: b"legal".to_vec(),
+            seq: 1,
+        },
+        RetentionOp::Expire { seq: 0 },
+    ];
+    let mut provenance_root = root.clone();
+    provenance_root.provenance = Some(Provenance {
+        source_archive_id: ArchiveId::from_bytes([0x5A; 32]),
+        commits: vec![
+            (2, CommitId::from_bytes([0xC2; 32])),
+            (5, CommitId::from_bytes([0xC5; 32])),
+        ],
+        collected: vec![0, 1, 3, 4],
+    });
+    let mut retention_snapshot = snapshot.clone();
+    retention_snapshot.retention.expired.insert(0);
+    retention_snapshot
+        .retention
+        .holds
+        .insert(b"legal".to_vec(), 1);
 
     let mut v = vec![
         ManifestVector {
@@ -854,6 +889,24 @@ pub fn c4_manifest_vectors() -> Vec<ManifestVector> {
             bytes: snapshot_bytes,
             expect: ManifestExpect::Valid,
         },
+        ManifestVector {
+            name: "valid-manifest-retention-delta",
+            description: "schema 2: delta(1) also holding snapshot 1 and expiring snapshot 0",
+            bytes: c4_frame(&retention_delta),
+            expect: ManifestExpect::Valid,
+        },
+        ManifestVector {
+            name: "valid-manifest-provenance-root-delta",
+            description: "schema 2: delta(0) of a compacted archive with its provenance",
+            bytes: c4_frame(&provenance_root),
+            expect: ManifestExpect::Valid,
+        },
+        ManifestVector {
+            name: "valid-manifest-retention-snapshot",
+            description: "schema 2: S(1) with snapshot 0 expired and hold \"legal\" on 1",
+            bytes: c4_frame(&retention_snapshot),
+            expect: ManifestExpect::Valid,
+        },
     ];
     let reject = |name, description, bytes, code| ManifestVector {
         name,
@@ -861,6 +914,173 @@ pub fn c4_manifest_vectors() -> Vec<ManifestVector> {
         bytes,
         expect: ManifestExpect::Rejected(code),
     };
+
+    // ---- retention (schema 2, C9)
+    let ops = |r: &mut Vec<(u64, Value)>, ops: Vec<Value>| *c4_field(r, 11) = Value::Array(ops);
+    let u = |n: u64| Value::Uint(n);
+    let b = |x: &[u8]| Value::Bytes(x.to_vec());
+    v.push(reject(
+        "reject-manifest-retention-schema-2-empty",
+        "schema 2 with no retention data (schema 2 is used exactly when there is some)",
+        c4_edit(&child, |r| {
+            *c4_field(r, 0) = u(2);
+            r.push((11, Value::Array(vec![])));
+        }),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-retention-schema-2-missing-key",
+        "schema 2 without key 11",
+        c4_edit(&child, |r| *c4_field(r, 0) = u(2)),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-retention-expire-self",
+        "delta(1) expires snapshot 1: only earlier snapshots can expire",
+        c4_edit(&retention_delta, |r| {
+            ops(r, vec![Value::Array(vec![u(0), u(1)])])
+        }),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-retention-hold-future",
+        "delta(1) holds snapshot 2",
+        c4_edit(&retention_delta, |r| {
+            ops(r, vec![Value::Array(vec![u(1), b(b"legal"), u(2)])])
+        }),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-retention-empty-label",
+        "a hold with an empty label",
+        c4_edit(&retention_delta, |r| {
+            ops(r, vec![Value::Array(vec![u(1), b(b""), u(1)])])
+        }),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-retention-unknown-op",
+        "retention operation kind 3",
+        c4_edit(&retention_delta, |r| {
+            ops(r, vec![Value::Array(vec![u(3), u(0)])])
+        }),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-retention-state-in-delta",
+        "a delta whose key 11 is a retention state, not operations",
+        c4_edit(&retention_delta, |r| {
+            *c4_field(r, 11) = Value::Map(vec![
+                (0, Value::Array(vec![u(0)])),
+                (1, Value::Array(vec![])),
+            ])
+        }),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-retention-ops-in-snapshot",
+        "a snapshot whose key 11 is operations, not a state",
+        c4_edit(&retention_snapshot, |r| {
+            ops(r, vec![Value::Array(vec![u(0), u(0)])])
+        }),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-retention-expired-duplicate",
+        "S(1) lists expired snapshot 0 twice",
+        c4_edit(&retention_snapshot, |r| {
+            *c4_field(r, 11) = Value::Map(vec![
+                (0, Value::Array(vec![u(0), u(0)])),
+                (1, Value::Array(vec![])),
+            ])
+        }),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-retention-holds-unsorted",
+        "S(1) lists holds out of label order",
+        c4_edit(&retention_snapshot, |r| {
+            *c4_field(r, 11) = Value::Map(vec![
+                (0, Value::Array(vec![])),
+                (
+                    1,
+                    Value::Array(vec![
+                        Value::Array(vec![b(b"b"), u(1)]),
+                        Value::Array(vec![b(b"a"), u(1)]),
+                    ]),
+                ),
+            ])
+        }),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-retention-expired-not-earlier",
+        "S(1) with snapshot 1 expired",
+        c4_edit(&retention_snapshot, |r| {
+            *c4_field(r, 11) = Value::Map(vec![
+                (0, Value::Array(vec![u(1)])),
+                (1, Value::Array(vec![])),
+            ])
+        }),
+        "RECORD_INVALID",
+    ));
+
+    // ---- provenance (schema 2, C9)
+    let prov = |r: &mut Vec<(u64, Value)>, commits: Vec<(u64, u8)>, collected: Vec<u64>| {
+        let v = Value::Map(vec![
+            (0, Value::Bytes(vec![0x5A; 32])),
+            (
+                1,
+                Value::Array(
+                    commits
+                        .into_iter()
+                        .map(|(s, b)| Value::Array(vec![u(s), Value::Bytes(vec![b; 32])]))
+                        .collect(),
+                ),
+            ),
+            (2, Value::Array(collected.into_iter().map(u).collect())),
+        ]);
+        *c4_field(r, 12) = v;
+    };
+    v.push(reject(
+        "reject-manifest-provenance-not-root",
+        "delta(1) carrying provenance",
+        c4_edit(&retention_delta, |r| {
+            r.push((12, Value::Null));
+            prov(r, vec![(5, 0xC5)], vec![]);
+        }),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-provenance-empty",
+        "provenance naming no source commit",
+        c4_edit(&provenance_root, |r| prov(r, vec![], vec![])),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-provenance-unsorted",
+        "source commits out of order",
+        c4_edit(&provenance_root, |r| {
+            prov(r, vec![(5, 0xC5), (2, 0xC2)], vec![])
+        }),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-provenance-collected-kept",
+        "snapshot 2 both kept and collected",
+        c4_edit(&provenance_root, |r| {
+            prov(r, vec![(2, 0xC2), (5, 0xC5)], vec![2])
+        }),
+        "RECORD_INVALID",
+    ));
+    v.push(reject(
+        "reject-manifest-provenance-collected-head",
+        "the source head listed as collected",
+        c4_edit(&provenance_root, |r| {
+            prov(r, vec![(2, 0xC2), (5, 0xC5)], vec![5])
+        }),
+        "RECORD_INVALID",
+    ));
 
     // ---- closed schema and versions
     v.push(reject(
@@ -889,8 +1109,8 @@ pub fn c4_manifest_vectors() -> Vec<ManifestVector> {
     ));
     v.push(reject(
         "reject-manifest-schema-version",
-        "schema version 2",
-        c4_edit(&root, |r| *c4_field(r, 0) = Value::Uint(2)),
+        "schema version 3 (schema 2 adds retention, C9)",
+        c4_edit(&root, |r| *c4_field(r, 0) = Value::Uint(3)),
         "UNSUPPORTED_FEATURE",
     ));
     v.push(reject(
@@ -1112,7 +1332,7 @@ pub fn render_c4_manifest() -> String {
 // (the base rule makes the child its base, since the parent is a checkpoint).
 
 use mochi_core::commit::{uuid_v4, CommitLink, CommitRecord, Metadata, ObjectRef};
-use mochi_format::digest::{commit_id as c5_commit_id, CommitId};
+use mochi_format::digest::commit_id as c5_commit_id;
 use mochi_format::repr::CanonicalCommitBody;
 
 const C5_ARCHIVE: ArchiveId = ArchiveId::from_bytes([0xA5; 32]);

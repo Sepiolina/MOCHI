@@ -124,7 +124,16 @@ manifests) are refused as legacy (§26). Gates G1 (conformance), G3
 over dm-flakey) have passed, and G9's (reports) criteria are met at
 library level. Still open: the CLI flags for
 truncation and limits (T29, with C14), native
-Windows durability evidence (T33, gate G6), and the GC hold test (C9).
+Windows durability evidence (T33, gate G6). The GC hold test (G2's last
+item) is implemented with C9 and awaits CI.
+
+**C9 (retention, GC, compaction, dedup) is implemented in the library:**
+in-archive deduplication on the write path; retention by expiry and legal
+holds, carried in recovery-manifest schema 2; `gc::plan`, which marks from
+the retained roots; and `compact::compact`, which writes the kept snapshots
+into a new archive (new archive ID, provenance, IDs and attributes
+preserved, verified before it is published) and never removes the source.
+The `checkpoint`, `snapshot`, `gc`, and `compact` commands arrive with C14.
 
 **C6 (read path) has started:** `mochi_core::read` lists any commit's
 snapshot and streams a file out of it, verifying every chunk and the whole

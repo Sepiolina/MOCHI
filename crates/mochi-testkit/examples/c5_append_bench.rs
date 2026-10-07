@@ -58,6 +58,7 @@ fn options() -> WriterOptions {
         record_time: false,
         profile: None,
         checkpoint_trigger: None,
+        dedup: Default::default(),
     }
 }
 

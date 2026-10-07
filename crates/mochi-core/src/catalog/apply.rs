@@ -438,6 +438,9 @@ mod tests {
             ops,
             entries: vec![],
             required_features: vec![],
+            retention_ops: Vec::new(),
+            retention: Default::default(),
+            provenance: None,
         };
         m.canonicalize();
         m

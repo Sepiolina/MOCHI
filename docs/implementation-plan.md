@@ -237,6 +237,59 @@ Each phase ends with a working, tested artifact. "Fault-matrix rows" refers to t
 - Retained roots and holds; GC as `plan` then `apply`, marking transitively from all roots in §18.3, quarantine before deletion, auditable deletion batches.
 - **Exit:** fault-matrix rows *compaction interrupted*, *GC overlaps publication*, *retention expires under legal hold*. Compacted output restores identically (file hashes and namespaces) to its source.
 
+- **Status (C9 dedup, 2026-10-06; owner chose C9 for this session while C7/C14 proceed in Sepiolina/MOCHI#7).** Checkpointing (§18.1) already exists from Annex B.2: the B.2.3 trigger, forced checkpoints (`ArchiveWriter::request_checkpoint`), and D10.7 adoption. What it lacks is the `checkpoint` command (C14). New here: **write-path deduplication** (`publish::Dedup`, default `InArchive`; `CommitOutcome::dedup` reports chunks and bytes reused and candidates rejected).
+  - **Rules:**
+    - Lookups use only the head the writer validated under its lock (§9.5 rule 1). Identical chunks within one commit are each stored (rule 2): chunks are streamed before publication, so the buffered-transaction exception is not taken.
+    - Candidates match on decoded length and chunk content hash. They are then read back, verified as stored and decoded, and compared byte for byte (§9.4). A failing candidate is never referenced: the chunk is stored anew and the candidate leaves the index.
+    - Only unprotected chunks without dependencies are candidates; C11 must add the §9.5 rule 3 disclosure before encrypted archives deduplicate. Nothing is deduplicated across archives.
+  - **Reference scope (found here, checklist Q64):** the index holds only chunks reachable at the head when it is built, plus chunks introduced since, and is rebuilt after each checkpoint. Referencing any chunk in the catalog image would make baseline recovery (D10.8) fail, because S(*b*) holds only what *b* reaches. A test shows this; the spec gap is recorded in Q64 with a recommendation.
+  - **No wire change:** reuse by reference is already D10.4. Readers cannot tell a deduplicated archive from one written without dedup, except by the shared chunk IDs.
+  - **Tests:** `c9_dedup.rs` (6) covers:
+    - reuse in the same session and after reopening;
+    - no reuse within one commit;
+    - per-chunk partial overlap;
+    - `Off`;
+    - a damaged candidate never referenced, with the good copy reused next;
+    - reuse limited to what baseline recovery sees, with baseline recovery and recovery from manifests reading every file exactly.
+
+    The whole workspace passes with dedup on by default.
+  - **Mutations:** 9. Seven were killed: no reset at a checkpoint, no index extension after a delta, no read-back, `Off` ignored, a rejected candidate kept, every error propagated, and an index over every catalog chunk (it fails baseline recovery with `EXTENT_INVALID`). Two survive as defense in depth: the byte comparison (needs a hash collision) and the committed-range check (the head catalog is verified at open). The file was restored byte-identical (md5).
+  - **Retention, GC, and compaction** were open here on 2026-10-06; see the next entry.
+
+- **Status (C9 retention, GC, compaction, 2026-10-07).** The owner made three decisions: retention is expiry plus legal holds; collection and compaction write a new archive with a new archive ID and provenance; the source is never removed automatically. They are recorded in spec Annex B **D18** (B.2.8). The representation is **[delegated]**, recorded there and below.
+  - **Retention** (`mochi_core::retention`; `Transaction::expire`, `hold`, `release`):
+    - The roots are the head, every commit not expired, and every held commit. Operations apply atomically and in order.
+    - An invalid operation is `INVALID_ARGUMENT` before anything is written.
+    - Retention is manifest state, like promised attributes. Recovery-manifest **schema 2** adds key 11: a delta's operations and a snapshot's complete state.
+    - Schema 2 is written exactly when a manifest carries retention or provenance, so every existing manifest, vector, and archive keeps its schema-1 bytes.
+    - Readers rebuild retention from S(*b*) plus the segment's deltas (`publish::segment_state`; D10.10). It flows through open, replay, baseline recovery, and the writer as one `SegmentState` with the attributes.
+    - D10.7 adoption compares it, and `CheckpointTamper::SnapshotRetention` tests that comparison.
+  - **GC plan** (`gc::plan`, read-only):
+    - Retention is rebuilt from the manifests. Any failure except I/O or cancellation is `RETENTION_UNRESOLVED`, with no fallback.
+    - Marking is transitive, from the roots, in one replay (`Catalog::replay_each`). Chunks with dependencies are refused.
+    - The plan records its head, every collectable snapshot with its reason, the collectable chunk and version IDs, and totals.
+  - **Compaction and `gc apply`** (`compact::compact`, `Keep::Every` or `Keep::Roots(plan head)`):
+    - The source is passed as an open writer, so its lock is held throughout, and a stale plan is refused.
+    - The output has one commit per kept snapshot, with object and file-version IDs preserved (O19). Stored chunks are copied byte for byte after a hash check. Attributes come from every delta manifest. Commit times are copied, and holds and kept expiries carry over.
+    - Provenance goes in the new delta(0): schema 2, key 12 (`compact::read_provenance`).
+    - Before publication (§18.2 steps 1–3): namespaces, attributes, retention, and provenance are compared, and every version is read back and verified (`verify_content`, on by default).
+    - Publication uses D13 via the new `ArchiveWriter::build_in`; `create_in` is now a one-commit case of it.
+    - Q64: a reference that a baseline replay of the current segment would not see forces a checkpoint.
+  - **Fault-matrix rows covered (library level):**
+    - *Retention expires under legal hold:* `c9_a_legal_hold_protects_an_expired_snapshot`, and `gc apply` carrying the hold.
+    - *GC overlaps publication:* `c9_gc_never_overlaps_publication`.
+    - *Compaction interrupted:* `c9_interrupted_compaction_leaves_the_source_and_no_archive` halts before every file mutation and every directory operation. The source stays byte-identical, and nothing is at the name, also after a power loss.
+    - Compacted output restores identically to its source: the test kit's own reassembly, IDs, attributes, and times are compared at every kept snapshot.
+  - **G2's GC item:** `c9_a_hold_added_after_the_last_checkpoint_survives` and `c9_gc_refuses_when_retention_is_unresolved` (CI evidence pending).
+  - **Tests:** `c9_retention.rs` (5), `c9_gc_plan.rs` (4), `c9_compact.rs` (6), and retention unit tests (2). Golden c4 gained 19 vectors (3 valid, 16 reject). `reject-manifest-schema-version` now uses schema 3. Existing valid vectors are byte-identical.
+  - **Mutations:** 16 over retention, GC, and compaction; 15 killed. The namespace re-check before publication survives as defense in depth: only a writer bug reaches it. The files were restored byte-identical (md5).
+  - **Not in this phase:**
+    - The `checkpoint`, `snapshot` (retain, expire, hold, release), `gc plan`, `gc apply`, and `compact` commands and their reports (C14).
+    - Explicit removal of a kept source (a user action, C14).
+    - §16.3's "elevated authorization and a delay" for retention reductions (deployment policy; CLI confirmation in C14).
+    - Collecting chunks with dependencies (none written before C8, C9 dictionaries, or C11).
+    - §27 benchmarks: the spec makes no cost claim for compaction or GC.
+
 ### C10 — TAR-compatibility profile
 - Writer mode meeting every §7.2 constraint (no reference-only representations, no MOCHI-specific fragmentation, no external dictionaries unless the documented invocation supplies them).
 - Interop tests against pinned tool versions: GNU tar, bsdtar/libarchive (also what Windows ships as `tar.exe`), and the `zstd` CLI.

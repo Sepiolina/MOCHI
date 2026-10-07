@@ -27,7 +27,7 @@ use std::io::Write;
 use mochi_format::digest::{FileContentHash, FileContentHasher};
 
 use crate::catalog::extent::{validate_extents, ExtentSource};
-use crate::catalog::namespace::EntryKind;
+use crate::catalog::namespace::{EntryKind, FileVersionId};
 use crate::catalog::path::{ArchivePath, SEPARATOR};
 use crate::catalog::Catalog;
 use crate::error::{ErrorCode, MochiError, Result};
@@ -142,18 +142,58 @@ pub fn read_file_in(
             ),
         )
     })?;
+    let label = format!("{:?}", String::from_utf8_lossy(path.as_stored()));
     if entry.kind == EntryKind::Directory {
         return Err(MochiError::new(
             ErrorCode::InvalidArgument,
-            format!(
-                "{:?} is a directory",
-                String::from_utf8_lossy(path.as_stored())
-            ),
+            format!("{label} is a directory"),
         ));
     }
+    stream_version(src, cat, &entry.version, &label, out, opts, ctx)
+}
+
+/// Reassemble one file version of the catalog's retained history, reachable
+/// at the head or not, with the same checks as [`read_file`]: every chunk as
+/// stored and decoded bytes, the extents where they are used, and the whole
+/// logical stream against the file-content hash. Verification's restoration
+/// level (C7) uses it for every version. Output is unverified until `Ok`.
+///
+/// Errors as for [`read_file`]; a directory version is `INVALID_ARGUMENT`,
+/// an unknown ID `CATALOG_INVALID`.
+pub fn read_version(
+    src: &dyn ReadStorage,
+    cat: &Catalog,
+    version: &FileVersionId,
+    out: &mut dyn Write,
+    opts: &ReadOptions,
+    ctx: &JobContext<'_>,
+) -> Result<FileRead> {
+    let label = format!("file version {}", hex(version.as_bytes()));
+    stream_version(src, cat, version, &label, out, opts, ctx)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn stream_version(
+    src: &dyn ReadStorage,
+    cat: &Catalog,
+    id: &FileVersionId,
+    label: &str,
+    out: &mut dyn Write,
+    opts: &ReadOptions,
+    ctx: &JobContext<'_>,
+) -> Result<FileRead> {
     let (version, extents) = cat
-        .file_version(&entry.version)?
-        .ok_or_else(|| missing("snapshot names a missing file version"))?;
+        .file_version(id)?
+        .ok_or_else(|| missing("a file version named here is not in the catalog"))?;
+    if version.kind == EntryKind::Directory {
+        return Err(MochiError::new(
+            ErrorCode::InvalidArgument,
+            format!("{label} is a directory"),
+        ));
+    }
     let expected = version
         .content_hash
         .ok_or_else(|| missing("a file version has no content hash"))?;
@@ -236,10 +276,7 @@ pub fn read_file_in(
     if actual != expected {
         return Err(MochiError::new(
             ErrorCode::ContentIntegrityFailed,
-            format!(
-                "{:?}: the reassembled file does not match its file-content hash",
-                String::from_utf8_lossy(path.as_stored())
-            ),
+            format!("{label}: the reassembled file does not match its file-content hash"),
         ));
     }
     out.flush().map_err(io)?;

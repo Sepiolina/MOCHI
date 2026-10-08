@@ -89,7 +89,7 @@ fn source() -> SimStorage {
     let put = |t: &mut Transaction, p: &str, seed: u64| {
         t.put_file(path(p), deterministic_bytes(seed, 150), attrs(0o644, 0));
     };
-    let mut c = |w: &mut ArchiveWriter<SimStorage>, f: &dyn Fn(&mut Transaction)| {
+    let c = |w: &mut ArchiveWriter<SimStorage>, f: &dyn Fn(&mut Transaction)| {
         let mut tx = Transaction::new();
         f(&mut tx);
         w.commit(tx, &job.ctx()).unwrap();

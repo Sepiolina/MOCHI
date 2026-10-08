@@ -1,7 +1,7 @@
 //! Command surface (spec §23, §23.2 "1.0 command scope"; plan C14).
 //!
 //! * Built: `create`, `append`, `list`, `get`, `snapshot list`, `snapshot
-//!   retain`/`expire`/`release`, `verify`, `fsck`, `restore-test`,
+//!   retain`/`expire`/`release`, `search`, `verify`, `fsck`, `restore-test`,
 //!   `checkpoint`, `compact`, `gc plan`, `gc apply`.
 //! * In 1.0 scope but not built yet: exit 3 with `NOT_IMPLEMENTED` (a
 //!   development-build condition, never a success). Their arguments are
@@ -162,6 +162,72 @@ pub struct RestoreTestArgs {
     pub sel: SnapshotSel,
 }
 
+/// Which snapshots `search` looks in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchSnapshots {
+    Head,
+    Retained,
+    All,
+    Commit(u64),
+}
+
+fn parse_search_snapshots(s: &str) -> Result<SearchSnapshots, String> {
+    match s {
+        "HEAD" | "head" => Ok(SearchSnapshots::Head),
+        "retained" => Ok(SearchSnapshots::Retained),
+        "all" => Ok(SearchSnapshots::All),
+        _ => s
+            .parse()
+            .map(SearchSnapshots::Commit)
+            .map_err(|_| "expected HEAD, retained, all, or a commit sequence".to_string()),
+    }
+}
+
+/// Entry kinds, as `search --kind` takes them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum KindArg {
+    File,
+    Dir,
+}
+
+#[derive(Debug, Args)]
+pub struct SearchArgs {
+    pub archive: PathBuf,
+    /// Bytes that must occur in the entry's path. Omitted: every entry.
+    pub pattern: Option<String>,
+    /// Snapshots to search: `HEAD`, `retained` (every snapshot retained at
+    /// the head), `all` (every commit, expired or not), or a sequence.
+    #[arg(long, value_name = "SCOPE", default_value = "HEAD", value_parser = parse_search_snapshots)]
+    pub snapshot: SearchSnapshots,
+    /// Fold ASCII letters when matching PATTERN (results keep exact names).
+    #[arg(long, short = 'i')]
+    pub ignore_case: bool,
+    /// Only this exact archive path.
+    #[arg(long, value_name = "ARCHIVE_PATH", conflicts_with = "under")]
+    pub path: Option<String>,
+    /// Only this archive path and what lies under it.
+    #[arg(long, value_name = "ARCHIVE_PATH")]
+    pub under: Option<String>,
+    /// Only this file version (64 hex digits, as `search --json` prints).
+    #[arg(long, value_name = "VERSION_ID")]
+    pub version: Option<String>,
+    /// Only files with this file-content hash: plain BLAKE3 of the file,
+    /// as `b3sum` prints it (64 hex digits).
+    #[arg(long, value_name = "HASH")]
+    pub content_hash: Option<String>,
+    /// Only files or only directories.
+    #[arg(long, value_enum)]
+    pub kind: Option<KindArg>,
+    /// Search file content. Full-text search (spec §19.2) is not built:
+    /// refused with exit 4, never answered from names.
+    #[arg(long, value_name = "TEXT")]
+    pub content: Option<String>,
+    /// Treat partial coverage as a failure (exit 1) instead of degraded
+    /// evidence (exit 2).
+    #[arg(long)]
+    pub require_complete: bool,
+}
+
 /// Verification levels (spec §20.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Level {
@@ -318,8 +384,9 @@ pub enum Command {
     /// Inspect or retain snapshots.
     #[command(subcommand)]
     Snapshot(SnapshotCommand),
-    /// Search names, metadata, or content.
-    Search(PendingArgs),
+    /// Find entries by name, path, file version, or content hash, in one
+    /// snapshot or across snapshots.
+    Search(SearchArgs),
     /// Perform read-only verification.
     Verify(VerifyArgs),
     /// Perform deep read-only consistency analysis.
@@ -399,8 +466,7 @@ impl Command {
     /// The catch-all arguments of a command that is not built.
     pub fn pending_args(&self) -> &[String] {
         match self {
-            Command::Search(a)
-            | Command::Health(a)
+            Command::Health(a)
             | Command::Repair(RepairCommand::Plan(a))
             | Command::Repair(RepairCommand::Apply(a))
             | Command::Rekey(a)
@@ -422,6 +488,7 @@ impl Command {
             | Command::Append(_)
             | Command::Get(_)
             | Command::List(_)
+            | Command::Search(_)
             | Command::Snapshot(_)
             | Command::Verify(_)
             | Command::Fsck(_)

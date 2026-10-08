@@ -1,6 +1,6 @@
 # The `mochi` CLI (plan C7, C14): commands, rules, and concessions
 
-Status 2026-10-08. Built: `create`, `append`, `list`, `get`, `snapshot list|retain|expire|release`, `verify`, `fsck`, `restore-test`, and (C9 commands, 2026-10-08) `checkpoint`, `compact`, `gc plan|apply`. In 1.0 scope, not built (exit 3, `NOT_IMPLEMENTED`): `search`, `health`, `repair plan|apply`, `rekey`, `dump-index`. Post-1.0 (exit 4): `inventory`, `split`, `join`, `mount`.
+Status 2026-10-08. Built: `create`, `append`, `list`, `get`, `snapshot list|retain|expire|release`, `verify`, `fsck`, `restore-test`, (C9 commands, 2026-10-08) `checkpoint`, `compact`, `gc plan|apply`, and (C13, 2026-10-08) `search`. In 1.0 scope, not built (exit 3, `NOT_IMPLEMENTED`): `health`, `repair plan|apply`, `rekey`, `dump-index`. Post-1.0 (exit 4): `inventory`, `split`, `join`, `mount`.
 
 The CLI is a thin client (spec §23.3 #1, §23.4). Format logic, verification, restore, and the filesystem import live in `mochi-core` (`verify`, `restore`, `import`, `storage::os::OsSourceTree`), so the desktop app (D2–D4) calls the same functions and gets the same results. The CLI adds only argument parsing, rendering, exit codes, and the local head history.
 
@@ -23,6 +23,7 @@ The CLI is a thin client (spec §23.3 #1, §23.4). Format logic, verification, r
 | `mochi get ARCHIVE [PATH…] [-C DIR] [--snapshot SEQ]` | Restores everything or the given subtrees into `DIR` (default `.`; created if missing) through the C6 engine | 0; 1 if any file failed verification (it is absent, never partial); 2 if any entry was not restored for another reason (collision, unsupported name); 3 with `--refuse-on-conflict` when the preflight finds one |
 | `mochi get ARCHIVE PATH --stdout` | One file's bytes to standard output | 0; 1 on an integrity failure, and the bytes already written are unverified |
 | `mochi restore-test ARCHIVE -C NEWDIR` | Restores the whole commit into a directory that must not exist yet | as `get`; 3 `DESTINATION_EXISTS` |
+| `mochi search ARCHIVE [PATTERN] [--snapshot HEAD\|retained\|all\|SEQ] [-i] [--path P \| --under P] [--version ID] [--content-hash HASH] [--kind file\|dir]` | Read-only discovery (spec §19.1; `mochi_core::search`): entries whose stored path contains `PATTERN` (bytes; `-i` folds ASCII only) and that meet every other criterion, one hit per snapshot holding the entry. `--content-hash` is plain BLAKE3 of the file, as `b3sum` prints it; `--version` is a `file_version_id` from earlier JSON output. Prints the §19.3 coverage: requested and searched snapshots, the catalog's commit and source, unavailable snapshots with reasons; file content is never searched | 0 with complete coverage, whatever the number of hits; 2 with partial coverage, 1 with `--require-complete`; 4 for `--content` (full-text search, §19.2, is not built); 1 `RETENTION_UNRESOLVED` for `--snapshot retained` when retention cannot be rebuilt |
 | `mochi verify ARCHIVE [--level L] [--expected-head ID] [--require-freshness]` | Read-only verification (spec §20; `docs/report-schema-v1.md`). Default level `restoration` | the report's D15 exit code |
 | `mochi fsck ARCHIVE …` | `verify` plus every commit opened at its own footer and its namespace cross-checked against the head catalog | the report's D15 exit code |
 
@@ -41,6 +42,7 @@ Errors in `--json` mode are one line on standard output: `{"error": {"code": "�
 7. **A GC plan is applied exactly as approved.** `gc apply` recomputes the plan under the source's publication lock and compares the whole JSON value with the saved file, so it never collects more or less than what the user reviewed.
 8. **Rewrites never replace anything and never touch the source.** `compact` and `gc apply` refuse an existing output name before taking any lock (`DESTINATION_EXISTS`; publication refuses it again, D13), say that the source is unchanged and kept, and record the new archive's head as its freshness anchor (a new archive ID, so the old anchor does not carry over). Removing the source is left to the user (D18).
 9. **Verification output.** `verify` refuses to print a report that fails `Report::validate` (`REPORT_INCONSISTENT`, exit 3). Its exit code is the report's `exit_code`, computed by `Report::conclude`, so the CLI obeys D15 through one path (gate G9).
+10. **Search coverage is visible (spec §19.3, §23.3 #8).** Every `search` result states its coverage. Partial coverage prints `coverage PARTIAL` and that zero matches are not proof, and exits 2 (1 with `--require-complete`), so a script never reads "no matches" from an incomplete search. A content query is refused (exit 4) rather than answered from names.
 
 ## Concessions (to refine later; each is separable)
 
@@ -57,4 +59,4 @@ Errors in `--json` mode are one line on standard output: `{"error": {"code": "�
 
 ## What is not in this slice
 
-`health` (needs stored evidence and policy files), `search` (C13), `repair` (C8), `rekey` (C11), `dump-index`. They keep exiting 3 `NOT_IMPLEMENTED`, never success.
+`health` (needs stored evidence and policy files), `repair` (C8), `rekey` (C11), `dump-index`. They keep exiting 3 `NOT_IMPLEMENTED`, never success. Full-text search (C13, optional) is refused with exit 4.

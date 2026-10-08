@@ -189,6 +189,7 @@ where
         Command::Append(a) => commands::append(&mut env, a),
         Command::List(a) => commands::list_cmd(&mut env, a),
         Command::Get(a) => commands::get(&mut env, a),
+        Command::Search(a) => commands::search_cmd(&mut env, a),
         Command::Snapshot(SnapshotCommand::List(a)) => commands::snapshot_list(&mut env, a),
         Command::Snapshot(SnapshotCommand::Retain(a)) => commands::snapshot_retain(&mut env, a),
         Command::Snapshot(SnapshotCommand::Expire(a)) => commands::snapshot_expire(&mut env, a),

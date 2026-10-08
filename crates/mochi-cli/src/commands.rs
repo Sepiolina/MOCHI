@@ -7,6 +7,7 @@ use std::io::Write;
 use std::path::Path;
 
 use mochi_core::catalog::namespace::EntryKind;
+use mochi_core::catalog::namespace::FileVersionId;
 use mochi_core::catalog::path::ArchivePath;
 use mochi_core::compact::{self, CompactOptions, Keep};
 use mochi_core::descriptor::Profile;
@@ -15,6 +16,7 @@ use mochi_core::gc::{self, GcPlan, PlanHead};
 use mochi_core::import::{import_into, ImportOptions, SourceKind, DEFAULT_MAX_TOTAL_BYTES};
 use mochi_core::job::{CancellationToken, JobContext, NullProgress};
 use mochi_core::object::{ArchiveId, OsIds};
+use mochi_core::publish::CatalogSource;
 use mochi_core::publish::{
     commit_history, locate_head, open_at_footer, open_head, read_commit, segment_state,
     ArchiveWriter, CommitOutcome, OpenedHead, PublishDurability, ReadOptions, TailRepair,
@@ -23,19 +25,21 @@ use mochi_core::publish::{
 use mochi_core::read::{list, read_file};
 use mochi_core::report::{Finding, Report, Severity};
 use mochi_core::restore::{restore_selected, ExceptionKind, RestoreOptions, RestoreReport};
+use mochi_core::search::{search, FullText, PathMatch, Query, SnapshotScope};
 use mochi_core::status::{Dimension, VerificationLevel};
 use mochi_core::storage::os::{OsDir, OsReadStorage, OsRestoreDir, OsSourceTree, OsStorage};
 use mochi_core::timestamp::Timestamp;
 use mochi_core::verify::{parse_commit_id, verify, FreshnessAnchor, VerifyOptions};
 use mochi_core::{ErrorCode, MochiError, Result};
+use mochi_format::digest::FileContentHash;
 use serde_json::{json, Value};
 
 use crate::cli::{
     AppendArgs, CheckpointArgs, CompactArgs, CreateArgs, ExpireArgs, GcApplyArgs, GcPlanArgs,
-    GetArgs, Level, ListArgs, ReleaseArgs, RestoreTestArgs, RetainArgs, SnapshotListArgs,
-    VerifyArgs,
+    GetArgs, KindArg, Level, ListArgs, ReleaseArgs, RestoreTestArgs, RetainArgs, SearchArgs,
+    SearchSnapshots, SnapshotListArgs, VerifyArgs,
 };
-use crate::render::{archive_path_arg, path_fields, text};
+use crate::render::{archive_path_arg, hex, path_fields, text};
 use crate::state::{HeadStore, SeenHead};
 
 /// What every command gets from the global options.
@@ -517,6 +521,181 @@ pub fn list_cmd(env: &mut Env<'_>, a: &ListArgs) -> Result<u8> {
         }
     }
     Ok(exit::OK)
+}
+
+/// 32 bytes from 64 hexadecimal digits.
+fn parse_hex32(s: &str, what: &str) -> Result<[u8; 32]> {
+    let bad = || invalid(format!("{s:?} is not a {what} (64 hexadecimal digits)"));
+    let b = s.as_bytes();
+    if b.len() != 64 {
+        return Err(bad());
+    }
+    let mut out = [0u8; 32];
+    for (slot, pair) in out.iter_mut().zip(b.chunks_exact(2)) {
+        let digit = |c: u8| (c as char).to_digit(16).ok_or_else(bad);
+        let (hi, lo) = (digit(pair[0])?, digit(pair[1])?);
+        *slot = u8::try_from(hi * 16 + lo).map_err(|_| bad())?;
+    }
+    Ok(out)
+}
+
+/// `mochi search` (spec §19.1, §19.3; plan C13). Exit 0 with complete
+/// coverage, whatever the number of hits; 2 with partial coverage (1 with
+/// `--require-complete`), because zero hits then prove nothing.
+pub fn search_cmd(env: &mut Env<'_>, a: &SearchArgs) -> Result<u8> {
+    if a.content.is_some() {
+        return Err(MochiError::new(
+            ErrorCode::UnsupportedFeature,
+            "full-text search (spec §19.2) is not built: file content cannot be searched, \
+             and names are not searched in its place",
+        ));
+    }
+    let query = Query {
+        name: a.pattern.clone().unwrap_or_default().into_bytes(),
+        ascii_case_insensitive: a.ignore_case,
+        path: match (&a.path, &a.under) {
+            (Some(p), _) => Some(PathMatch::Exact(archive_path_arg(p)?)),
+            (None, Some(p)) => Some(PathMatch::Under(archive_path_arg(p)?)),
+            (None, None) => None,
+        },
+        version: a
+            .version
+            .as_deref()
+            .map(|v| parse_hex32(v, "file version ID").map(FileVersionId::from_bytes))
+            .transpose()?,
+        content_hash: a
+            .content_hash
+            .as_deref()
+            .map(|h| parse_hex32(h, "file-content hash").map(FileContentHash::from_bytes))
+            .transpose()?,
+        kind: a.kind.map(|k| match k {
+            KindArg::File => EntryKind::File,
+            KindArg::Dir => EntryKind::Directory,
+        }),
+    };
+    let scope = match a.snapshot {
+        SearchSnapshots::Head => SnapshotScope::Head,
+        SearchSnapshots::Retained => SnapshotScope::Retained,
+        SearchSnapshots::All => SnapshotScope::All,
+        SearchSnapshots::Commit(s) => SnapshotScope::Commit(s),
+    };
+    let src = open_archive(&a.archive)?;
+    let head = open_head(&src, &env.read)?;
+    let (progress, cancel) = job();
+    let ctx = JobContext {
+        progress: &progress,
+        cancel: &cancel,
+    };
+    let r = search(&src, &head, scope, &query, &env.read, &ctx)?;
+    let c = &r.coverage;
+    let complete = c.complete();
+    let code = match (complete, a.require_complete) {
+        (true, _) => exit::OK,
+        (false, false) => exit::DEGRADED,
+        (false, true) => exit::FAILED,
+    };
+    let source = match &c.catalog_source {
+        CatalogSource::Image => "image",
+        CatalogSource::SnapshotManifest { .. } => "snapshot-manifest",
+    };
+    if env.json {
+        let hits: Vec<Value> = r
+            .hits
+            .iter()
+            .map(|h| {
+                let mut m = path_fields(h.path.as_stored());
+                m.insert("seq".into(), json!(h.seq));
+                m.insert("kind".into(), json!(entry_kind(h.kind)));
+                m.insert("size".into(), json!(h.logical_len));
+                m.insert("file_version_id".into(), json!(hex(h.version.as_bytes())));
+                m.insert(
+                    "content_hash".into(),
+                    json!(h.content_hash.map(|x| x.to_hex())),
+                );
+                Value::Object(m)
+            })
+            .collect();
+        let scope_v = match scope {
+            SnapshotScope::Head => json!("head"),
+            SnapshotScope::Retained => json!("retained"),
+            SnapshotScope::All => json!("all"),
+            SnapshotScope::Commit(s) => json!({ "commit": s }),
+        };
+        env.emit_json(&json!({
+            "archive_id": head.commit.archive_id.to_hex(),
+            "scope": scope_v,
+            "coverage": {
+                "complete": complete,
+                "indexed_seq": c.indexed_seq,
+                "indexed_commit_id": head.commit_id.to_hex(),
+                "catalog_source": source,
+                "requested": c.requested,
+                "searched": c.searched,
+                "opened_separately": c.opened_separately,
+                "unavailable": c.unavailable.iter().map(|u| json!({
+                    "seq": u.seq,
+                    "code": u.error.code.as_str(),
+                    "message": u.error.message,
+                })).collect::<Vec<_>>(),
+                "entries_examined": c.entries_examined,
+                "pending": c.pending,
+                "failed": c.failed,
+                "unsupported": c.unsupported,
+                "excluded": c.excluded,
+                "full_text": match c.full_text { FullText::NotBuilt => "not-built" },
+            },
+            "hits": hits,
+        }));
+        return Ok(code);
+    }
+    for h in &r.hits {
+        match h.kind {
+            EntryKind::Directory => env.line(format!(
+                "{:>6}  d {:>14}  {}/",
+                h.seq,
+                "-",
+                text(h.path.as_stored())
+            )),
+            EntryKind::File => env.line(format!(
+                "{:>6}  f {:>14}  {}",
+                h.seq,
+                h.logical_len,
+                text(h.path.as_stored())
+            )),
+        }
+    }
+    let n = r.hits.len();
+    let found = format!("{n} {}", if n == 1 { "match" } else { "matches" });
+    if complete {
+        env.line(format!(
+            "{found}; coverage complete: {} of {} requested snapshots searched (catalog at \
+             commit {}, from its {source}); file content was not searched (no full-text index)",
+            c.searched.len(),
+            c.requested.len(),
+            c.indexed_seq
+        ));
+    } else {
+        env.line(format!(
+            "{found}; coverage PARTIAL: {} of {} requested snapshots searched; matches in the \
+             others are unknown, so this is not proof that no matching entry exists",
+            c.searched.len(),
+            c.requested.len()
+        ));
+        for u in &c.unavailable {
+            env.line(format!(
+                "  snapshot {} not searched: {}: {}",
+                u.seq, u.error.code, u.error.message
+            ));
+        }
+    }
+    if !c.opened_separately.is_empty() {
+        env.warn(format!(
+            "the head's catalog image is damaged and was rebuilt from its snapshot manifest; \
+             {} earlier snapshot(s) were read from their own commits",
+            c.opened_separately.len()
+        ));
+    }
+    Ok(code)
 }
 
 pub fn snapshot_list(env: &mut Env<'_>, a: &SnapshotListArgs) -> Result<u8> {

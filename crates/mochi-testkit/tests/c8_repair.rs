@@ -744,3 +744,88 @@ fn c8_manifests_that_disagree_about_a_version_reject_it() {
     );
     assert!(p.omitted[0].reason.message.contains("disagree"));
 }
+
+/// Forge commit 9 on `source()` that puts `/dep` with one chunk. With
+/// `needs_dictionary`, the chunk's record declares a dependency this build
+/// cannot satisfy; otherwise the chunk is ordinary. The bytes are intact
+/// either way.
+fn with_dependency_commit(needs_dictionary: bool) -> SimStorage {
+    use mochi_core::catalog::namespace::{EntryKind, FileVersionId, NamespaceOp};
+    use mochi_core::catalog::FileVersion;
+    use mochi_core::manifest::{ChunkEntry, FileVersionEntry};
+    use mochi_core::object::{build_object, Dependency, ObjectId};
+    use mochi_format::codec::{EncodeParams, Protection};
+    use mochi_format::digest::file_content_hash;
+    use mochi_format::repr::{DecodedBytes, DecodedSlice};
+    use mochi_format::Limits;
+    use mochi_testkit::forge::{empty_delta, rule_base, txid, Forge};
+
+    let content = deterministic_bytes(77, 150);
+    let mut f = Forge::new(source().contents());
+    let head = f.history()[8].clone();
+    let mut obj = build_object(
+        &DecodedBytes::new(content.clone()),
+        &EncodeParams::default(),
+        Protection::None,
+        &mut SeqIds::new(0x5000),
+        &Limits::default(),
+    )
+    .unwrap();
+    if needs_dictionary {
+        obj.record
+            .dependencies
+            .push(Dependency::Dictionary(ObjectId::from_bytes([9; 32])));
+    }
+    let at = f.append_object(&obj.stored).offset;
+    let version = FileVersion {
+        id: FileVersionId::from_bytes([0xD7; 32]),
+        kind: EntryKind::File,
+        logical_len: content.len() as u64,
+        content_hash: Some(file_content_hash(DecodedSlice::from_logical(&content))),
+    };
+    let mut m = empty_delta(&head, txid(0x78));
+    m.chunks.push(ChunkEntry {
+        record: obj.record.clone(),
+        location: Some(at),
+    });
+    m.file_versions.push(FileVersionEntry {
+        version,
+        extents: vec![mochi_core::catalog::extent::Extent {
+            ordinal: 0,
+            logical_offset: 0,
+            length: content.len() as u64,
+            source: ExtentSource::Chunk {
+                chunk: obj.record.id,
+                chunk_offset: 0,
+            },
+        }],
+        attributes: attrs(0o644, 8),
+    });
+    m.ops.push(NamespaceOp::Put {
+        path: path("dep"),
+        version: FileVersionId::from_bytes([0xD7; 32]),
+    });
+    m.canonicalize();
+    let r = f.append_manifest(&m);
+    f.append_delta(&head, rule_base(&head), r, txid(0x78));
+    f.storage()
+}
+
+/// **Intact content this build cannot decode is refused, not omitted
+/// [delegated 2026-10-08, K4].** A forged commit 9 introduces a chunk whose
+/// record declares a dictionary dependency (`UNSUPPORTED_FEATURE` on read).
+/// `plan` fails with that code; leaving the file out would be silent loss
+/// dressed as damage (§7.7, §26). Control: the same commit without the
+/// dependency plans cleanly with nothing omitted, so the refusal is the
+/// dependency's and nothing else's.
+#[test]
+fn c8_undecodable_content_refuses_the_plan() {
+    let control = with_dependency_commit(false);
+    let p = plan_of(&control);
+    assert!(p.omitted.is_empty(), "{:?}", p.omitted);
+    assert!(p.lost_snapshots.is_empty(), "{:?}", p.lost_snapshots);
+
+    let s = with_dependency_commit(true);
+    let e = plan(&s, &opts(), &Job::new().ctx()).unwrap_err();
+    assert_eq!(e.code, ErrorCode::UnsupportedFeature, "{e:?}");
+}

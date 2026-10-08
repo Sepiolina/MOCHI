@@ -45,7 +45,8 @@ cargo run -p mochi-cli -- --help
 Phases C1 (framing), C2 (object model and digests), C3 (catalog and
 namespace), C4 (recovery manifests), and C5 (commit and single-file
 publication) are implemented; C6 (read and restore) and C7 (verification)
-are implemented with CI evidence pending. The `mochi` CLI creates, appends
+are implemented, with CI evidence (run 37735586637, Ubuntu 22.04/24.04 and
+Windows). The `mochi` CLI creates, appends
 to, lists, extracts, and verifies real `.mochi` files:
 
 ```bash

@@ -210,8 +210,15 @@ mod tests {
                 nanos: 750_000_000
             })
         );
-        let t = UNIX_EPOCH + std::time::Duration::new(5, 7);
-        assert_eq!(mtime_of(t), Some(Mtime { secs: 5, nanos: 7 }));
+        // A multiple of 100 ns: Windows `SystemTime` counts 100 ns ticks.
+        let t = UNIX_EPOCH + std::time::Duration::new(5, 700);
+        assert_eq!(
+            mtime_of(t),
+            Some(Mtime {
+                secs: 5,
+                nanos: 700
+            })
+        );
     }
 
     #[test]

@@ -8,28 +8,32 @@ use std::path::Path;
 
 use mochi_core::catalog::namespace::EntryKind;
 use mochi_core::catalog::path::ArchivePath;
+use mochi_core::compact::{self, CompactOptions, Keep};
 use mochi_core::descriptor::Profile;
 use mochi_core::exit;
+use mochi_core::gc::{self, GcPlan, PlanHead};
 use mochi_core::import::{import_into, ImportOptions, SourceKind, DEFAULT_MAX_TOTAL_BYTES};
 use mochi_core::job::{CancellationToken, JobContext, NullProgress};
 use mochi_core::object::{ArchiveId, OsIds};
 use mochi_core::publish::{
-    commit_history, locate_head, open_at_footer, open_head, read_commit, ArchiveWriter,
-    CommitOutcome, OpenedHead, PublishDurability, ReadOptions, TailRepair, TailTruncation,
-    Transaction, TruncationWaivers, WriterOptions,
+    commit_history, locate_head, open_at_footer, open_head, read_commit, segment_state,
+    ArchiveWriter, CommitOutcome, OpenedHead, PublishDurability, ReadOptions, TailRepair,
+    TailTruncation, Transaction, TruncationWaivers, WriterOptions,
 };
 use mochi_core::read::{list, read_file};
 use mochi_core::report::{Finding, Report, Severity};
 use mochi_core::restore::{restore_selected, ExceptionKind, RestoreOptions, RestoreReport};
 use mochi_core::status::{Dimension, VerificationLevel};
-use mochi_core::storage::os::{OsDir, OsReadStorage, OsRestoreDir, OsSourceTree};
+use mochi_core::storage::os::{OsDir, OsReadStorage, OsRestoreDir, OsSourceTree, OsStorage};
 use mochi_core::timestamp::Timestamp;
 use mochi_core::verify::{parse_commit_id, verify, FreshnessAnchor, VerifyOptions};
 use mochi_core::{ErrorCode, MochiError, Result};
 use serde_json::{json, Value};
 
 use crate::cli::{
-    AppendArgs, CreateArgs, GetArgs, Level, ListArgs, RestoreTestArgs, SnapshotListArgs, VerifyArgs,
+    AppendArgs, CheckpointArgs, CompactArgs, CreateArgs, ExpireArgs, GcApplyArgs, GcPlanArgs,
+    GetArgs, Level, ListArgs, ReleaseArgs, RestoreTestArgs, RetainArgs, SnapshotListArgs,
+    VerifyArgs,
 };
 use crate::render::{archive_path_arg, path_fields, text};
 use crate::state::{HeadStore, SeenHead};
@@ -327,7 +331,7 @@ pub fn create(env: &mut Env<'_>, a: &CreateArgs) -> Result<u8> {
             tar_compatible: true,
             encrypted: false,
         }),
-        checkpoint_trigger: None,
+        ..WriterOptions::default()
     };
     let (w, outcome) = ArchiveWriter::create_in(
         &mut dir,
@@ -518,40 +522,86 @@ pub fn list_cmd(env: &mut Env<'_>, a: &ListArgs) -> Result<u8> {
 pub fn snapshot_list(env: &mut Env<'_>, a: &SnapshotListArgs) -> Result<u8> {
     let src = open_archive(&a.archive)?;
     let history = commit_history(&src, &env.read)?;
+    // Retention at the head, rebuilt from its segment's manifests (D10.10).
+    // If it cannot be, the commits are still listed, with retention unknown.
+    let retention =
+        match open_head(&src, &env.read).and_then(|h| segment_state(&src, &h, &env.read)) {
+            Ok(s) => Some(s.retention),
+            Err(e) => {
+                env.warn(format!("retention is unknown: {e}"));
+                None
+            }
+        };
+    let head_seq = history.last().map(|e| e.commit.seq);
     let time = |e: &mochi_core::publish::HistoryEntry| {
         e.commit
             .time
             .and_then(|t| Timestamp::from_unix(t.secs, t.nanos).ok())
             .map(|t| t.to_string())
     };
+    let holds = |seq: u64| -> Vec<&[u8]> {
+        retention
+            .iter()
+            .flat_map(|r| r.holds.iter())
+            .filter(|(_, s)| **s == seq)
+            .map(|(l, _)| l.as_slice())
+            .collect()
+    };
+    let expired = |seq: u64| retention.as_ref().map(|r| r.expired.contains(&seq));
+    let retained = |seq: u64| {
+        retention
+            .as_ref()
+            .zip(head_seq)
+            .map(|(r, h)| r.roots(h).contains(&seq))
+    };
     if env.json {
         let items: Vec<Value> = history
             .iter()
             .map(|e| {
+                let seq = e.commit.seq;
                 json!({
-                    "seq": e.commit.seq,
+                    "seq": seq,
                     "commit_id": e.commit_id.to_hex(),
                     "time": time(e),
                     "checkpoint": e.commit.metadata.is_checkpoint(),
                     "footer_offset": e.footer_offset,
+                    "expired": expired(seq),
+                    "holds": holds(seq).iter().map(|l| String::from_utf8_lossy(l)).collect::<Vec<_>>(),
+                    "retained": retained(seq),
                 })
             })
             .collect();
         let archive_id = history.last().map(|e| e.commit.archive_id.to_hex());
-        env.emit_json(&json!({"archive_id": archive_id, "commits": items}));
+        env.emit_json(&json!({
+            "archive_id": archive_id,
+            "retention_known": retention.is_some(),
+            "commits": items,
+        }));
     } else {
         for e in &history {
-            env.line(format!(
-                "{:>6}  {}  {}  {}",
-                e.commit.seq,
+            let seq = e.commit.seq;
+            let mut notes = Vec::new();
+            match expired(seq) {
+                Some(true) => notes.push("expired".to_string()),
+                Some(false) => {}
+                None => notes.push("retention unknown".to_string()),
+            }
+            for l in holds(seq) {
+                notes.push(format!("hold {}", text(l)));
+            }
+            let row = format!(
+                "{:>6}  {}  {}  {:<10}  {}",
+                seq,
                 e.commit_id.to_hex(),
                 time(e).unwrap_or_else(|| "-".repeat(30)),
                 if e.commit.metadata.is_checkpoint() {
                     "checkpoint"
                 } else {
                     "delta"
-                }
-            ));
+                },
+                notes.join(", ")
+            );
+            env.line(row.trim_end());
         }
     }
     Ok(exit::OK)
@@ -878,4 +928,436 @@ pub fn verify_cmd(env: &mut Env<'_>, a: &VerifyArgs, deep: bool) -> Result<u8> {
         print_report(env, command, &v.report);
     }
     Ok(v.report.exit_code)
+}
+
+// ---- retention, checkpoint, compaction, collection (plan C9) ---------------------
+
+/// Open `archive` for one new commit under its publication lock.
+fn open_writer(archive: &Path, read: ReadOptions) -> Result<ArchiveWriter<OsStorage>> {
+    let (mut dir, name) = location(archive)?;
+    let opts = WriterOptions {
+        read,
+        record_time: true,
+        ..WriterOptions::default()
+    };
+    Ok(
+        ArchiveWriter::open_append_in(&mut dir, &name, Box::new(OsIds), opts, TailRepair::Refuse)?
+            .0,
+    )
+}
+
+/// Publish `tx` (retention operations, or nothing for a forced checkpoint)
+/// and report it. `what` describes the change for the text output.
+fn commit_maintenance(
+    env: &mut Env<'_>,
+    command: &str,
+    archive: &Path,
+    mut w: ArchiveWriter<OsStorage>,
+    tx: Transaction,
+    what: &str,
+    detail: Value,
+) -> Result<u8> {
+    let (progress, cancel) = job();
+    let ctx = JobContext {
+        progress: &progress,
+        cancel: &cancel,
+    };
+    let archive_id = w.archive_id();
+    let outcome = w.commit(tx, &ctx)?;
+    if let Err(e) = w.close() {
+        env.warn(format!("closing the archive after the commit: {e}"));
+    }
+    env.remember(archive_id, outcome.seq, outcome.commit_id);
+    let unconfirmed = match &outcome.durability {
+        PublishDurability::Durable => None,
+        PublishDurability::DirectoryUnconfirmed(why) => Some(why.clone()),
+    };
+    let code = if unconfirmed.is_none() {
+        exit::OK
+    } else {
+        exit::DEGRADED
+    };
+    if env.json {
+        env.emit_json(&json!({
+            "command": command,
+            "archive": archive.display().to_string(),
+            "status": outcome.status.as_str(),
+            "archive_id": archive_id.to_hex(),
+            "seq": outcome.seq,
+            "commit_id": outcome.commit_id.to_hex(),
+            "checkpoint": outcome.checkpoint,
+            "durability": if unconfirmed.is_some() { "directory_unconfirmed" } else { "durable" },
+            "durability_note": unconfirmed,
+            "change": detail,
+            "exit_code": code,
+        }));
+    } else {
+        env.line(format!(
+            "committed commit {} to {} ({}): {what}",
+            outcome.seq,
+            archive.display(),
+            outcome.status.as_str(),
+        ));
+        env.line(format!("commit id {}", outcome.commit_id.to_hex()));
+        if let Some(why) = &unconfirmed {
+            env.line(format!(
+                "degraded: the archive's directory entry is not confirmed durable ({why})"
+            ));
+        }
+    }
+    Ok(code)
+}
+
+fn require_confirm(confirm: bool, what: &str) -> Result<()> {
+    if confirm {
+        Ok(())
+    } else {
+        Err(invalid(format!(
+            "{what} reduces retention (spec §16.3); repeat with --confirm to proceed. \
+             Nothing was committed"
+        )))
+    }
+}
+
+pub fn snapshot_retain(env: &mut Env<'_>, a: &RetainArgs) -> Result<u8> {
+    let w = open_writer(&a.archive, env.read)?;
+    let mut tx = Transaction::new();
+    tx.hold(a.label.as_bytes(), a.snapshot);
+    let detail = json!({"hold": {"label": a.label, "seq": a.snapshot}});
+    let what = format!(
+        "legal hold {} placed on snapshot {}; it stays retained until the hold is released",
+        text(a.label.as_bytes()),
+        a.snapshot
+    );
+    commit_maintenance(env, "snapshot retain", &a.archive, w, tx, &what, detail)
+}
+
+pub fn snapshot_expire(env: &mut Env<'_>, a: &ExpireArgs) -> Result<u8> {
+    require_confirm(a.confirm, "expiring a snapshot")?;
+    let w = open_writer(&a.archive, env.read)?;
+    let mut tx = Transaction::new();
+    for s in &a.snapshots {
+        tx.expire(*s);
+    }
+    let list = a
+        .snapshots
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let what = format!(
+        "snapshot{} {list} expired; still in this file, and kept by any legal hold. \
+         `mochi gc plan` shows what a new archive could leave out",
+        if a.snapshots.len() == 1 { "" } else { "s" }
+    );
+    let detail = json!({"expire": a.snapshots});
+    commit_maintenance(env, "snapshot expire", &a.archive, w, tx, &what, detail)
+}
+
+pub fn snapshot_release(env: &mut Env<'_>, a: &ReleaseArgs) -> Result<u8> {
+    require_confirm(a.confirm, "releasing a legal hold")?;
+    let w = open_writer(&a.archive, env.read)?;
+    let mut tx = Transaction::new();
+    tx.release(a.label.as_bytes());
+    let what = format!("legal hold {} released", text(a.label.as_bytes()));
+    let detail = json!({"release": {"label": a.label}});
+    commit_maintenance(env, "snapshot release", &a.archive, w, tx, &what, detail)
+}
+
+pub fn checkpoint(env: &mut Env<'_>, a: &CheckpointArgs) -> Result<u8> {
+    let mut w = open_writer(&a.archive, env.read)?;
+    w.request_checkpoint();
+    commit_maintenance(
+        env,
+        "checkpoint",
+        &a.archive,
+        w,
+        Transaction::new(),
+        "checkpoint written and verified against its snapshot before adoption (spec §18.1); \
+         the namespace is unchanged",
+        Value::Null,
+    )
+}
+
+/// Totals and snapshots of a GC plan, for the text output.
+fn print_gc_plan(env: &mut Env<'_>, p: &GcPlan) {
+    env.line(format!(
+        "plan for archive {} at commit {} ({})",
+        p.archive_id, p.head.seq, p.head.commit_id
+    ));
+    let seqs = |v: &[u64]| {
+        if v.is_empty() {
+            "none".to_string()
+        } else {
+            v.iter().map(u64::to_string).collect::<Vec<_>>().join(", ")
+        }
+    };
+    env.line(format!("retained snapshots: {}", seqs(&p.roots)));
+    env.line(format!("expired: {}", seqs(&p.expired)));
+    for h in &p.holds {
+        env.line(format!(
+            "legal hold {} on snapshot {}",
+            text(h.label.as_bytes()),
+            h.seq
+        ));
+    }
+    for c in &p.collectable_snapshots {
+        env.line(format!("collectable snapshot {}: {}", c.seq, c.reason));
+    }
+    env.line(format!(
+        "kept: {} file versions, {} chunks, {} stored bytes",
+        p.retained.file_versions, p.retained.chunks, p.retained.stored_bytes
+    ));
+    env.line(format!(
+        "collectable: {} file versions, {} chunks, {} stored bytes",
+        p.collectable.file_versions, p.collectable.chunks, p.collectable.stored_bytes
+    ));
+}
+
+pub fn gc_plan(env: &mut Env<'_>, a: &GcPlanArgs) -> Result<u8> {
+    let (progress, cancel) = job();
+    let ctx = JobContext {
+        progress: &progress,
+        cancel: &cancel,
+    };
+    let src = open_archive(&a.archive)?;
+    let p = gc::plan(&src, &env.read, &ctx)?;
+    let value = serde_json::to_value(&p)
+        .map_err(|e| MochiError::new(ErrorCode::IoError, format!("encoding the plan: {e}")))?;
+    if let Some(out) = &a.output {
+        write_new_file(out, format!("{value:#}\n").as_bytes())?;
+    }
+    if env.json {
+        if let Some(out) = &a.output {
+            env.emit_json(&json!({
+                "command": "gc plan",
+                "plan_file": out.display().to_string(),
+                "collects_anything": p.collects_anything(),
+                "plan": value,
+            }));
+        } else {
+            env.emit_json(&value);
+        }
+    } else {
+        print_gc_plan(env, &p);
+        match &a.output {
+            Some(out) => env.line(format!(
+                "plan written to {}; nothing was changed. Apply it with \
+                 `mochi gc apply {} --plan {} --output NEW_ARCHIVE`",
+                out.display(),
+                a.archive.display(),
+                out.display()
+            )),
+            None => env.line("nothing was changed; save a plan with --output to apply it"),
+        }
+    }
+    Ok(exit::OK)
+}
+
+/// Create `path` with `bytes`; never replaces an existing file.
+fn write_new_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| {
+            let code = if e.kind() == std::io::ErrorKind::AlreadyExists {
+                ErrorCode::DestinationExists
+            } else {
+                ErrorCode::IoError
+            };
+            MochiError::new(code, format!("{}: {e}", path.display()))
+        })?;
+    f.write_all(bytes)
+        .and_then(|()| f.sync_all())
+        .map_err(|e| MochiError::new(ErrorCode::IoError, format!("{}: {e}", path.display())))
+}
+
+/// Read a saved plan: its JSON value, archive ID, and head.
+fn read_plan(path: &Path) -> Result<(Value, String, PlanHead)> {
+    let bad = |why: String| invalid(format!("{}: not a gc plan ({why})", path.display()));
+    let bytes = std::fs::read(path)
+        .map_err(|e| MochiError::new(ErrorCode::IoError, format!("{}: {e}", path.display())))?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(|e| bad(e.to_string()))?;
+    let archive_id = value
+        .get("archive_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| bad("no archive_id".into()))?
+        .to_owned();
+    let head: PlanHead = value
+        .get("head")
+        .cloned()
+        .ok_or_else(|| bad("no head".into()))
+        .and_then(|h| serde_json::from_value(h).map_err(|e| bad(e.to_string())))?;
+    Ok((value, archive_id, head))
+}
+
+fn rewrite(
+    env: &mut Env<'_>,
+    command: &str,
+    archive: &Path,
+    output: &Path,
+    no_verify_content: bool,
+    plan: Option<&Path>,
+) -> Result<u8> {
+    let (progress, cancel) = job();
+    let ctx = JobContext {
+        progress: &progress,
+        cancel: &cancel,
+    };
+    let saved = plan.map(read_plan).transpose()?;
+    // Checked first so that naming the source itself (whose lock is about
+    // to be taken) reads as what it is. Publication refuses an existing
+    // name again, without a race (D13).
+    if std::fs::symlink_metadata(output).is_ok() {
+        return Err(MochiError::new(
+            ErrorCode::DestinationExists,
+            format!(
+                "{} exists; a new archive never replaces anything. Nothing was written",
+                output.display()
+            ),
+        ));
+    }
+    let (mut out_dir, out_name) = location(output)?;
+    // The source's publication lock is held from here until the new archive
+    // is published, so no commit can land in between (D18).
+    let w = open_writer(archive, env.read)?;
+    let keep = match &saved {
+        None => Keep::Every,
+        Some((value, archive_id, head)) => {
+            if *archive_id != w.archive_id().to_hex() {
+                return Err(invalid(format!(
+                    "the plan is for archive {archive_id}, not {} ({})",
+                    w.archive_id().to_hex(),
+                    archive.display()
+                )));
+            }
+            // Apply exactly what was approved: plan again under the lock and
+            // refuse any difference, a moved head included.
+            let now = gc::plan(w.storage(), &env.read, &ctx)?;
+            let now = serde_json::to_value(&now).map_err(|e| {
+                MochiError::new(ErrorCode::IoError, format!("encoding the plan: {e}"))
+            })?;
+            if now != *value {
+                return Err(invalid(format!(
+                    "the plan no longer matches the archive (it was made at commit {}; the \
+                     archive or its retention changed since): run `mochi gc plan` again. \
+                     Nothing was written",
+                    head.seq
+                )));
+            }
+            Keep::Roots(head.clone())
+        }
+    };
+    let options = CompactOptions {
+        verify_content: !no_verify_content,
+        ..CompactOptions::default()
+    };
+    let report = compact::compact(
+        &w,
+        &mut out_dir,
+        &out_name,
+        Box::new(OsIds),
+        &keep,
+        &options,
+        &ctx,
+    )?;
+    if let Err(e) = w.close() {
+        env.warn(format!("releasing the source archive's lock: {e}"));
+    }
+    // Remember the new archive's head: a later verify of it then has an
+    // anchor (D8).
+    match open_archive(output).and_then(|s| open_head(&s, &env.read)) {
+        Ok(h) => env.remember(h.commit.archive_id, h.seq(), h.commit_id),
+        Err(e) => env.warn(format!("the new archive's head was not recorded: {e}")),
+    }
+    let code = if report.durability_unconfirmed.is_none() {
+        exit::OK
+    } else {
+        exit::DEGRADED
+    };
+    if env.json {
+        let mut v = serde_json::to_value(&report).map_err(|e| {
+            MochiError::new(ErrorCode::IoError, format!("encoding the report: {e}"))
+        })?;
+        if let Value::Object(m) = &mut v {
+            m.insert("command".into(), json!(command));
+            m.insert("source".into(), json!(archive.display().to_string()));
+            m.insert("output".into(), json!(output.display().to_string()));
+            m.insert("exit_code".into(), json!(code));
+        }
+        env.emit_json(&v);
+    } else {
+        env.line(format!(
+            "wrote {} ({} bytes, archive {}): {} commit{} reproducing source snapshot{} {}",
+            output.display(),
+            report.new_len,
+            report.new_archive_id,
+            report.commits.len(),
+            if report.commits.len() == 1 { "" } else { "s" },
+            if report.commits.len() == 1 { "" } else { "s" },
+            report
+                .commits
+                .iter()
+                .map(|c| c.source_seq.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        if !report.collected.is_empty() {
+            env.line(format!(
+                "left out snapshot{}: {}",
+                if report.collected.len() == 1 { "" } else { "s" },
+                report
+                    .collected
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        env.line(format!(
+            "{} chunks ({} stored bytes) copied byte for byte; {} file versions{}",
+            report.chunks_copied,
+            report.stored_bytes_copied,
+            report.file_versions,
+            match report.versions_verified {
+                Some(n) => format!(", {n} read back and verified"),
+                None => ", NOT read back (--no-verify-content)".to_string(),
+            }
+        ));
+        if let Some(why) = &report.durability_unconfirmed {
+            env.line(format!(
+                "degraded: the new file's directory entry is not confirmed durable ({why})"
+            ));
+        }
+        env.line(format!(
+            "the source {} is unchanged and kept; the new archive has a new archive ID, so \
+             its first verification has no freshness anchor. Remove the source yourself only \
+             once you no longer need it",
+            archive.display()
+        ));
+    }
+    Ok(code)
+}
+
+pub fn compact_cmd(env: &mut Env<'_>, a: &CompactArgs) -> Result<u8> {
+    rewrite(
+        env,
+        "compact",
+        &a.archive,
+        &a.output,
+        a.no_verify_content,
+        None,
+    )
+}
+
+pub fn gc_apply(env: &mut Env<'_>, a: &GcApplyArgs) -> Result<u8> {
+    rewrite(
+        env,
+        "gc apply",
+        &a.archive,
+        &a.output,
+        a.no_verify_content,
+        Some(&a.plan),
+    )
 }

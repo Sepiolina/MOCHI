@@ -49,6 +49,7 @@ use serde::Serialize;
 use crate::catalog::extent::ExtentSource;
 use crate::catalog::namespace::{FileVersionId, Snapshot};
 use crate::catalog::path::ArchivePath;
+use crate::catalog::Catalog;
 use crate::commit::Metadata;
 use crate::error::{ErrorCode, MochiError, Result};
 use crate::gc::{mark, resolve_retention, PlanHead};
@@ -59,7 +60,8 @@ use crate::object::{load_stored, verify_stored, IdSource, ObjectId, ObjectRecord
 use crate::publish::CheckpointPolicy;
 use crate::publish::{
     commit_history, open_head, read_bound_manifest, segment_state, ArchiveWriter,
-    CheckpointTrigger, Dedup, PublishDurability, ReadOptions, Transaction, WriterOptions,
+    CheckpointTrigger, CommitOutcome, Dedup, OpenedHead, PublishDurability, ReadOptions,
+    Transaction, WriterOptions,
 };
 use crate::read::read_version;
 use crate::retention::{RetentionOp, RetentionState};
@@ -146,15 +148,204 @@ pub struct CompactReport {
 
 type Namespace = BTreeMap<ArchivePath, FileVersionId>;
 
-fn namespace(s: &Snapshot) -> Namespace {
+pub(crate) fn namespace(s: &Snapshot) -> Namespace {
     s.iter().map(|(p, e)| (p.clone(), e.version)).collect()
+}
+
+/// Writes snapshots into a new archive, one commit each, preserving
+/// version identity and copying stored chunks byte for byte (shared by
+/// compaction and repair, C8). It remembers what the new archive holds so
+/// each chunk and version is copied once, and what a baseline replay of the
+/// new archive's current segment sees (checklist Q64): a reference outside
+/// that forces a checkpoint.
+#[derive(Default)]
+pub(crate) struct Copier {
+    prev: Namespace,
+    /// Each commit's namespace as the diff from the one before, for
+    /// [`Copier::check_namespaces`].
+    diffs: Vec<(Vec<ArchivePath>, Namespace)>,
+    copied_versions: BTreeSet<FileVersionId>,
+    copied_chunks: BTreeSet<ObjectId>,
+    visible_versions: BTreeSet<FileVersionId>,
+    visible_chunks: BTreeSet<ObjectId>,
+    pub(crate) chunks_copied: u64,
+    pub(crate) bytes_copied: u64,
+}
+
+impl Copier {
+    /// Commits written so far.
+    pub(crate) fn commits(&self) -> u64 {
+        self.diffs.len() as u64
+    }
+
+    /// Commit `next` (every version in it described by `cat`, its chunks
+    /// stored in `src`) as the new archive's next snapshot. `extra` adds
+    /// anything else the commit carries (time, retention, provenance).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn commit<S: Storage>(
+        &mut self,
+        w: &mut ArchiveWriter<S>,
+        src: &dyn ReadStorage,
+        cat: &Catalog,
+        next: Namespace,
+        attributes: &BTreeMap<FileVersionId, Attributes>,
+        opts: &ReadOptions,
+        ctx: &JobContext<'_>,
+        extra: impl FnOnce(&mut Transaction),
+    ) -> Result<CommitOutcome> {
+        let deleted: Vec<ArchivePath> = self
+            .prev
+            .keys()
+            .filter(|p| !next.contains_key(*p))
+            .cloned()
+            .collect();
+        let put: Namespace = next
+            .iter()
+            .filter(|(p, v)| self.prev.get(*p) != Some(*v))
+            .map(|(p, v)| (p.clone(), *v))
+            .collect();
+
+        let mut tx = Transaction::new();
+        let mut force_checkpoint = false;
+        for p in &deleted {
+            tx.delete(p.clone());
+        }
+        for (p, id) in &put {
+            let (version, extents) = cat.file_version(id)?.ok_or_else(|| {
+                MochiError::new(
+                    ErrorCode::CatalogInvalid,
+                    "a snapshot names a version the catalog does not hold",
+                )
+            })?;
+            let attrs = *attributes.get(id).ok_or_else(|| {
+                MochiError::new(
+                    ErrorCode::RecordInvalid,
+                    format!("no delta manifest introduces version {id:?}"),
+                )
+            })?;
+            let mut stored = Vec::new();
+            if self.copied_versions.contains(id) {
+                force_checkpoint |= !self.visible_versions.contains(id);
+            } else {
+                for e in &extents {
+                    let ExtentSource::Chunk { chunk, .. } = e.source else {
+                        continue;
+                    };
+                    if self.copied_chunks.contains(&chunk) {
+                        force_checkpoint |= !self.visible_chunks.contains(&chunk);
+                        continue;
+                    }
+                    if stored
+                        .iter()
+                        .any(|(r, _): &(ObjectRecord, _)| r.id == chunk)
+                    {
+                        continue;
+                    }
+                    let record = cat.object(&chunk)?.ok_or_else(|| {
+                        MochiError::new(ErrorCode::CatalogInvalid, "unknown chunk")
+                    })?;
+                    let at = cat.object_location(&chunk)?.ok_or_else(|| {
+                        MochiError::new(
+                            ErrorCode::UnsupportedFeature,
+                            "a chunk without a location cannot be copied",
+                        )
+                    })?;
+                    let bytes = load_stored(src, at, &record, &opts.limits)?;
+                    verify_stored(&record, &bytes)?;
+                    stored.push((record, bytes));
+                }
+            }
+            tx.put_copied(
+                p.clone(),
+                FileVersionEntry {
+                    version,
+                    extents,
+                    attributes: attrs,
+                },
+                stored,
+            );
+        }
+        extra(&mut tx);
+        if force_checkpoint {
+            w.request_checkpoint();
+        }
+        let outcome = w.commit(tx, ctx)?;
+
+        // Bookkeeping for what the next commits may reference.
+        for id in put.values() {
+            if self.copied_versions.insert(*id) {
+                let (_, extents) = cat.file_version(id)?.ok_or_else(|| {
+                    MochiError::new(ErrorCode::CatalogInvalid, "version vanished")
+                })?;
+                for e in extents {
+                    if let ExtentSource::Chunk { chunk, .. } = e.source {
+                        if self.copied_chunks.insert(chunk) {
+                            let r = cat.object(&chunk)?.ok_or_else(|| {
+                                MochiError::new(ErrorCode::CatalogInvalid, "unknown chunk")
+                            })?;
+                            self.chunks_copied += 1;
+                            self.bytes_copied += r.stored_len;
+                        }
+                        self.visible_chunks.insert(chunk);
+                    }
+                }
+            }
+            self.visible_versions.insert(*id);
+        }
+        if outcome.checkpoint {
+            self.visible_versions = next.values().copied().collect();
+            self.visible_chunks.clear();
+            for id in &self.visible_versions {
+                if let Some((_, extents)) = cat.file_version(id)? {
+                    for e in extents {
+                        if let ExtentSource::Chunk { chunk, .. } = e.source {
+                            self.visible_chunks.insert(chunk);
+                        }
+                    }
+                }
+            }
+        }
+        self.prev = next;
+        self.diffs.push((deleted, put));
+        Ok(outcome)
+    }
+
+    /// Before publication: the new archive (opened at its head) has exactly
+    /// one commit per commit written, each with the namespace written.
+    pub(crate) fn check_namespaces(
+        &self,
+        new_head: &OpenedHead,
+        fail: &dyn Fn(String) -> MochiError,
+    ) -> Result<()> {
+        if new_head.commit.seq + 1 != self.commits() {
+            return Err(fail(format!(
+                "{} commits for {} written",
+                new_head.commit.seq + 1,
+                self.commits()
+            )));
+        }
+        let mut expected = Namespace::new();
+        let mut diffs = self.diffs.iter();
+        new_head.catalog.replay_each(|seq, snapshot| {
+            let (deleted, put) = diffs.next().ok_or_else(|| fail("extra commits".into()))?;
+            for p in deleted {
+                expected.remove(p);
+            }
+            expected.extend(put.iter().map(|(p, v)| (p.clone(), *v)));
+            if namespace(snapshot) != expected {
+                return Err(fail(format!("commit {seq}'s namespace differs")));
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
 }
 
 /// Every version's promised attributes, from every delta manifest of the
 /// archive (each hash-verified against its commit, the chain checked): a
 /// version is introduced exactly once, by the delta of the commit that
 /// wrote it, whether or not any later snapshot still reaches it.
-fn all_attributes(
+pub(crate) fn all_attributes(
     src: &dyn ReadStorage,
     opts: &ReadOptions,
 ) -> Result<BTreeMap<FileVersionId, Attributes>> {
@@ -301,123 +492,45 @@ where
         checkpoint_trigger: options.checkpoint_trigger,
         ..WriterOptions::default()
     };
-    let mut chunks_copied = 0u64;
-    let mut bytes_copied = 0u64;
     let mut versions_verified = None;
     let mut new_head_id = None;
     let mut new_ids: Vec<String> = Vec::new();
+    let mut copier = Copier::default();
 
     let (writer, (), durability) = ArchiveWriter::build_in(dir, name, ids, wopts, ctx, |w| {
-        // Expected namespace of each new commit, as the diff from the one
-        // before; checked against the source while building and against
-        // the new archive before publication.
-        let mut diffs: Vec<(Vec<ArchivePath>, Namespace)> = Vec::new();
-        let mut prev = Namespace::new();
-        let mut copied_versions: BTreeSet<FileVersionId> = BTreeSet::new();
-        let mut copied_chunks: BTreeSet<ObjectId> = BTreeSet::new();
-        // What a baseline replay of the new archive's current segment sees
-        // (checklist Q64): reachable at its base plus everything introduced
-        // since. A reference outside it forces a checkpoint.
-        let mut visible_versions: BTreeSet<FileVersionId> = BTreeSet::new();
-        let mut visible_chunks: BTreeSet<ObjectId> = BTreeSet::new();
         #[cfg(any(test, feature = "test-controls"))]
         if let Some(p) = options.checkpoint_policy {
             w.set_checkpoint_policy(p)?;
         }
         let last = roots.len().saturating_sub(1);
-        let mut done = 0u64;
         head.catalog.replay_each(|seq, snapshot| {
             let Some(&i) = new_seq.get(&seq) else {
                 return Ok(());
             };
             ctx.check_cancelled()?;
-            let next = namespace(snapshot);
-            let deleted: Vec<ArchivePath> = prev
-                .keys()
-                .filter(|p| !next.contains_key(*p))
-                .cloned()
-                .collect();
-            let put: Namespace = next
-                .iter()
-                .filter(|(p, v)| prev.get(*p) != Some(*v))
-                .map(|(p, v)| (p.clone(), *v))
-                .collect();
-
-            let mut tx = Transaction::new();
-            let mut force_checkpoint = false;
-            for p in &deleted {
-                tx.delete(p.clone());
-            }
-            for (p, id) in &put {
-                let (version, extents) = head.catalog.file_version(id)?.ok_or_else(|| {
-                    MochiError::new(
-                        ErrorCode::CatalogInvalid,
-                        "a snapshot names a version the catalog does not hold",
-                    )
-                })?;
-                let attrs = *attributes.get(id).ok_or_else(|| {
-                    MochiError::new(
-                        ErrorCode::RecordInvalid,
-                        format!("no delta manifest introduces version {id:?}"),
-                    )
-                })?;
-                let mut stored = Vec::new();
-                if copied_versions.contains(id) {
-                    force_checkpoint |= !visible_versions.contains(id);
-                } else {
-                    for e in &extents {
-                        let ExtentSource::Chunk { chunk, .. } = e.source else {
-                            continue;
-                        };
-                        if copied_chunks.contains(&chunk) {
-                            force_checkpoint |= !visible_chunks.contains(&chunk);
-                            continue;
-                        }
-                        if stored
-                            .iter()
-                            .any(|(r, _): &(ObjectRecord, _)| r.id == chunk)
-                        {
-                            continue;
-                        }
-                        let record = head.catalog.object(&chunk)?.ok_or_else(|| {
-                            MochiError::new(ErrorCode::CatalogInvalid, "unknown chunk")
-                        })?;
-                        let at = head.catalog.object_location(&chunk)?.ok_or_else(|| {
-                            MochiError::new(
-                                ErrorCode::UnsupportedFeature,
-                                "a chunk without a location cannot be copied",
-                            )
-                        })?;
-                        let bytes = load_stored(src, at, &record, &opts.limits)?;
-                        verify_stored(&record, &bytes)?;
-                        stored.push((record, bytes));
+            let time = source_commit(seq)?.commit.time;
+            let outcome = copier.commit(
+                w,
+                src,
+                &head.catalog,
+                namespace(snapshot),
+                &attributes,
+                &opts,
+                ctx,
+                |tx| {
+                    if i == 0 {
+                        tx.set_provenance(provenance.clone());
                     }
-                }
-                tx.put_copied(
-                    p.clone(),
-                    FileVersionEntry {
-                        version,
-                        extents,
-                        attributes: attrs,
-                    },
-                    stored,
-                );
-            }
-            if i == 0 {
-                tx.set_provenance(provenance.clone());
-            }
-            if i as usize == last {
-                for op in &retention_ops {
-                    tx.push_retention(op.clone());
-                }
-            }
-            if let Some(t) = source_commit(seq)?.commit.time {
-                tx.at(t);
-            }
-            if force_checkpoint {
-                w.request_checkpoint();
-            }
-            let outcome = w.commit(tx, ctx)?;
+                    if i as usize == last {
+                        for op in &retention_ops {
+                            tx.push_retention(op.clone());
+                        }
+                    }
+                    if let Some(t) = time {
+                        tx.at(t);
+                    }
+                },
+            )?;
             if outcome.seq != i {
                 return Err(MochiError::new(
                     ErrorCode::InvalidArgument,
@@ -425,45 +538,7 @@ where
                 ));
             }
             new_ids.push(hex(outcome.commit_id.as_bytes()));
-
-            // Bookkeeping for what the next commits may reference.
-            for id in put.values() {
-                if copied_versions.insert(*id) {
-                    let (_, extents) = head.catalog.file_version(id)?.ok_or_else(|| {
-                        MochiError::new(ErrorCode::CatalogInvalid, "version vanished")
-                    })?;
-                    for e in extents {
-                        if let ExtentSource::Chunk { chunk, .. } = e.source {
-                            if copied_chunks.insert(chunk) {
-                                let r = head.catalog.object(&chunk)?.ok_or_else(|| {
-                                    MochiError::new(ErrorCode::CatalogInvalid, "unknown chunk")
-                                })?;
-                                chunks_copied += 1;
-                                bytes_copied += r.stored_len;
-                            }
-                            visible_chunks.insert(chunk);
-                        }
-                    }
-                }
-                visible_versions.insert(*id);
-            }
-            if outcome.checkpoint {
-                visible_versions = next.values().copied().collect();
-                visible_chunks.clear();
-                for id in &visible_versions {
-                    if let Some((_, extents)) = head.catalog.file_version(id)? {
-                        for e in extents {
-                            if let ExtentSource::Chunk { chunk, .. } = e.source {
-                                visible_chunks.insert(chunk);
-                            }
-                        }
-                    }
-                }
-            }
-            prev = next;
-            diffs.push((deleted, put));
-            done += 1;
-            ctx.report(phase::COPY, done, Some(roots.len() as u64));
+            ctx.report(phase::COPY, copier.commits(), Some(roots.len() as u64));
             Ok(())
         })?;
 
@@ -484,19 +559,7 @@ where
                 roots.len()
             )));
         }
-        let mut expected = Namespace::new();
-        let mut diffs = diffs.into_iter();
-        new_head.catalog.replay_each(|seq, snapshot| {
-            let (deleted, put) = diffs.next().ok_or_else(|| fail("extra commits".into()))?;
-            for p in deleted {
-                expected.remove(&p);
-            }
-            expected.extend(put);
-            if namespace(snapshot) != expected {
-                return Err(fail(format!("commit {seq}'s namespace differs")));
-            }
-            Ok(())
-        })?;
+        copier.check_namespaces(&new_head, &fail)?;
         let written = all_attributes(out, &opts)?;
         let want: BTreeMap<FileVersionId, Attributes> = marked
             .versions
@@ -569,8 +632,8 @@ where
             })
             .collect::<Result<_>>()?,
         collected: provenance.collected.clone(),
-        chunks_copied,
-        stored_bytes_copied: bytes_copied,
+        chunks_copied: copier.chunks_copied,
+        stored_bytes_copied: copier.bytes_copied,
         file_versions: marked.versions.len() as u64,
         versions_verified,
         recovery_copies: "none required: the Core profile has no recovery-copy requirement",

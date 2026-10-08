@@ -2,7 +2,8 @@
 //!
 //! * Built: `create`, `append`, `list`, `get`, `snapshot list`, `snapshot
 //!   retain`/`expire`/`release`, `search`, `verify`, `fsck`, `restore-test`,
-//!   `checkpoint`, `compact`, `gc plan`, `gc apply`.
+//!   `checkpoint`, `compact`, `gc plan`, `gc apply`, `repair plan`,
+//!   `repair apply`.
 //! * In 1.0 scope but not built yet: exit 3 with `NOT_IMPLEMENTED` (a
 //!   development-build condition, never a success). Their arguments are
 //!   accepted and ignored, so the refusal names the command.
@@ -354,12 +355,39 @@ pub struct SnapshotListArgs {
     pub archive: PathBuf,
 }
 
+#[derive(Debug, Args)]
+pub struct RepairPlanArgs {
+    pub archive: PathBuf,
+    /// Write the plan (JSON) to this file, which must not exist. Without
+    /// it, `--json` prints the plan and text mode summarizes it.
+    #[arg(long, short = 'o', value_name = "PLAN_FILE")]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct RepairApplyArgs {
+    /// The damaged source archive the plan was made for. It is only read.
+    pub archive: PathBuf,
+    /// The plan written by `mochi repair plan --output`: the approval.
+    #[arg(long, value_name = "PLAN_FILE")]
+    pub plan: PathBuf,
+    /// The new archive. It must not exist; nothing is ever replaced.
+    #[arg(long, short = 'o', value_name = "NEW_ARCHIVE")]
+    pub output: PathBuf,
+    /// Write the repair although the source's retention state cannot be
+    /// rebuilt: the new archive then has no legal holds and nothing
+    /// expired. Recorded in the output.
+    #[arg(long)]
+    pub accept_retention_loss: bool,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum RepairCommand {
     /// Produce a proposed repair plan (never mutates).
-    Plan(PendingArgs),
-    /// Apply an explicitly approved repair plan.
-    Apply(PendingArgs),
+    Plan(RepairPlanArgs),
+    /// Apply an explicitly approved repair plan, writing a new archive.
+    /// The source is kept.
+    Apply(RepairApplyArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -467,8 +495,6 @@ impl Command {
     pub fn pending_args(&self) -> &[String] {
         match self {
             Command::Health(a)
-            | Command::Repair(RepairCommand::Plan(a))
-            | Command::Repair(RepairCommand::Apply(a))
             | Command::Rekey(a)
             | Command::DumpIndex(a)
             | Command::Inventory(a)
@@ -495,7 +521,8 @@ impl Command {
             | Command::RestoreTest(_)
             | Command::Checkpoint(_)
             | Command::Compact(_)
-            | Command::Gc(_) => Scope::Built,
+            | Command::Gc(_)
+            | Command::Repair(_) => Scope::Built,
             _ => Scope::InScope,
         }
     }

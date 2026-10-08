@@ -40,6 +40,7 @@ pub mod publish;
 pub mod quarantine;
 pub mod read;
 pub mod recovery;
+pub mod repair;
 pub mod report;
 pub mod restore;
 pub mod retention;

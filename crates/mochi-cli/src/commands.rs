@@ -23,6 +23,7 @@ use mochi_core::publish::{
     TailTruncation, Transaction, TruncationWaivers, WriterOptions,
 };
 use mochi_core::read::{list, read_file};
+use mochi_core::repair::{self, Outcome, RepairOptions, RepairPlan, RetentionPlan};
 use mochi_core::report::{Finding, Report, Severity};
 use mochi_core::restore::{restore_selected, ExceptionKind, RestoreOptions, RestoreReport};
 use mochi_core::search::{search, FullText, PathMatch, Query, SnapshotScope};
@@ -36,8 +37,8 @@ use serde_json::{json, Value};
 
 use crate::cli::{
     AppendArgs, CheckpointArgs, CompactArgs, CreateArgs, ExpireArgs, GcApplyArgs, GcPlanArgs,
-    GetArgs, KindArg, Level, ListArgs, ReleaseArgs, RestoreTestArgs, RetainArgs, SearchArgs,
-    SearchSnapshots, SnapshotListArgs, VerifyArgs,
+    GetArgs, KindArg, Level, ListArgs, ReleaseArgs, RepairApplyArgs, RepairPlanArgs,
+    RestoreTestArgs, RetainArgs, SearchArgs, SearchSnapshots, SnapshotListArgs, VerifyArgs,
 };
 use crate::render::{archive_path_arg, hex, path_fields, text};
 use crate::state::{HeadStore, SeenHead};
@@ -1539,4 +1540,311 @@ pub fn gc_apply(env: &mut Env<'_>, a: &GcApplyArgs) -> Result<u8> {
         a.no_verify_content,
         Some(&a.plan),
     )
+}
+
+// ---- repair (C8) ---------------------------------------------------------------
+
+/// Bytes from the plan's lowercase hex fields (paths, labels), for display
+/// through [`text`]; anything malformed is dropped.
+fn unhex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .filter_map(|i| s.get(i..i + 2).and_then(|h| u8::from_str_radix(h, 16).ok()))
+        .collect()
+}
+
+fn seq_list(v: &[u64]) -> String {
+    if v.is_empty() {
+        "none".to_string()
+    } else {
+        v.iter().map(u64::to_string).collect::<Vec<_>>().join(", ")
+    }
+}
+
+fn outcome_line(o: Outcome) -> &'static str {
+    match o {
+        Outcome::Complete => {
+            "complete: every snapshot and every entry can be written to a new archive"
+        }
+        Outcome::Partial => {
+            "PARTIAL: some snapshots, entries, retention, or bytes after the head cannot be \
+             recovered (listed above); a repair would be a partial salvage"
+        }
+        Outcome::NothingRecoverable => {
+            "nothing recoverable through §22 steps 1–4; the salvage scan (step 7) is not built"
+        }
+    }
+}
+
+fn print_repair_plan(env: &mut Env<'_>, p: &RepairPlan) {
+    env.line(format!(
+        "repair plan for archive {} ({} bytes)",
+        p.archive_id.as_deref().unwrap_or("(unknown: no head)"),
+        p.source_len
+    ));
+    if let Some(h) = &p.head {
+        env.line(format!(
+            "head: commit {} ({}), found {}",
+            h.seq,
+            h.commit_id,
+            if h.found_by == "eof" {
+                "at the end of the file"
+            } else {
+                "by scanning for the latest valid footer"
+            }
+        ));
+    }
+    if let Some(t) = p.tail.as_ref().filter(|t| t.state != "clean") {
+        env.line(format!(
+            "tail: {} bytes after the head's footer, {}{}",
+            t.len,
+            t.state,
+            t.detail
+                .as_deref()
+                .map(|d| format!(": {d}"))
+                .unwrap_or_default()
+        ));
+    }
+    if let Some(b) = &p.chain_break {
+        env.line(format!(
+            "chain: breaks below commit {} ({}: {}); earlier commit records are not trusted",
+            b.first_trusted_seq, b.reason.code, b.reason.message
+        ));
+    }
+    for s in &p.ladder {
+        let status = match s.status {
+            repair::StepStatus::Used => "used",
+            repair::StepStatus::NotNeeded => "not needed",
+            repair::StepStatus::NotAvailable => "not available",
+            repair::StepStatus::NotAttempted => "NOT ATTEMPTED",
+        };
+        let detail = if s.detail.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", s.detail)
+        };
+        env.line(format!("step {} {}: {status}{detail}", s.step, s.name));
+    }
+    let seqs: Vec<u64> = p.snapshots.iter().map(|s| s.seq).collect();
+    env.line(format!(
+        "recoverable snapshots ({}): {}",
+        seqs.len(),
+        seq_list(&seqs)
+    ));
+    for l in &p.lost_snapshots {
+        env.line(format!(
+            "lost snapshot {}: {}: {}",
+            l.seq, l.reason.code, l.reason.message
+        ));
+    }
+    for o in &p.omitted {
+        env.line(format!(
+            "left out {} {} (version {}) of snapshot{} {}: {}: {}",
+            o.kind,
+            text(&unhex(&o.path_hex)),
+            o.version_id,
+            if o.snapshots.len() == 1 { "" } else { "s" },
+            seq_list(&o.snapshots),
+            o.reason.code,
+            o.reason.message
+        ));
+    }
+    for m in &p.manifest_failures {
+        env.line(format!(
+            "damaged {} manifest of commit {}: {}: {}",
+            m.kind, m.seq, m.reason.code, m.reason.message
+        ));
+    }
+    match &p.retention {
+        Some(RetentionPlan::Carried { holds, expired }) => {
+            env.line(format!(
+                "retention: carried; expired: {}",
+                seq_list(expired)
+            ));
+            for h in holds {
+                let label = text(&unhex(&h.label_hex));
+                match h.new_seq {
+                    Some(n) => env.line(format!(
+                        "legal hold {label} on snapshot {} carried to new commit {n}",
+                        h.seq
+                    )),
+                    None => env.line(format!(
+                        "legal hold {label} is LOST with snapshot {}",
+                        h.seq
+                    )),
+                }
+            }
+        }
+        Some(RetentionPlan::Unresolved { reason }) => env.line(format!(
+            "retention: UNRESOLVED ({}: {}); applying needs --accept-retention-loss, and the \
+             new archive would have no legal holds and nothing expired",
+            reason.code, reason.message
+        )),
+        None => {}
+    }
+    env.line(format!("outcome: {}", outcome_line(p.outcome)));
+}
+
+pub fn repair_plan(env: &mut Env<'_>, a: &RepairPlanArgs) -> Result<u8> {
+    let (progress, cancel) = job();
+    let ctx = JobContext {
+        progress: &progress,
+        cancel: &cancel,
+    };
+    let src = open_archive(&a.archive)?;
+    let p = repair::plan(&src, &env.read, &ctx)?;
+    let value = serde_json::to_value(&p)
+        .map_err(|e| MochiError::new(ErrorCode::IoError, format!("encoding the plan: {e}")))?;
+    if let Some(out) = &a.output {
+        write_new_file(out, format!("{value:#}\n").as_bytes())?;
+    }
+    if env.json {
+        if let Some(out) = &a.output {
+            env.emit_json(&json!({
+                "command": "repair plan",
+                "plan_file": out.display().to_string(),
+                "outcome": p.outcome,
+                "exit_code": p.exit_code,
+                "plan": value,
+            }));
+        } else {
+            env.emit_json(&value);
+        }
+    } else {
+        print_repair_plan(env, &p);
+        match (&a.output, p.outcome) {
+            (_, Outcome::NothingRecoverable) => {
+                env.line("nothing was changed; there is nothing to apply")
+            }
+            (Some(out), _) => env.line(format!(
+                "plan written to {}; nothing was changed. Apply it with \
+                 `mochi repair apply {} --plan {} --output NEW_ARCHIVE`",
+                out.display(),
+                a.archive.display(),
+                out.display()
+            )),
+            (None, _) => env.line("nothing was changed; save a plan with --output to apply it"),
+        }
+    }
+    Ok(p.exit_code)
+}
+
+pub fn repair_apply(env: &mut Env<'_>, a: &RepairApplyArgs) -> Result<u8> {
+    let (progress, cancel) = job();
+    let ctx = JobContext {
+        progress: &progress,
+        cancel: &cancel,
+    };
+    let bytes = std::fs::read(&a.plan)
+        .map_err(|e| MochiError::new(ErrorCode::IoError, format!("{}: {e}", a.plan.display())))?;
+    let approved: RepairPlan = serde_json::from_slice(&bytes).map_err(|e| {
+        invalid(format!(
+            "{}: not a repair plan of this build ({e})",
+            a.plan.display()
+        ))
+    })?;
+    if std::fs::symlink_metadata(&a.output).is_ok() {
+        return Err(MochiError::new(
+            ErrorCode::DestinationExists,
+            format!(
+                "{} exists; a new archive never replaces anything. Nothing was written",
+                a.output.display()
+            ),
+        ));
+    }
+    let (mut out_dir, out_name) = location(&a.output)?;
+    // The source is only read: repair never writes to it (§22.2).
+    let src = open_archive(&a.archive)?;
+    let options = RepairOptions {
+        accept_retention_loss: a.accept_retention_loss,
+        ..RepairOptions::default()
+    };
+    let report = repair::apply(
+        &src,
+        &approved,
+        &mut out_dir,
+        &out_name,
+        Box::new(OsIds),
+        &env.read,
+        &options,
+        &ctx,
+    )?;
+    // Remember the new archive's head: a later verify of it then has an
+    // anchor (D8).
+    match open_archive(&a.output).and_then(|s| open_head(&s, &env.read)) {
+        Ok(h) => env.remember(h.commit.archive_id, h.seq(), h.commit_id),
+        Err(e) => env.warn(format!("the new archive's head was not recorded: {e}")),
+    }
+    if env.json {
+        let mut v = serde_json::to_value(&report).map_err(|e| {
+            MochiError::new(ErrorCode::IoError, format!("encoding the report: {e}"))
+        })?;
+        if let Value::Object(m) = &mut v {
+            m.insert("command".into(), json!("repair apply"));
+            m.insert("source".into(), json!(a.archive.display().to_string()));
+            m.insert("output".into(), json!(a.output.display().to_string()));
+        }
+        env.emit_json(&v);
+    } else {
+        let label = match report.outcome {
+            Outcome::Complete => "repaired (complete)",
+            _ => "PARTIAL repair (salvage)",
+        };
+        env.line(format!(
+            "{label}: wrote {} ({} bytes, archive {}) with {} commit{} from source snapshot{} {}",
+            a.output.display(),
+            report.new_len,
+            report.new_archive_id,
+            report.commits.len(),
+            if report.commits.len() == 1 { "" } else { "s" },
+            if report.commits.len() == 1 { "" } else { "s" },
+            seq_list(
+                &report
+                    .commits
+                    .iter()
+                    .map(|c| c.source_seq)
+                    .collect::<Vec<_>>()
+            )
+        ));
+        if !report.lost_snapshots.is_empty() {
+            let lost: Vec<u64> = report.lost_snapshots.iter().map(|l| l.seq).collect();
+            env.line(format!(
+                "NOT recovered: snapshot{} {}",
+                if lost.len() == 1 { "" } else { "s" },
+                seq_list(&lost)
+            ));
+        }
+        if !report.omitted.is_empty() {
+            env.line(format!(
+                "NOT recovered: {} entr{} left out (listed in the plan and in --json output)",
+                report.omitted.len(),
+                if report.omitted.len() == 1 {
+                    "y"
+                } else {
+                    "ies"
+                }
+            ));
+        }
+        if report.retention_loss_accepted {
+            env.line(
+                "retention NOT carried (--accept-retention-loss): the new archive has no legal \
+                 holds and nothing expired",
+            );
+        }
+        env.line(format!(
+            "re-verified before publication ({}): {:?}",
+            report.reverification.level, report.reverification.overall_status
+        ));
+        if let Some(why) = &report.durability_unconfirmed {
+            env.line(format!(
+                "degraded: the new file's directory entry is not confirmed durable ({why})"
+            ));
+        }
+        env.line(format!(
+            "the source {} is unchanged and kept; the new archive has a new archive ID, so \
+             its first verification has no freshness anchor",
+            a.archive.display()
+        ));
+    }
+    Ok(report.exit_code)
 }

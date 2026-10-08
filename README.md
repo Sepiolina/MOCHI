@@ -161,12 +161,16 @@ separately: integrity is `PASS` only when stored bytes were read, freshness is
 `UNKNOWN` without an anchor (a user-supplied expected head or this client's
 last-seen head), and an older copy of an archive is caught as a rollback.
 
-Commands not built yet (`search`, `health`, `repair`, `checkpoint`,
-`compact`, `gc`, `rekey`, `dump-index`, `snapshot retain`) exit `3` with
+**C8 (repair, first slice):** `mochi repair plan` and `mochi repair apply`
+recover what the §22 ladder reaches through recovery manifests (step 4) into
+a new archive, leave out and list anything that cannot be recovered, verify
+the result before publishing it, and never write to the damaged source. A
+partial repair is labelled partial and exits `2`.
+
+Commands not built yet (`health`, `rekey`, `dump-index`) exit `3` with
 `NOT_IMPLEMENTED`, and post-1.0 commands (`inventory`, `split`, `join`,
-`mount`) exit `4` with `UNSUPPORTED_FEATURE`, as spec §23.2 requires. Next:
-C8 (recovery and repair), C9 (checkpoint, compaction, GC), and the desktop
-shell (D0).
+`mount`) exit `4` with `UNSUPPORTED_FEATURE`, as spec §23.2 requires. See
+`docs/implementation-plan.md` for the status of every phase.
 
 ## License
 

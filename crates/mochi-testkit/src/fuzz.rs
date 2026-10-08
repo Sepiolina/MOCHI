@@ -354,6 +354,7 @@ pub fn exercise_archive_open(data: &[u8]) -> ArchiveOpenOutcome {
     // or not the head opens, and must never return a state for another commit.
     baseline_recovery_is_sound(&storage, &opts);
     damage_assessment_is_sound(&storage, &opts);
+    repair_plan_is_sound(&storage, &opts);
     let Ok(head) = mochi_core::publish::open_head(&storage, &opts) else {
         return ArchiveOpenOutcome::Refused;
     };
@@ -499,6 +500,65 @@ fn damage_assessment_is_sound(
             !e.message.starts_with("internal:"),
             "the assessment found itself inconsistent: {e}"
         ),
+    }
+}
+
+/// C8: a repair plan of any input is internally consistent. Planning may
+/// fail only for operational reasons (here, the small fuzz limits); damage
+/// is the plan's content. Every sequence up to the head is either recovered
+/// or lost, never both; omissions name recovered snapshots only; the
+/// outcome follows from what is listed and never claims more.
+fn repair_plan_is_sound(storage: &crate::SimStorage, opts: &mochi_core::publish::ReadOptions) {
+    use mochi_core::job::{CancellationToken, JobContext, NullProgress};
+    use mochi_core::repair::{plan, Outcome};
+    use mochi_core::verify::{classify, ErrorClass};
+    let cancel = CancellationToken::new();
+    let ctx = JobContext {
+        progress: &NullProgress,
+        cancel: &cancel,
+    };
+    let p = match plan(storage, opts, &ctx) {
+        Ok(p) => p,
+        Err(e) => {
+            assert_eq!(
+                classify(e.code),
+                ErrorClass::Operational,
+                "repair planning failed on evidence instead of recording it: {e}"
+            );
+            return;
+        }
+    };
+    assert_eq!(p.exit_code, p.outcome.exit_code());
+    let recovered: Vec<u64> = p.snapshots.iter().map(|s| s.seq).collect();
+    assert!(recovered.windows(2).all(|w| w[0] < w[1]));
+    let lost: Vec<u64> = p.lost_snapshots.iter().map(|l| l.seq).collect();
+    assert!(lost.windows(2).all(|w| w[0] < w[1]));
+    match &p.head {
+        None => {
+            assert_eq!(p.outcome, Outcome::NothingRecoverable);
+            assert!(recovered.is_empty() && lost.is_empty());
+        }
+        Some(h) => {
+            let mut all: Vec<u64> = recovered.iter().chain(&lost).copied().collect();
+            all.sort_unstable();
+            assert_eq!(all, (0..=h.seq).collect::<Vec<_>>());
+            assert!(recovered.iter().all(|s| s.le(&h.seq)));
+        }
+    }
+    for o in &p.omitted {
+        assert!(!o.snapshots.is_empty());
+        assert!(o
+            .snapshots
+            .iter()
+            .all(|s| recovered.binary_search(s).is_ok()));
+    }
+    match p.outcome {
+        Outcome::NothingRecoverable => assert!(recovered.is_empty()),
+        Outcome::Complete => {
+            assert!(!recovered.is_empty() && lost.is_empty() && p.omitted.is_empty());
+            assert_eq!(p.tail.as_ref().map(|t| t.state.as_str()), Some("clean"));
+        }
+        Outcome::Partial => assert!(!recovered.is_empty()),
     }
 }
 

@@ -404,6 +404,17 @@ impl WriterParams {
     }
 }
 
+/// The writer parameters (chunk size, zstd level) a catalog image records,
+/// as [`WriterOptions`] takes them; `None` for a catalog without them (one
+/// rebuilt from a snapshot manifest, review decision Q29). Repair (C8)
+/// carries them into the archive it writes.
+pub fn recorded_writer_parameters(catalog: &Catalog) -> Result<Option<(u64, i32)>> {
+    catalog
+        .meta(META_WRITER_PARAMS)?
+        .map(|b| WriterParams::decode(&b).map(|p| (p.chunk_size, p.zstd_level)))
+        .transpose()
+}
+
 // ---- locating the head -----------------------------------------------------------
 
 /// How the head footer was found.
@@ -1546,36 +1557,85 @@ pub(crate) fn walk_back(
         if child.commit.seq == down_to {
             break;
         }
-        let Some(p) = child.commit.parent else { break };
-        if p.footer_offset >= child.footer_offset {
-            return Err(MochiError::new(
-                ErrorCode::RecordInvalid,
-                "parent footer hint does not precede the child",
-            ));
-        }
-        let footer = validate_footer(&r, p.footer_offset, &opts.limits)?;
-        let (commit, commit_id) = read_commit(src, &footer, opts)?;
-        if commit_id != p.commit_id
-            || commit.seq != p.seq
-            || commit.archive_id != child.commit.archive_id
-        {
-            return Err(MochiError::new(
-                ErrorCode::RecordInvalid,
-                format!(
-                    "commit {} names a parent that is not at its hint",
-                    child.commit.seq
-                ),
-            ));
-        }
-        out.push(HistoryEntry {
-            footer_offset: p.footer_offset,
-            commit_offset: footer.fields.commit_offset,
-            commit,
-            commit_id,
-        });
+        let Some(parent) = parent_entry(src, &r, child, opts)? else {
+            break;
+        };
+        out.push(parent);
     }
     out.reverse();
     Ok(out)
+}
+
+/// The commit `child` names as its parent, validated as [`walk_back`]
+/// validates it; `None` for commit 0.
+fn parent_entry(
+    src: &dyn ReadStorage,
+    r: &StorageReader<'_>,
+    child: &HistoryEntry,
+    opts: &ReadOptions,
+) -> Result<Option<HistoryEntry>> {
+    let Some(p) = child.commit.parent else {
+        return Ok(None);
+    };
+    if p.footer_offset >= child.footer_offset {
+        return Err(MochiError::new(
+            ErrorCode::RecordInvalid,
+            "parent footer hint does not precede the child",
+        ));
+    }
+    let footer = validate_footer(r, p.footer_offset, &opts.limits)?;
+    let (commit, commit_id) = read_commit(src, &footer, opts)?;
+    if commit_id != p.commit_id
+        || commit.seq != p.seq
+        || commit.archive_id != child.commit.archive_id
+    {
+        return Err(MochiError::new(
+            ErrorCode::RecordInvalid,
+            format!(
+                "commit {} names a parent that is not at its hint",
+                child.commit.seq
+            ),
+        ));
+    }
+    Ok(Some(HistoryEntry {
+        footer_offset: p.footer_offset,
+        commit_offset: footer.fields.commit_offset,
+        commit,
+        commit_id,
+    }))
+}
+
+/// The published chain as far back from the head as it can be followed
+/// (repair, C8; spec §22 step 2): the commits from the first one whose
+/// parent cannot be validated up to the head, in ascending order, and that
+/// failure. Every commit returned is linked to the head; nothing before a
+/// break is trusted, whatever a scan would find (§22.1). Errors that
+/// compromise the run (operational, [`crate::verify::classify`]: I/O,
+/// cancellation, limits) are returned as errors, not as a break.
+pub(crate) fn walk_back_tolerant(
+    src: &dyn ReadStorage,
+    head: HistoryEntry,
+    opts: &ReadOptions,
+) -> Result<(Vec<HistoryEntry>, Option<MochiError>)> {
+    let r = reader(src)?;
+    let mut out = vec![head];
+    let mut broken = None;
+    loop {
+        let child = &out[out.len() - 1];
+        match parent_entry(src, &r, child, opts) {
+            Ok(Some(parent)) => out.push(parent),
+            Ok(None) => break,
+            Err(e) if crate::verify::classify(e.code) == crate::verify::ErrorClass::Operational => {
+                return Err(e)
+            }
+            Err(e) => {
+                broken = Some(e);
+                break;
+            }
+        }
+    }
+    out.reverse();
+    Ok((out, broken))
 }
 
 /// Result of baseline recovery (Annex B.2 D10.8) for one head.

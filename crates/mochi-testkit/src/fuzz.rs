@@ -355,6 +355,7 @@ pub fn exercise_archive_open(data: &[u8]) -> ArchiveOpenOutcome {
     baseline_recovery_is_sound(&storage, &opts);
     damage_assessment_is_sound(&storage, &opts);
     repair_plan_is_sound(&storage, &opts);
+    deep_verify_is_sound(&storage, &opts);
     let Ok(head) = mochi_core::publish::open_head(&storage, &opts) else {
         return ArchiveOpenOutcome::Refused;
     };
@@ -500,6 +501,37 @@ fn damage_assessment_is_sound(
             !e.message.starts_with("internal:"),
             "the assessment found itself inconsistent: {e}"
         ),
+    }
+}
+
+/// Q64: `fsck`'s deep structural verification (which recovers every replay
+/// segment from its baseline) never panics on arbitrary bytes, its report
+/// keeps the invariants, and a reference outside the baseline view is a
+/// recoverability failure that does not fail Integrity by itself.
+fn deep_verify_is_sound(storage: &crate::SimStorage, opts: &mochi_core::publish::ReadOptions) {
+    use mochi_core::job::{CancellationToken, JobContext, NullProgress};
+    use mochi_core::status::{Dimension, Status, VerificationLevel};
+    use mochi_core::verify::{verify, VerifyOptions};
+    use mochi_core::ErrorCode;
+    let cancel = CancellationToken::new();
+    let ctx = JobContext {
+        progress: &NullProgress,
+        cancel: &cancel,
+    };
+    let o = VerifyOptions {
+        level: VerificationLevel::Structural,
+        read: *opts,
+        deep: true,
+        ..VerifyOptions::default()
+    };
+    let r = verify(storage, &o, &ctx).report;
+    r.validate()
+        .unwrap_or_else(|e| panic!("deep verify broke the report invariants: {e:?}"));
+    if r.findings
+        .iter()
+        .any(|f| f.code == ErrorCode::ReferenceInvalid)
+    {
+        assert_eq!(r.dimensions[&Dimension::Recoverability], Status::Fail);
     }
 }
 

@@ -19,7 +19,7 @@ use clap::error::ErrorKind;
 use clap::{CommandFactory, FromArgMatches};
 use mochi_core::{ErrorCode, MochiError};
 
-use cli::{Cli, Command, GcCommand, Scope, SnapshotCommand};
+use cli::{Cli, Command, GcCommand, RepairCommand, Scope, SnapshotCommand};
 
 fn long_version() -> String {
     format!(
@@ -198,6 +198,8 @@ where
         Command::Compact(a) => commands::compact_cmd(&mut env, a),
         Command::Gc(GcCommand::Plan(a)) => commands::gc_plan(&mut env, a),
         Command::Gc(GcCommand::Apply(a)) => commands::gc_apply(&mut env, a),
+        Command::Repair(RepairCommand::Plan(a)) => commands::repair_plan(&mut env, a),
+        Command::Repair(RepairCommand::Apply(a)) => commands::repair_apply(&mut env, a),
         Command::Verify(a) => commands::verify_cmd(&mut env, a, false),
         Command::Fsck(a) => commands::verify_cmd(&mut env, a, true),
         Command::RestoreTest(a) => commands::restore_test(&mut env, a),

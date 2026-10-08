@@ -36,8 +36,6 @@ fn post_1_0_commands_exit_4_not_3() {
 fn in_scope_but_unbuilt_commands_are_an_operational_error_never_success() {
     for cmd in [
         &["health", "a.mochi"][..],
-        &["repair", "plan", "a.mochi"],
-        &["repair", "apply", "plan.json"],
         &["rekey", "a.mochi"],
         &["dump-index", "a.mochi"],
     ] {

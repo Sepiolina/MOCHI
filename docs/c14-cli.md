@@ -1,6 +1,6 @@
 # The `mochi` CLI (plan C7, C14): commands, rules, and concessions
 
-Status 2026-10-06. Built: `create`, `append`, `list`, `get`, `snapshot list`, `verify`, `fsck`, `restore-test`. In 1.0 scope, not built (exit 3, `NOT_IMPLEMENTED`): `snapshot retain`, `search`, `health`, `repair plan|apply`, `checkpoint`, `compact`, `gc plan|apply`, `rekey`, `dump-index`. Post-1.0 (exit 4): `inventory`, `split`, `join`, `mount`.
+Status 2026-10-08. Built: `create`, `append`, `list`, `get`, `snapshot list|retain|expire|release`, `verify`, `fsck`, `restore-test`, and (C9 commands, 2026-10-08) `checkpoint`, `compact`, `gc plan|apply`. In 1.0 scope, not built (exit 3, `NOT_IMPLEMENTED`): `search`, `health`, `repair plan|apply`, `rekey`, `dump-index`. Post-1.0 (exit 4): `inventory`, `split`, `join`, `mount`.
 
 The CLI is a thin client (spec §23.3 #1, §23.4). Format logic, verification, restore, and the filesystem import live in `mochi-core` (`verify`, `restore`, `import`, `storage::os::OsSourceTree`), so the desktop app (D2–D4) calls the same functions and gets the same results. The CLI adds only argument parsing, rendering, exit codes, and the local head history.
 
@@ -12,7 +12,14 @@ The CLI is a thin client (spec §23.3 #1, §23.4). Format logic, verification, r
 | `mochi append ARCHIVE [INPUT…] [--delete PATH]…` | One new commit: deletions first (each with everything under it), then inputs added or replaced | as `create`; 3 `UNCOMMITTED_TAIL` if an interrupted write left a tail |
 | `mochi append … --truncate-tail [--no-quarantine] [--accept-unconfirmed-durability]` | Quarantines an eligible tail (D14) to a verified sidecar `<name>.tail-<offset>-<16 hex>.mochiq`, truncates it, then commits (or only truncates, if nothing else was asked). Waivers are recorded in the output | 0; 3 `QUARANTINE_FAILED` / `DURABILITY_UNCONFIRMED` / `TAIL_UNRESOLVED` |
 | `mochi list ARCHIVE [PATH] [--snapshot SEQ]` | The namespace of the head or of commit `SEQ`, optionally under `PATH` | 0 |
-| `mochi snapshot list ARCHIVE` | Every commit: sequence, commit ID, recorded time, checkpoint or delta | 0 |
+| `mochi snapshot list ARCHIVE` | Every commit: sequence, commit ID, recorded time, checkpoint or delta, and its retention at the head (expired, holds, retained). If retention cannot be rebuilt the commits are still listed, with retention unknown and a warning | 0 |
+| `mochi snapshot retain ARCHIVE SEQ --label L` (alias `hold`) | One commit placing a legal hold `L` on snapshot `SEQ` (Annex B D18) | 0; 2 directory unconfirmed; 3 `INVALID_ARGUMENT` for an invalid hold, nothing committed |
+| `mochi snapshot expire ARCHIVE SEQ… --confirm` | One commit expiring earlier snapshots. Irreversible (there is no un-expire operation); a held snapshot stays retained | as `retain`; 3 without `--confirm` |
+| `mochi snapshot release ARCHIVE --label L --confirm` | One commit releasing hold `L` | as `expire` |
+| `mochi checkpoint ARCHIVE` | One commit with an unchanged namespace, written as a checkpoint (`request_checkpoint`; verified before adoption, D10.7) | 0; 2 directory unconfirmed |
+| `mochi gc plan ARCHIVE [--output PLAN]` | Read-only. The GC plan (`mochi_core::gc::GcPlan`): head, expiries, holds, roots, collectable snapshots with reasons, totals, IDs. `--output` saves it (never replacing a file) | 0; 1 `RETENTION_UNRESOLVED`; 3 `DESTINATION_EXISTS` |
+| `mochi gc apply ARCHIVE --plan PLAN --output NEW [--no-verify-content]` | Under the source's lock, plans again and refuses any difference from the saved plan (a moved head, changed retention, an edited file, another archive); then writes `NEW` with the retained roots only (`compact`, `Keep::Roots`). The source is unchanged and kept | 0; 2 if `NEW`'s directory entry is unconfirmed; 3 `INVALID_ARGUMENT` (stale or foreign plan), `DESTINATION_EXISTS` |
+| `mochi compact ARCHIVE --output NEW [--no-verify-content]` | Writes every snapshot into `NEW` (`Keep::Every`), one commit each. The source is unchanged and kept | as `gc apply` |
 | `mochi get ARCHIVE [PATH…] [-C DIR] [--snapshot SEQ]` | Restores everything or the given subtrees into `DIR` (default `.`; created if missing) through the C6 engine | 0; 1 if any file failed verification (it is absent, never partial); 2 if any entry was not restored for another reason (collision, unsupported name); 3 with `--refuse-on-conflict` when the preflight finds one |
 | `mochi get ARCHIVE PATH --stdout` | One file's bytes to standard output | 0; 1 on an integrity failure, and the bytes already written are unverified |
 | `mochi restore-test ARCHIVE -C NEWDIR` | Restores the whole commit into a directory that must not exist yet | as `get`; 3 `DESTINATION_EXISTS` |
@@ -30,7 +37,10 @@ Errors in `--json` mode are one line on standard output: `{"error": {"code": "�
 3. **Freshness anchor (Annex B.1 D8).** The CLI keeps the last-seen head per archive ID in `heads.json` (`--state-dir`, else `$MOCHI_STATE_DIR`, else `$XDG_STATE_HOME/mochi`, `~/.local/state/mochi`, or `%LOCALAPPDATA%\mochi`). It records a head after its own `create`/`append`, and after a `verify`/`fsck` in which nothing failed. The recorded sequence never decreases, so a rolled-back copy cannot move the anchor back. `--no-local-history` opts out. A damaged history file is a warning on standard error, and freshness then has no anchor.
 4. **`get` exit codes.** Attributes that could not be applied (for example ownership as an unprivileged user) are warnings only; they do not change the exit code, or every unprivileged extraction would exit 2.
 5. **Unsupported source entries.** Symbolic links (O6 decided, not built), devices, FIFOs, and sockets are skipped and listed; the command exits 2. Links are never followed. An entry that cannot be read fails the whole command before anything is committed.
-6. **Verification output.** `verify` refuses to print a report that fails `Report::validate` (`REPORT_INCONSISTENT`, exit 3). Its exit code is the report's `exit_code`, computed by `Report::conclude`, so the CLI obeys D15 through one path (gate G9).
+6. **Retention reductions are confirmed (spec §16.3).** `snapshot expire` and `snapshot release` refuse without `--confirm` and commit nothing. Placing a hold needs no confirmation. Elevated authorization and a delay are deployment policy, not built (§16.3 says SHOULD).
+7. **A GC plan is applied exactly as approved.** `gc apply` recomputes the plan under the source's publication lock and compares the whole JSON value with the saved file, so it never collects more or less than what the user reviewed.
+8. **Rewrites never replace anything and never touch the source.** `compact` and `gc apply` refuse an existing output name before taking any lock (`DESTINATION_EXISTS`; publication refuses it again, D13), say that the source is unchanged and kept, and record the new archive's head as its freshness anchor (a new archive ID, so the old anchor does not carry over). Removing the source is left to the user (D18).
+9. **Verification output.** `verify` refuses to print a report that fails `Report::validate` (`REPORT_INCONSISTENT`, exit 3). Its exit code is the report's `exit_code`, computed by `Report::conclude`, so the CLI obeys D15 through one path (gate G9).
 
 ## Concessions (to refine later; each is separable)
 
@@ -47,4 +57,4 @@ Errors in `--json` mode are one line on standard output: `{"error": {"code": "�
 
 ## What is not in this slice
 
-`health` (needs stored evidence and policy files), `search` (C13), `repair` (C8), `checkpoint`/`compact`/`gc` and `snapshot retain` (C9), `rekey` (C11), `dump-index`. They keep exiting 3 `NOT_IMPLEMENTED`, never success.
+`health` (needs stored evidence and policy files), `search` (C13), `repair` (C8), `rekey` (C11), `dump-index`. They keep exiting 3 `NOT_IMPLEMENTED`, never success.

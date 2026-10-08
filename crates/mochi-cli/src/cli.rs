@@ -1,7 +1,8 @@
 //! Command surface (spec §23, §23.2 "1.0 command scope"; plan C14).
 //!
-//! * Built: `create`, `append`, `list`, `get`, `snapshot list`, `verify`,
-//!   `fsck`, `restore-test`.
+//! * Built: `create`, `append`, `list`, `get`, `snapshot list`, `snapshot
+//!   retain`/`expire`/`release`, `verify`, `fsck`, `restore-test`,
+//!   `checkpoint`, `compact`, `gc plan`, `gc apply`.
 //! * In 1.0 scope but not built yet: exit 3 with `NOT_IMPLEMENTED` (a
 //!   development-build condition, never a success). Their arguments are
 //!   accepted and ignored, so the refusal names the command.
@@ -191,10 +192,95 @@ pub struct VerifyArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum SnapshotCommand {
-    /// List the archive's commits, oldest first.
+    /// List the archive's commits, oldest first, with their retention.
     List(SnapshotListArgs),
-    /// Retain a snapshot (plan C9; not built yet).
-    Retain(PendingArgs),
+    /// Place a legal hold: the snapshot stays retained, expired or not,
+    /// until the hold is released (spec §16.3). One new commit.
+    #[command(visible_alias = "hold")]
+    Retain(RetainArgs),
+    /// Expire earlier snapshots: they stop being retained unless held, and
+    /// a later `gc` may leave them out of a new archive. Irreversible; needs
+    /// `--confirm`. One new commit.
+    Expire(ExpireArgs),
+    /// Release a legal hold. Needs `--confirm`. One new commit.
+    Release(ReleaseArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct RetainArgs {
+    pub archive: PathBuf,
+    /// The commit sequence to hold.
+    pub snapshot: u64,
+    /// The hold's label (1 to 255 bytes, unique among active holds).
+    #[arg(long, value_name = "LABEL")]
+    pub label: String,
+}
+
+#[derive(Debug, Args)]
+pub struct ExpireArgs {
+    pub archive: PathBuf,
+    /// Commit sequences to expire (earlier than the head).
+    #[arg(required = true, num_args = 1..)]
+    pub snapshots: Vec<u64>,
+    /// Confirm the retention reduction (spec §16.3).
+    #[arg(long)]
+    pub confirm: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ReleaseArgs {
+    pub archive: PathBuf,
+    /// The label of the hold to release.
+    #[arg(long, value_name = "LABEL")]
+    pub label: String,
+    /// Confirm the retention reduction (spec §16.3).
+    #[arg(long)]
+    pub confirm: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct CheckpointArgs {
+    /// The archive to write a checkpoint commit to.
+    pub archive: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct CompactArgs {
+    /// The source archive. It is read under its publication lock and never
+    /// written or removed.
+    pub archive: PathBuf,
+    /// The new archive. It must not exist; nothing is ever replaced.
+    #[arg(long, short = 'o', value_name = "NEW_ARCHIVE")]
+    pub output: PathBuf,
+    /// Skip reading back and verifying every file version before
+    /// publication (spec §18.2 step 3). Recorded in the output.
+    #[arg(long)]
+    pub no_verify_content: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct GcPlanArgs {
+    pub archive: PathBuf,
+    /// Write the plan (JSON) to this file, which must not exist. Without
+    /// it, `--json` prints the plan and text mode summarizes it.
+    #[arg(long, short = 'o', value_name = "PLAN_FILE")]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct GcApplyArgs {
+    /// The source archive the plan was made for.
+    pub archive: PathBuf,
+    /// The plan written by `mochi gc plan --output`.
+    #[arg(long, value_name = "PLAN_FILE")]
+    pub plan: PathBuf,
+    /// The new archive. It must not exist; nothing is ever replaced.
+    #[arg(long, short = 'o', value_name = "NEW_ARCHIVE")]
+    pub output: PathBuf,
+    /// Skip reading back and verifying every file version before
+    /// publication (spec §18.2 step 3). Recorded in the output.
+    #[arg(long)]
+    pub no_verify_content: bool,
 }
 
 #[derive(Debug, Args)]
@@ -213,9 +299,10 @@ pub enum RepairCommand {
 #[derive(Debug, Subcommand)]
 pub enum GcCommand {
     /// Identify collection candidates (never deletes).
-    Plan(PendingArgs),
-    /// Apply an approved collection plan.
-    Apply(PendingArgs),
+    Plan(GcPlanArgs),
+    /// Apply an approved collection plan by writing a new archive without
+    /// what it collects. The source is kept.
+    Apply(GcApplyArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -245,9 +332,9 @@ pub enum Command {
     #[command(subcommand)]
     Repair(RepairCommand),
     /// Create a verified metadata checkpoint.
-    Checkpoint(PendingArgs),
-    /// Create a compacted representation.
-    Compact(PendingArgs),
+    Checkpoint(CheckpointArgs),
+    /// Create a compacted representation (a new archive; the source is kept).
+    Compact(CompactArgs),
     /// Plan or apply garbage collection.
     #[command(subcommand)]
     Gc(GcCommand),
@@ -287,6 +374,8 @@ impl Command {
             Command::List(_) => "list",
             Command::Snapshot(SnapshotCommand::List(_)) => "snapshot list",
             Command::Snapshot(SnapshotCommand::Retain(_)) => "snapshot retain",
+            Command::Snapshot(SnapshotCommand::Expire(_)) => "snapshot expire",
+            Command::Snapshot(SnapshotCommand::Release(_)) => "snapshot release",
             Command::Search(_) => "search",
             Command::Verify(_) => "verify",
             Command::Fsck(_) => "fsck",
@@ -310,15 +399,10 @@ impl Command {
     /// The catch-all arguments of a command that is not built.
     pub fn pending_args(&self) -> &[String] {
         match self {
-            Command::Snapshot(SnapshotCommand::Retain(a))
-            | Command::Search(a)
+            Command::Search(a)
             | Command::Health(a)
             | Command::Repair(RepairCommand::Plan(a))
             | Command::Repair(RepairCommand::Apply(a))
-            | Command::Checkpoint(a)
-            | Command::Compact(a)
-            | Command::Gc(GcCommand::Plan(a))
-            | Command::Gc(GcCommand::Apply(a))
             | Command::Rekey(a)
             | Command::DumpIndex(a)
             | Command::Inventory(a)
@@ -338,10 +422,13 @@ impl Command {
             | Command::Append(_)
             | Command::Get(_)
             | Command::List(_)
-            | Command::Snapshot(SnapshotCommand::List(_))
+            | Command::Snapshot(_)
             | Command::Verify(_)
             | Command::Fsck(_)
-            | Command::RestoreTest(_) => Scope::Built,
+            | Command::RestoreTest(_)
+            | Command::Checkpoint(_)
+            | Command::Compact(_)
+            | Command::Gc(_) => Scope::Built,
             _ => Scope::InScope,
         }
     }

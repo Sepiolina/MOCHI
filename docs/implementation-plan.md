@@ -289,7 +289,7 @@ Each phase ends with a working, tested artifact. "Fault-matrix rows" refers to t
   - **Tests:** `c9_retention.rs` (5), `c9_gc_plan.rs` (4), `c9_compact.rs` (6), and retention unit tests (2). Golden c4 gained 19 vectors (3 valid, 16 reject). `reject-manifest-schema-version` now uses schema 3. Existing valid vectors are byte-identical.
   - **Mutations:** 16 over retention, GC, and compaction; 15 killed. The namespace re-check before publication survives as defense in depth: only a writer bug reaches it. The files were restored byte-identical (md5).
   - **Not in this phase:**
-    - The `checkpoint`, `snapshot` (retain, expire, hold, release), `gc plan`, `gc apply`, and `compact` commands and their reports (C14).
+    - The `checkpoint`, `snapshot` (retain, expire, hold, release), `gc plan`, `gc apply`, and `compact` commands and their reports (C14; built 2026-10-08, see C14).
     - Explicit removal of a kept source (a user action, C14).
     - §16.3's "elevated authorization and a delay" for retention reductions (deployment policy; CLI confirmation in C14).
     - Collecting chunks with dependencies (none written before C8, C9 dictionaries, or C11).
@@ -320,6 +320,7 @@ Each phase ends with a working, tested artifact. "Fault-matrix rows" refers to t
 - Every 1.0 command in spec §23 scope; post-1.0 commands exit 4.
 - **Exit:** an end-to-end test per command, including JSON output and exit code; exit-code precedence documented.
 - **Status (first slice 2026-10-06; CI evidence pending).** Built: `create`, `append` (with `--delete` and T29's `--truncate-tail`, `--no-quarantine`, `--accept-unconfirmed-durability`), `list`, `get` (to a directory or `--stdout`), `snapshot list`, `verify`, `fsck`, `restore-test`, and the global `--json`, `--limit NAME=VALUE` (T29), `--state-dir`, `--no-local-history`. Reference, rules, and concessions K1–K8: `docs/c14-cli.md`. The filesystem import is in `mochi-core` (`import`, `storage::os::OsSourceTree`) so the desktop app shares it; the CLI keeps the D8 local head history (`heads.json`, outside every archive). Tests: `crates/mochi-cli/tests/c14_commands.rs` (12, real filesystem), plus `exit_codes.rs` updated for the built commands. Still `NOT_IMPLEMENTED`: `snapshot retain`, `search`, `health`, `repair`, `checkpoint`, `compact`, `gc`, `rekey`, `dump-index`.
+- **Status (C9 commands, 2026-10-08).** Built: `snapshot retain` (alias `hold`), `snapshot expire --confirm`, `snapshot release --confirm`, `checkpoint`, `gc plan [--output]`, `gc apply --plan --output`, `compact --output`; `snapshot list` shows retention. CLI rules (confirmation for retention reductions, the saved plan re-checked in full under the source's lock, no replacement of an existing name, the source kept): `docs/c14-cli.md` rules 6–8. `gc::PlanHead` is now deserializable. Also fixed: `create` stopped compiling after C9 added `WriterOptions::dedup`. Tests: `crates/mochi-cli/tests/c14_c9_commands.rs` (5). Mutations: 2 (plan re-check, `--confirm`), both killed. Still `NOT_IMPLEMENTED`: `search`, `health`, `repair`, `rekey`, `dump-index`.
 
 ---
 

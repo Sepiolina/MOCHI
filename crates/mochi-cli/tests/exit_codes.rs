@@ -35,15 +35,10 @@ fn post_1_0_commands_exit_4_not_3() {
 #[test]
 fn in_scope_but_unbuilt_commands_are_an_operational_error_never_success() {
     for cmd in [
-        &["snapshot", "retain", "a.mochi"][..],
-        &["search", "a.mochi", "invoice"],
+        &["search", "a.mochi", "invoice"][..],
         &["health", "a.mochi"],
         &["repair", "plan", "a.mochi"],
         &["repair", "apply", "plan.json"],
-        &["checkpoint", "a.mochi"],
-        &["compact", "a.mochi"],
-        &["gc", "plan", "a.mochi"],
-        &["gc", "apply", "plan.json"],
         &["rekey", "a.mochi"],
         &["dump-index", "a.mochi"],
     ] {
@@ -133,14 +128,7 @@ fn every_1_0_command_from_spec_23_2_is_present() {
         assert_eq!(code, exit::OK, "{name} --help: {err}");
         assert!(out.contains("Usage"), "{name}: {out}");
     }
-    for name in [
-        "search",
-        "health",
-        "checkpoint",
-        "compact",
-        "rekey",
-        "dump-index",
-    ] {
+    for name in ["search", "health", "rekey", "dump-index"] {
         let (code, _, err) = go(&[name]);
         assert_eq!(code, exit::ERROR, "{name} should parse: {err}");
         assert!(err.contains("NOT_IMPLEMENTED"), "{name}: {err}");

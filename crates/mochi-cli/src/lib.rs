@@ -19,7 +19,7 @@ use clap::error::ErrorKind;
 use clap::{CommandFactory, FromArgMatches};
 use mochi_core::{ErrorCode, MochiError};
 
-use cli::{Cli, Command, Scope, SnapshotCommand};
+use cli::{Cli, Command, GcCommand, Scope, SnapshotCommand};
 
 fn long_version() -> String {
     format!(
@@ -190,6 +190,13 @@ where
         Command::List(a) => commands::list_cmd(&mut env, a),
         Command::Get(a) => commands::get(&mut env, a),
         Command::Snapshot(SnapshotCommand::List(a)) => commands::snapshot_list(&mut env, a),
+        Command::Snapshot(SnapshotCommand::Retain(a)) => commands::snapshot_retain(&mut env, a),
+        Command::Snapshot(SnapshotCommand::Expire(a)) => commands::snapshot_expire(&mut env, a),
+        Command::Snapshot(SnapshotCommand::Release(a)) => commands::snapshot_release(&mut env, a),
+        Command::Checkpoint(a) => commands::checkpoint(&mut env, a),
+        Command::Compact(a) => commands::compact_cmd(&mut env, a),
+        Command::Gc(GcCommand::Plan(a)) => commands::gc_plan(&mut env, a),
+        Command::Gc(GcCommand::Apply(a)) => commands::gc_apply(&mut env, a),
         Command::Verify(a) => commands::verify_cmd(&mut env, a, false),
         Command::Fsck(a) => commands::verify_cmd(&mut env, a, true),
         Command::RestoreTest(a) => commands::restore_test(&mut env, a),

@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::catalog::extent::ExtentSource;
 use crate::catalog::namespace::FileVersionId;
@@ -48,7 +48,8 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// The head a plan was made at. Applying the plan refuses any other.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// Deserializable so a client can read it back from a saved plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanHead {
     pub seq: u64,
     pub commit_id: String,

@@ -129,6 +129,17 @@ pub struct ListArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct HealthArgs {
+    pub archive: PathBuf,
+    /// A JSON health policy (schema `mochi-health-policy-v1`): the required
+    /// dimensions and how old each kind of evidence may be. Without it:
+    /// integrity and recoverability required, `verify` evidence at most 30
+    /// days old.
+    #[arg(long, value_name = "FILE.json")]
+    pub policy: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
 pub struct DumpIndexArgs {
     pub archive: PathBuf,
     #[command(flatten)]
@@ -431,8 +442,8 @@ pub enum Command {
     Verify(VerifyArgs),
     /// Perform deep read-only consistency analysis.
     Fsck(VerifyArgs),
-    /// Summarize local health evidence.
-    Health(PendingArgs),
+    /// Summarize local health evidence (runs no check).
+    Health(HealthArgs),
     /// Restore into an isolated test destination.
     RestoreTest(RestoreTestArgs),
     /// Plan or apply a repair.
@@ -506,8 +517,7 @@ impl Command {
     /// The catch-all arguments of a command that is not built.
     pub fn pending_args(&self) -> &[String] {
         match self {
-            Command::Health(a)
-            | Command::Rekey(a)
+            Command::Rekey(a)
             | Command::Inventory(a)
             | Command::Split(a)
             | Command::Join(a)
@@ -530,6 +540,7 @@ impl Command {
             | Command::Verify(_)
             | Command::Fsck(_)
             | Command::DumpIndex(_)
+            | Command::Health(_)
             | Command::RestoreTest(_)
             | Command::Checkpoint(_)
             | Command::Compact(_)

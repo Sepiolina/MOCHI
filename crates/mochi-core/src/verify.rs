@@ -26,6 +26,11 @@
 //! opened at its own footer, its catalog checked, and its namespace compared
 //! with the one the head catalog replays for that commit: two derivations of
 //! each snapshot that must agree.
+//! Each replay segment is then recovered from its baseline (D10.8). A commit
+//! that opens from its image but cannot be rebuilt from S(*b*) and the deltas
+//! after it references something outside the baseline view (Annex B D18,
+//! "reference scope"): `REFERENCE_INVALID`, recoverability `FAIL`, integrity
+//! unaffected, and nothing about reading is refused.
 //!
 //! `inventory`, `search`, and `disaster_recovery` are not available in 1.0
 //! (Preservation profile; search is C13): nothing runs, and the report says
@@ -39,7 +44,8 @@
 //!   deeper) and every check ran and passed. Otherwise `UNKNOWN`.
 //! * **recoverability:** the worst of [`DamageReport::recoverability`] and,
 //!   when data objects were read, `FAIL` for any damaged data object (1.0 has
-//!   no parity to rebuild one). `UNKNOWN` if data objects were not read or the
+//!   no parity to rebuild one). `FAIL` too when `deep` finds a commit that
+//!   baseline recovery cannot rebuild. `UNKNOWN` if data objects were not read or the
 //!   history could not be assessed.
 //! * **freshness:** from the anchor (D8): none → `UNKNOWN`; otherwise `PASS`
 //!   if the verified history contains the anchor commit (for a local-history
@@ -69,13 +75,14 @@ use mochi_format::frame::{walk_frame, FrameDetail};
 use mochi_format::registry::FrameKind;
 
 use crate::catalog::Catalog;
+use crate::commit::Metadata;
 use crate::damage::{assess_damage, DamageReport};
 use crate::error::{ErrorCode, MochiError};
 use crate::job::JobContext;
 use crate::object::{decode_verified, load_stored, verify_stored, Dependency, ObjectRecord};
 use crate::publish::{
-    commit_history, locate_head, open_at_footer, open_head, HeadSource, HistoryEntry, OpenedHead,
-    ReadOptions, TailState,
+    commit_history, locate_head, open_at_footer, open_head, recover_baseline_at_footer, HeadSource,
+    HistoryEntry, OpenedHead, ReadOptions, TailState,
 };
 use crate::read::read_version;
 use crate::report::{
@@ -91,6 +98,8 @@ pub mod phase {
     pub const STRUCTURE: &str = "verify-structure";
     /// Every commit opened at its own footer (`deep` only).
     pub const HISTORY: &str = "verify-history";
+    /// Baseline recovery of every replay segment (`deep` only).
+    pub const BASELINE: &str = "verify-baseline";
     /// Data objects: `completed` of `total` objects.
     pub const OBJECTS: &str = "verify-objects";
     /// File versions reassembled: `completed` of `total` versions.
@@ -265,6 +274,10 @@ struct Run {
     /// Data objects were read with every planned check completed.
     data_complete: bool,
     data_failed: bool,
+    /// Baseline recovery (D10.8) of a segment failed where an image-based
+    /// open of the same commit succeeded (`deep` only; Annex B D18, Q64).
+    /// A recoverability failure, not an integrity one: the bytes are intact.
+    recovery_failed: bool,
 }
 
 impl Run {
@@ -329,6 +342,7 @@ pub fn verify(src: &dyn ReadStorage, opts: &VerifyOptions, ctx: &JobContext<'_>)
         operational: false,
         data_complete: false,
         data_failed: false,
+        recovery_failed: false,
     };
     let mut head = None;
     let mut damage = None;
@@ -370,7 +384,11 @@ pub fn verify(src: &dyn ReadStorage, opts: &VerifyOptions, ctx: &JobContext<'_>)
     } else {
         Status::Unknown
     };
-    let recoverability = if run.unsupported && !run.violation {
+    let recoverability = if run.recovery_failed {
+        // Known, whatever else could not be assessed: a segment that image
+        // opens read but that a baseline replay cannot rebuild (D10.8).
+        Status::Fail
+    } else if run.unsupported && !run.violation {
         Status::Unsupported
     } else {
         match &damage {
@@ -576,7 +594,10 @@ fn check(
     }
     ctx.report(phase::STRUCTURE, 4, Some(4));
 
-    if opts.deep && !deep_history(src, ro, &opened, &history, ctx, run) {
+    if opts.deep
+        && !(deep_history(src, ro, &opened, &history, ctx, run)
+            && baseline_scope(src, ro, &history, ctx, run))
+    {
         return cancelled_with(run, Some(verified), damage, freshness, key_availability);
     }
 
@@ -736,6 +757,103 @@ fn deep_history(
         }
     }
     ctx.report(phase::HISTORY, total, Some(total));
+    true
+}
+
+/// `deep`: what a baseline replay of each segment can see (Annex B D18,
+/// "reference scope", checklist Q64 [delegated 2026-10-08]).
+///
+/// D10.4 lets a delta reference an existing version or chunk, but an
+/// image-based open sees the whole catalog while baseline recovery (D10.8)
+/// sees S(*b*) plus the deltas after *b*. A delta that references something
+/// in neither opens normally and cannot be recovered from its segment's
+/// snapshot. Writers never produce one; this finds one that something else
+/// did. It is reported as `REFERENCE_INVALID` under recoverability only:
+/// reading is not refused, and integrity is unaffected (the bytes are
+/// intact).
+///
+/// Deltas apply in order, so recovering a segment's last commit succeeds
+/// exactly when every commit of the segment recovers: one recovery per
+/// segment in the common case. Only on failure is each commit recovered in
+/// turn, to name the first one that fails. A commit that does not open at
+/// its footer is not blamed here: [`deep_history`] has already reported it.
+/// `false` if cancelled.
+fn baseline_scope(
+    src: &dyn ReadStorage,
+    ro: &ReadOptions,
+    history: &[HistoryEntry],
+    ctx: &JobContext<'_>,
+    run: &mut Run,
+) -> bool {
+    let base_of = |e: &HistoryEntry| match e.commit.metadata {
+        Metadata::Checkpoint { .. } => e.commit.seq,
+        Metadata::Delta { base } => base.seq,
+    };
+    let total = history.len() as u64;
+    ctx.report(phase::BASELINE, 0, Some(total));
+    let mut done = 0u64;
+    let mut at = 0;
+    while at < history.len() {
+        let base = base_of(&history[at]);
+        let end = history[at..]
+            .iter()
+            .position(|e| base_of(e) != base)
+            .map_or(history.len(), |n| at + n);
+        let segment = &history[at..end];
+        at = end;
+        if ctx.check_cancelled().is_err() {
+            return false;
+        }
+        let Some(last) = segment.last() else { continue };
+        match recover_baseline_at_footer(src, last.footer_offset, ro) {
+            Ok(_) => {}
+            Err(e) if classify(e.code) == ErrorClass::Operational => {
+                run.error(
+                    &format!("recovering the segment from commit {base} at its baseline"),
+                    &e,
+                );
+            }
+            Err(_) => {
+                for entry in segment {
+                    if ctx.check_cancelled().is_err() {
+                        return false;
+                    }
+                    if open_at_footer(src, entry.footer_offset, ro).is_err() {
+                        continue;
+                    }
+                    match recover_baseline_at_footer(src, entry.footer_offset, ro) {
+                        Ok(_) => {}
+                        Err(e) if classify(e.code) == ErrorClass::Operational => {
+                            run.error(
+                                &format!("recovering commit {} at its baseline", entry.commit.seq),
+                                &e,
+                            );
+                            break;
+                        }
+                        Err(e) => {
+                            run.recovery_failed = true;
+                            run.finding(
+                                ErrorCode::ReferenceInvalid,
+                                Severity::Error,
+                                format!(
+                                    "commit {} opens from its catalog image but cannot be \
+                                     recovered from commit {base}'s snapshot and the deltas \
+                                     after it ({}: {}); it references something a baseline \
+                                     replay does not see",
+                                    entry.commit.seq,
+                                    e.code.as_str(),
+                                    e.message
+                                ),
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        done += segment.len() as u64;
+        ctx.report(phase::BASELINE, done, Some(total));
+    }
     true
 }
 
@@ -981,6 +1099,7 @@ pub fn check_catalog_contents(
         operational: false,
         data_complete: false,
         data_failed: false,
+        recovery_failed: false,
     };
     let d = depth(level).unwrap_or(0);
     let mut finished = true;

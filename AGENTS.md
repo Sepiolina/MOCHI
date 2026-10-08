@@ -27,7 +27,7 @@ If the spec does not answer a question, **do not invent an answer.** Stop, state
 
 ## Commands
 
-Live today (plan phases C1–C5 complete; C6, C7, and the first C14 slice implemented, `docs/c14-cli.md`):
+Live today (plan phases C1–C5 complete; C6, C7, C9, C13 discovery, and most of C14 implemented, `docs/c14-cli.md`):
 
 ```bash
 cargo fmt --all --check

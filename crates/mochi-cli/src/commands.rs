@@ -309,9 +309,9 @@ fn emit_commit(
 pub fn create(env: &mut Env<'_>, a: &CreateArgs) -> Result<u8> {
     if a.exceed_default_limits.is_some() {
         return Err(MochiError::new(
-            ErrorCode::NotImplemented,
-            "`--exceed-default-limits` is deferred in this build (spec Annex B, D16 is open); \
-             archives are created with the default limits only, and nothing was created",
+            ErrorCode::UnsupportedFeature,
+            "`--exceed-default-limits` is a 1.x feature, not part of MOCHI 1.0 (spec Annex B, \
+             D16); archives are created with the default limits only, and nothing was created",
         ));
     }
     let (progress, cancel) = job();

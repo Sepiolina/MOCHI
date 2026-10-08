@@ -797,6 +797,13 @@ fn survey(src: &dyn ReadStorage, opts: &ReadOptions, ctx: &JobContext<'_>) -> Re
         } else if *kind != EntryKind::Directory {
             let cat = &opened[*idx].catalog;
             if let Err(e) = read_version(src, cat, id, &mut std::io::sink(), opts, ctx) {
+                // Intact content this build cannot decode (a dependency such as a
+                // dictionary or a key) is not damage: omitting it would be silent loss
+                // dressed as damage, and `UNSUPPORTED_FEATURE` promises results are never
+                // partial or empty (§7.7, §26). Refuse the run.
+                if e.code == ErrorCode::UnsupportedFeature {
+                    return Err(e);
+                }
                 bad.insert(*id, evidence(e)?);
             }
         }

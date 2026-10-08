@@ -29,6 +29,7 @@
 
 mod apply;
 pub mod bounds;
+pub mod dump;
 pub mod extent;
 pub mod namespace;
 pub mod path;
@@ -1477,5 +1478,98 @@ mod tests {
         assert_eq!(fk, 1);
         // No code path opens a file or attaches one; that is enforced by
         // ci/check-invariants.sh rule 8, not by SQLite settings.
+    }
+
+    // ---- dump (mochi dump-index) -------------------------------------------
+
+    /// Table names from the DDL text itself: an oracle that never asks the
+    /// catalog what it holds.
+    fn ddl_tables() -> Vec<String> {
+        let mut v: Vec<String> = schema::DDL
+            .lines()
+            .filter_map(|l| l.strip_prefix("CREATE TABLE "))
+            .map(|l| l.split_whitespace().next().unwrap().to_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn dump_covers_every_table_in_name_order_with_typed_values() {
+        use dump::DumpValue;
+        let c = sample();
+        let d = c.dump(None).unwrap();
+        let names: Vec<&str> = d.tables.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ddl_tables());
+
+        // Counts agree with the rows, and rows are in non-decreasing order
+        // of the leading column (every table's key leads it).
+        let counts = c.table_counts().unwrap();
+        for (t, (name, n)) in d.tables.iter().zip(&counts) {
+            assert_eq!(&t.name, name);
+            assert_eq!(t.rows.len() as u64, *n, "{name}");
+            assert!(t.rows.windows(2).all(|w| w[0][0] <= w[1][0]) || t.rows.len() < 2);
+        }
+
+        // Types are kept: commits are (INTEGER, INTEGER or NULL).
+        let commits = d.tables.iter().find(|t| t.name == "commits").unwrap();
+        assert_eq!(commits.columns, ["seq", "parent_seq"]);
+        assert_eq!(
+            commits.rows,
+            [
+                vec![DumpValue::Integer(0), DumpValue::Null],
+                vec![DumpValue::Integer(1), DumpValue::Integer(0)],
+            ]
+        );
+        let objects = d.tables.iter().find(|t| t.name == "objects").unwrap();
+        assert_eq!(objects.rows.len(), 1);
+        assert_eq!(objects.rows[0][0], DumpValue::Blob(vec![3; 32]));
+        let chunks = d.tables.iter().find(|t| t.name == "chunks").unwrap();
+        assert_eq!(chunks.rows[0][1], DumpValue::Text(b"zstd-frame".to_vec()));
+    }
+
+    #[test]
+    fn dump_refuses_a_name_that_is_not_a_table_of_the_catalog() {
+        let c = sample();
+        for bad in [
+            "nope",
+            "sqlite_schema",
+            "commits\"; DROP TABLE commits; --",
+            "COMMITS",
+            "",
+        ] {
+            let e = c.dump(Some(&[bad.to_owned()])).unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidArgument, "{bad:?}");
+            assert!(e.message.contains("commits"), "names the real tables");
+        }
+        // Nothing was dropped.
+        assert_eq!(
+            c.dump(Some(&["commits".to_owned()])).unwrap().tables[0]
+                .rows
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn dump_of_a_subset_is_in_table_order_whatever_the_request_order() {
+        let c = sample();
+        let asked = [
+            "objects".to_owned(),
+            "commits".to_owned(),
+            "commits".to_owned(),
+        ];
+        let d = c.dump(Some(&asked)).unwrap();
+        let names: Vec<&str> = d.tables.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["commits", "objects"]);
+    }
+
+    #[test]
+    fn dump_does_not_change_the_catalog() {
+        let c = sample();
+        let before = c.logical_dump().unwrap();
+        c.dump(None).unwrap();
+        c.table_counts().unwrap();
+        assert_eq!(c.logical_dump().unwrap(), before);
     }
 }

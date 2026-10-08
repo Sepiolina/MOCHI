@@ -34,11 +34,7 @@ fn post_1_0_commands_exit_4_not_3() {
 
 #[test]
 fn in_scope_but_unbuilt_commands_are_an_operational_error_never_success() {
-    for cmd in [
-        &["health", "a.mochi"][..],
-        &["rekey", "a.mochi"],
-        &["dump-index", "a.mochi"],
-    ] {
+    for cmd in [&["health", "a.mochi"][..], &["rekey", "a.mochi"]] {
         let (code, _, err) = go(cmd);
         assert_eq!(code, exit::ERROR, "{cmd:?}");
         assert!(err.contains("NOT_IMPLEMENTED"), "{cmd:?}: {err}");
@@ -125,7 +121,7 @@ fn every_1_0_command_from_spec_23_2_is_present() {
         assert_eq!(code, exit::OK, "{name} --help: {err}");
         assert!(out.contains("Usage"), "{name}: {out}");
     }
-    for name in ["health", "rekey", "dump-index"] {
+    for name in ["health", "rekey"] {
         let (code, _, err) = go(&[name]);
         assert_eq!(code, exit::ERROR, "{name} should parse: {err}");
         assert!(err.contains("NOT_IMPLEMENTED"), "{name}: {err}");

@@ -129,6 +129,18 @@ pub struct ListArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct DumpIndexArgs {
+    pub archive: PathBuf,
+    #[command(flatten)]
+    pub sel: SnapshotSel,
+    /// Show the rows of this table (repeatable). Without it, text output
+    /// lists each table with its row count and `--json` carries every
+    /// table. A name that is not a table of the catalog is refused.
+    #[arg(long = "table", value_name = "NAME")]
+    pub tables: Vec<String>,
+}
+
+#[derive(Debug, Args)]
 pub struct GetArgs {
     pub archive: PathBuf,
     /// Entries to extract, with everything under them. None: all.
@@ -435,8 +447,8 @@ pub enum Command {
     Gc(GcCommand),
     /// Rotate or rewrap keys (Encrypted profile).
     Rekey(PendingArgs),
-    /// Inspect catalog or index records.
-    DumpIndex(PendingArgs),
+    /// Dump the catalog of a commit, table by table (read-only).
+    DumpIndex(DumpIndexArgs),
 
     /// Post-1.0 (Preservation profile): exits 4 in this release line.
     Inventory(PendingArgs),
@@ -496,7 +508,6 @@ impl Command {
         match self {
             Command::Health(a)
             | Command::Rekey(a)
-            | Command::DumpIndex(a)
             | Command::Inventory(a)
             | Command::Split(a)
             | Command::Join(a)
@@ -518,6 +529,7 @@ impl Command {
             | Command::Snapshot(_)
             | Command::Verify(_)
             | Command::Fsck(_)
+            | Command::DumpIndex(_)
             | Command::RestoreTest(_)
             | Command::Checkpoint(_)
             | Command::Compact(_)

@@ -6,6 +6,7 @@
 use std::io::Write;
 use std::path::Path;
 
+use mochi_core::catalog::dump::DumpValue;
 use mochi_core::catalog::namespace::EntryKind;
 use mochi_core::catalog::namespace::FileVersionId;
 use mochi_core::catalog::path::ArchivePath;
@@ -36,8 +37,8 @@ use mochi_format::digest::FileContentHash;
 use serde_json::{json, Value};
 
 use crate::cli::{
-    AppendArgs, CheckpointArgs, CompactArgs, CreateArgs, ExpireArgs, GcApplyArgs, GcPlanArgs,
-    GetArgs, KindArg, Level, ListArgs, ReleaseArgs, RepairApplyArgs, RepairPlanArgs,
+    AppendArgs, CheckpointArgs, CompactArgs, CreateArgs, DumpIndexArgs, ExpireArgs, GcApplyArgs,
+    GcPlanArgs, GetArgs, KindArg, Level, ListArgs, ReleaseArgs, RepairApplyArgs, RepairPlanArgs,
     RestoreTestArgs, RetainArgs, SearchArgs, SearchSnapshots, SnapshotListArgs, VerifyArgs,
 };
 use crate::render::{archive_path_arg, hex, path_fields, text};
@@ -519,6 +520,93 @@ pub fn list_cmd(env: &mut Env<'_>, a: &ListArgs) -> Result<u8> {
                     text(e.path.as_stored())
                 )),
             }
+        }
+    }
+    Ok(exit::OK)
+}
+
+/// One catalog value as JSON: numbers and null as themselves, text as a
+/// string when it is UTF-8 and `{"text_hex": ...}` when it is not, and a
+/// BLOB always as `{"blob_hex": ...}`, so the three never look alike.
+fn dump_value_json(v: &DumpValue) -> Value {
+    match v {
+        DumpValue::Null => Value::Null,
+        DumpValue::Integer(n) => json!(n),
+        DumpValue::Text(t) => match std::str::from_utf8(t) {
+            Ok(s) => json!(s),
+            Err(_) => json!({ "text_hex": hex(t) }),
+        },
+        DumpValue::Blob(b) => json!({ "blob_hex": hex(b) }),
+    }
+}
+
+/// One catalog value for a terminal: text escaped like every archive
+/// string, BLOBs as `x'hex'`, null as `NULL`.
+fn dump_value_text(v: &DumpValue) -> String {
+    match v {
+        DumpValue::Null => "NULL".into(),
+        DumpValue::Integer(n) => n.to_string(),
+        DumpValue::Text(t) => text(t),
+        DumpValue::Blob(b) => format!("x'{}'", hex(b)),
+    }
+}
+
+/// `mochi dump-index` (plan C14; next-work-plan K6): the catalog of the
+/// opened commit, hash-verified as every open is, dumped table by table.
+/// Read-only; table names come only from the catalog's own schema.
+pub fn dump_index(env: &mut Env<'_>, a: &DumpIndexArgs) -> Result<u8> {
+    let src = open_archive(&a.archive)?;
+    let head = open_selected(&src, a.sel.snapshot, &env.read)?;
+    let source = match &head.catalog_source {
+        CatalogSource::Image => "image",
+        CatalogSource::SnapshotManifest { .. } => "snapshot-manifest",
+    };
+    let requested = (!a.tables.is_empty()).then_some(a.tables.as_slice());
+    if env.json {
+        let dump = head.catalog.dump(requested)?;
+        let tables: serde_json::Map<String, Value> = dump
+            .tables
+            .iter()
+            .map(|t| {
+                let rows: Vec<Value> = t
+                    .rows
+                    .iter()
+                    .map(|r| Value::Array(r.iter().map(dump_value_json).collect()))
+                    .collect();
+                (
+                    t.name.clone(),
+                    json!({ "columns": t.columns, "rows": rows }),
+                )
+            })
+            .collect();
+        env.emit_json(&json!({
+            "archive_id": head.commit.archive_id.to_hex(),
+            "commit": {
+                "seq": head.seq(),
+                "commit_id": head.commit_id.to_hex(),
+                "catalog_source": source,
+            },
+            "tables": tables,
+        }));
+        return Ok(exit::OK);
+    }
+    env.line(format!(
+        "commit {} ({}), catalog from {source}",
+        head.seq(),
+        head.commit_id.to_hex()
+    ));
+    if requested.is_none() {
+        for (name, n) in head.catalog.table_counts()? {
+            env.line(format!("{name:<20} {n:>10} rows"));
+        }
+        return Ok(exit::OK);
+    }
+    for t in head.catalog.dump(requested)?.tables {
+        env.line(format!("table {} ({} rows)", t.name, t.rows.len()));
+        env.line(format!("  {}", t.columns.join("\t")));
+        for r in &t.rows {
+            let cells: Vec<String> = r.iter().map(dump_value_text).collect();
+            env.line(format!("  {}", cells.join("\t")));
         }
     }
     Ok(exit::OK)
@@ -1847,4 +1935,42 @@ pub fn repair_apply(env: &mut Env<'_>, a: &RepairApplyArgs) -> Result<u8> {
         ));
     }
     Ok(report.exit_code)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    /// A catalog's TEXT cell is archive-controlled bytes: escaped for a
+    /// terminal, exact (as hex) in JSON when it is not UTF-8, and typed
+    /// apart from a BLOB of the same bytes.
+    #[test]
+    fn dump_values_are_safe_for_terminals_and_exact_in_json() {
+        let hostile = b"a\x1b[31m\nb\tc\xffd".to_vec();
+        let shown = dump_value_text(&DumpValue::Text(hostile.clone()));
+        assert_eq!(shown, "a\\u{1b}[31m\\u{a}b\\u{9}c\\xffd");
+
+        assert_eq!(
+            dump_value_json(&DumpValue::Text(hostile.clone())),
+            json!({ "text_hex": hex(&hostile) })
+        );
+        assert_eq!(
+            dump_value_json(&DumpValue::Text(b"plain".to_vec())),
+            json!("plain")
+        );
+        assert_eq!(
+            dump_value_json(&DumpValue::Blob(b"plain".to_vec())),
+            json!({ "blob_hex": hex(b"plain") })
+        );
+        assert_eq!(dump_value_json(&DumpValue::Null), Value::Null);
+        assert_eq!(dump_value_json(&DumpValue::Integer(-7)), json!(-7));
+        assert_eq!(
+            dump_value_text(&DumpValue::Blob(vec![0xab, 0x01])),
+            "x'ab01'"
+        );
+        assert_eq!(dump_value_text(&DumpValue::Null), "NULL");
+        assert_eq!(dump_value_text(&DumpValue::Integer(42)), "42");
+    }
 }

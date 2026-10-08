@@ -327,7 +327,7 @@ pub fn create(env: &mut Env<'_>, a: &CreateArgs) -> Result<u8> {
             tar_compatible: true,
             encrypted: false,
         }),
-        checkpoint_trigger: None,
+        ..WriterOptions::default()
     };
     let (w, outcome) = ArchiveWriter::create_in(
         &mut dir,

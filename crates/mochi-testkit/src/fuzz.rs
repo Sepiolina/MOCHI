@@ -627,6 +627,68 @@ fn descriptor_verdict_matches_open(
     }
 }
 
+/// The TAR-compatible profile's stream parser (Annex B.2.9 D19 rule 8): on
+/// any bytes it returns, bounded, with `PROFILE_VIOLATION` or success and
+/// nothing else; the way the input is cut into frames does not change the
+/// outcome; and a stream it accepts as complete is the canonical encoding of
+/// the members it reported (so nothing the parser tolerates is free bytes).
+pub fn exercise_tar_stream(data: &[u8]) {
+    use mochi_core::tar::{encode_header, padding, Event, Member, Parser, END_BLOCKS};
+    use mochi_core::ErrorCode;
+
+    type Members = Vec<(Member, Vec<u8>)>;
+    let run = |step: usize| -> (Members, Result<(), ()>, bool) {
+        let mut parser = Parser::new(1 << 10);
+        let mut members: Members = Vec::new();
+        let mut ok = Ok(());
+        for piece in data.chunks(step.max(1)) {
+            let r = parser.feed(piece, &mut |ev| match ev {
+                Event::Member(m) => members.push((m.clone(), Vec::new())),
+                Event::Content(b) => members
+                    .last_mut()
+                    .expect("content follows a member")
+                    .1
+                    .extend_from_slice(b),
+            });
+            if let Err(e) = r {
+                assert_eq!(e.code, ErrorCode::ProfileViolation, "{e}");
+                ok = Err(());
+                break;
+            }
+        }
+        (members, ok, parser.is_complete())
+    };
+    let whole = run(data.len().max(1));
+    let step = 1 + usize::from(data.first().copied().unwrap_or(0)) % 600;
+    let cut = run(step);
+    assert_eq!(
+        whole.1, cut.1,
+        "the outcome depends on how the input was cut"
+    );
+    if whole.1.is_ok() {
+        assert_eq!(whole.0, cut.0);
+        assert_eq!(whole.2, cut.2);
+    }
+    if whole.1.is_ok() && whole.2 {
+        let mut again = Vec::new();
+        for (m, content) in &whole.0 {
+            assert_eq!(content.len() as u64, m.size);
+            again.extend(encode_header(m).expect("an accepted member encodes"));
+            again.extend_from_slice(content);
+            again.resize(again.len() + padding(m.size), 0);
+        }
+        again.extend_from_slice(&END_BLOCKS);
+        if again != data {
+            let at = again.iter().zip(data).position(|(a, b)| a != b);
+            panic!(
+                "an accepted stream is not canonical: lengths {} vs {}, first difference at {at:?}",
+                again.len(),
+                data.len()
+            );
+        }
+    }
+}
+
 pub fn exercise_all(data: &[u8]) {
     exercise_walker(data);
     exercise_footer(data);
@@ -637,4 +699,5 @@ pub fn exercise_all(data: &[u8]) {
     exercise_commit(data);
     exercise_descriptor(data);
     exercise_archive_open(data);
+    exercise_tar_stream(data);
 }

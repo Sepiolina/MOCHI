@@ -50,6 +50,7 @@ pub mod segment;
 pub mod state;
 pub mod status;
 pub mod storage;
+pub mod tar;
 pub mod timestamp;
 pub mod verify;
 

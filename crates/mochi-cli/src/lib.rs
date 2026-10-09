@@ -52,7 +52,8 @@ pub fn exit_code_for(code: ErrorCode) -> u8 {
         | ErrorCode::DescriptorInvalid
         | ErrorCode::RetentionUnresolved
         | ErrorCode::ReferenceInvalid
-        | ErrorCode::FreshnessFailed => exit::FAILED,
+        | ErrorCode::FreshnessFailed
+        | ErrorCode::ProfileViolation => exit::FAILED,
         ErrorCode::UnsupportedFeature | ErrorCode::ProfileChangeUnsupported => exit::UNSUPPORTED,
         ErrorCode::IoError
         | ErrorCode::OutOfBounds

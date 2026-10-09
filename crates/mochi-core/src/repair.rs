@@ -1147,6 +1147,9 @@ where
         zstd_level: plan.writer_parameters.map(|p| p.zstd_level),
         record_time: false,
         dedup: Dedup::Off,
+        // A rewrite keeps the source's profile (Annex B.2.9 D19 rule 9); the
+        // newest opened head's descriptor is the one that was verified.
+        profile: s.opened.first().map(|o| o.descriptor.profile()),
         checkpoint_trigger: options.checkpoint_trigger,
         ..WriterOptions::default()
     };

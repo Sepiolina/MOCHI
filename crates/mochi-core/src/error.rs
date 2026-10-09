@@ -149,6 +149,12 @@ pub enum ErrorCode {
     /// client last saw for the archive ID), so it was rolled back or
     /// substituted (spec §5.7, Annex B.1 D8). Exit 1. Added in C7.
     FreshnessFailed,
+    /// Verification: a TAR-compatible archive's stream does not match what
+    /// the profile requires: a commit's decoded data frames are not one
+    /// complete pax TAR stream, or a member differs from the commit's put
+    /// (path, type, size, attributes, or content) (Annex B.2.9 D19). Exit 1.
+    /// Added in C10.
+    ProfileViolation,
 }
 
 impl ErrorCode {
@@ -193,6 +199,7 @@ impl ErrorCode {
         ErrorCode::AttributeNotRestored,
         ErrorCode::ReferenceInvalid,
         ErrorCode::FreshnessFailed,
+        ErrorCode::ProfileViolation,
     ];
 
     /// The stable string form. Independent of serde so it cannot drift silently;
@@ -238,6 +245,7 @@ impl ErrorCode {
             ErrorCode::AttributeNotRestored => "ATTRIBUTE_NOT_RESTORED",
             ErrorCode::ReferenceInvalid => "REFERENCE_INVALID",
             ErrorCode::FreshnessFailed => "FRESHNESS_FAILED",
+            ErrorCode::ProfileViolation => "PROFILE_VIOLATION",
         }
     }
 }
@@ -366,6 +374,8 @@ mod tests {
         // Appended in C7.
         "REFERENCE_INVALID",
         "FRESHNESS_FAILED",
+        // Appended in C10.
+        "PROFILE_VIOLATION",
     ];
 
     #[test]

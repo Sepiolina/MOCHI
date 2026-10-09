@@ -99,6 +99,11 @@ pub struct GcPlan {
     pub retained: Totals,
     /// What it does not: written to no new representation.
     pub collectable: Totals,
+    /// TAR-compatible archives only: chunks no version's extent references,
+    /// the framing and re-emitted content of the commits' streams (Annex
+    /// B.2.9 D19 rule 7). They belong to the streams, not to a file version,
+    /// so they are never collectable: a rewrite regenerates them.
+    pub stream_framing: Totals,
     /// Collectable chunk IDs, sorted (hex).
     pub collectable_chunks: Vec<String>,
     /// Collectable file-version IDs, sorted (hex).
@@ -226,8 +231,24 @@ pub fn plan(src: &dyn ReadStorage, opts: &ReadOptions, ctx: &JobContext<'_>) -> 
         })
         .collect::<Result<Vec<_>>>()?;
 
+    // In a TAR-compatible archive a chunk that no version at all references
+    // is stream framing; every other unmarked chunk belongs to a version
+    // that is not retained.
+    let mut referenced = BTreeSet::new();
+    if head.descriptor.tar_compatible {
+        for id in head.catalog.file_version_ids()? {
+            ctx.check_cancelled()?;
+            if let Some((_, extents)) = head.catalog.file_version(&id)? {
+                referenced.extend(extents.iter().filter_map(|e| match e.source {
+                    ExtentSource::Chunk { chunk, .. } => Some(chunk),
+                    _ => None,
+                }));
+            }
+        }
+    }
     let mut retained = Totals::default();
     let mut collectable = Totals::default();
+    let mut stream_framing = Totals::default();
     let mut collectable_chunks = Vec::new();
     for id in head.catalog.object_ids()? {
         let Some(record) = head.catalog.object(&id)? else {
@@ -235,6 +256,8 @@ pub fn plan(src: &dyn ReadStorage, opts: &ReadOptions, ctx: &JobContext<'_>) -> 
         };
         let t = if marked.chunks.contains(&id) {
             &mut retained
+        } else if head.descriptor.tar_compatible && !referenced.contains(&id) {
+            &mut stream_framing
         } else {
             collectable_chunks.push(id.to_hex());
             &mut collectable
@@ -274,6 +297,7 @@ pub fn plan(src: &dyn ReadStorage, opts: &ReadOptions, ctx: &JobContext<'_>) -> 
         collectable_snapshots,
         retained,
         collectable,
+        stream_framing,
         collectable_chunks,
         collectable_versions,
     })

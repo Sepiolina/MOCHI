@@ -381,21 +381,18 @@ fn rewrite_commit0_descriptor(s: &SimStorage, e0: &HistoryEntry, desc: &[u8]) ->
     f
 }
 
-/// A one-commit archive whose descriptor says TAR-compatible: the writer
-/// cannot create one, so commit 0 is re-published against such a descriptor.
+/// A one-commit archive created TAR-compatible by the writer (D19).
 fn tar_archive() -> (SimStorage, Vec<Step>) {
     let steps = history()[..1].to_vec();
-    let s = write(CheckpointPolicy::EveryCommit, &steps);
-    let h = commit_history(&s, &opts()).unwrap();
-    let opened = open_head(&s, &opts()).unwrap();
-    let mut d = opened.descriptor.clone();
-    d.tar_compatible = true;
-    let f = rewrite_commit0_descriptor(&s, &h[0], d.to_stored().unwrap().as_bytes());
-    let fs = f.storage();
-    let o = open_head(&fs, &opts()).unwrap();
+    let s = SimStorage::new();
+    let mut w = ArchiveWriter::create(s.clone(), Box::new(SeqIds::new(7)), with_profile(Some(TAR)))
+        .unwrap();
+    w.commit(steps[0].tx.clone(), &Job::new().ctx()).unwrap();
+    w.close().unwrap();
+    let o = open_head(&s, &opts()).unwrap();
     assert!(o.descriptor.tar_compatible);
     assert_eq!(o.descriptor.profile(), TAR);
-    (fs, steps)
+    (s, steps)
 }
 
 /// **Checklist DoD (profile).** Enabling encryption in place is
@@ -450,60 +447,69 @@ fn t18_enabling_encryption_in_place_is_refused() {
     assert_eq!(read_state(&s, &head).unwrap(), steps[8].after);
 }
 
-/// A profile this build cannot write is refused at creation as
+/// A profile this build cannot write (Encrypted) is refused at creation as
 /// unsupported (exit 4), not as a profile change, and nothing is written.
+/// TAR compatibility is writable (D19).
 #[test]
 fn t18_create_with_an_unwritable_profile_is_unsupported() {
-    for p in [ENCRYPT, TAR] {
-        let s = SimStorage::new();
-        let e = ArchiveWriter::create(s.clone(), Box::new(SeqIds::new(1)), with_profile(Some(p)))
-            .map(|_| ())
-            .unwrap_err();
-        assert_eq!(e.code, ErrorCode::UnsupportedFeature, "{p:?}");
-        assert!(s.contents().is_empty());
-        // The lock was released.
-        ArchiveWriter::create(s, Box::new(SeqIds::new(1)), test_options()).unwrap();
-    }
-    ArchiveWriter::create(
-        SimStorage::new(),
+    let s = SimStorage::new();
+    let e = ArchiveWriter::create(
+        s.clone(),
         Box::new(SeqIds::new(1)),
-        with_profile(Some(Profile::default())),
+        with_profile(Some(ENCRYPT)),
     )
-    .unwrap();
+    .map(|_| ())
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::UnsupportedFeature);
+    assert!(s.contents().is_empty());
+    // The lock was released.
+    ArchiveWriter::create(s, Box::new(SeqIds::new(1)), test_options()).unwrap();
+    for p in [Profile::default(), TAR] {
+        ArchiveWriter::create(
+            SimStorage::new(),
+            Box::new(SeqIds::new(1)),
+            with_profile(Some(p)),
+        )
+        .unwrap();
+    }
 }
 
 /// On a TAR-compatible archive: turning TAR compatibility off is a profile
-/// change; keeping it is unsupported by this build (it cannot write that
-/// profile). Both refuse before a tail is truncated. Reading is unaffected.
+/// change (refused before a tail is truncated); appending with the archive's
+/// own profile, or none, proceeds. Reading is unaffected.
 #[test]
-fn t18_tar_archive_profile_change_and_unsupported_append() {
+fn t18_tar_archive_profile_change_and_append() {
     let (s, steps) = tar_archive();
     let head = open_head(&s, &opts()).unwrap();
     assert_eq!(read_state(&s, &head).unwrap(), steps[0].after);
     let core = Profile::default();
+    let before = s.contents();
     assert_eq!(
         append_err(&s, with_profile(Some(core)), TailPolicy::Refuse).code,
         ErrorCode::ProfileChangeUnsupported
     );
+    assert_eq!(s.contents(), before);
     for p in [None, Some(TAR)] {
-        assert_eq!(
-            append_err(&s, with_profile(p), TailPolicy::Refuse).code,
-            ErrorCode::UnsupportedFeature,
-            "{p:?}"
-        );
+        let (w, _) = ArchiveWriter::open_append(
+            s.clone(),
+            Box::new(SeqIds::new(9100)),
+            with_profile(p),
+            TailPolicy::Refuse,
+        )
+        .unwrap();
+        drop(w);
     }
     let h = commit_history(&s, &opts()).unwrap();
     let mut bytes = s.contents();
     add_uncommitted_tail(&mut bytes, &h[0]);
     let t = SimStorage::from_bytes(bytes.clone());
-    for (p, code) in [
-        (None, ErrorCode::UnsupportedFeature),
-        (Some(core), ErrorCode::ProfileChangeUnsupported),
-    ] {
-        let e = append_err(&t, with_profile(p), TailPolicy::TruncateWithoutQuarantine);
-        assert_eq!(e.code, code, "{p:?}");
-        assert_eq!(t.contents(), bytes, "{p:?}: the tail was not truncated");
-    }
+    let e = append_err(
+        &t,
+        with_profile(Some(core)),
+        TailPolicy::TruncateWithoutQuarantine,
+    );
+    assert_eq!(e.code, ErrorCode::ProfileChangeUnsupported);
+    assert_eq!(t.contents(), bytes, "the tail was not truncated");
 }
 
 // ---- fuzz exerciser -------------------------------------------------------------------

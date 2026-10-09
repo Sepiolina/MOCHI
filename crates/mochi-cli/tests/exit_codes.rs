@@ -138,6 +138,8 @@ fn integrity_failures_exit_1_everything_else_is_classified() {
             ErrorCode::ProfileChangeUnsupported => exit::UNSUPPORTED,
             // C7: verification evidence that the archive is wrong.
             ErrorCode::ReferenceInvalid | ErrorCode::FreshnessFailed => exit::FAILED,
+            // C10 (D19 rule 8): a TAR stream that differs from its commit's puts.
+            ErrorCode::ProfileViolation => exit::FAILED,
             // CHECKPOINT_MISMATCH: 3 from a writer; a verify finding exits 1
             // through the report's FAIL dimension, not through this mapping.
             _ => exit::ERROR,

@@ -520,15 +520,16 @@ fn c14_append_truncates_an_eligible_tail_only_on_request() {
     assert_eq!(code, exit::ERROR, "a waiver needs --truncate-tail: {err}");
 }
 
-/// Options this build refuses: TAR compatibility (exit 4), a bad reader
-/// limit (exit 3), an unknown level (usage, exit 3). A lowered reader
-/// limit applies and makes the archive unreadable to that reader.
+/// Options this build limits: a bad reader limit (exit 3), an unknown level
+/// (usage, exit 3). `--tar-compatible` creates a TAR-compatible archive
+/// (D19). A lowered reader limit applies and makes the archive unreadable to
+/// that reader.
 #[test]
 fn c14_refused_and_limited_options() {
     let a = Area::new();
     let (code, v) = a.json(&["create", &a.s("t.mochi"), &a.s("src"), "--tar-compatible"]);
-    assert_eq!(code, exit::UNSUPPORTED, "{v}");
-    assert!(!a.p("t.mochi").exists(), "nothing was created");
+    assert_eq!(code, CREATED, "{v}");
+    assert!(a.p("t.mochi").exists());
 
     let archive = a.create();
     let (code, v) = a.json(&["list", &archive, "--limit", "max-frame-len"]);
@@ -548,6 +549,48 @@ fn c14_refused_and_limited_options() {
     ]);
     assert_ne!(code, exit::OK, "{v}");
     assert_ne!(v["dimensions"]["integrity"], "PASS");
+}
+
+/// **`--tar-compatible` end to end (D19).** The profile is chosen at
+/// creation and kept by `append`; `verify` parses the streams and passes;
+/// `gc plan` reports the framing apart from what it could collect; a file
+/// is restored byte for byte.
+#[test]
+fn c14_tar_compatible_archive_end_to_end() {
+    let a = Area::new();
+    let archive = a.s("t.mochi");
+    let (code, v) = a.json(&["create", &archive, &a.s("src"), "--tar-compatible"]);
+    assert_eq!(code, CREATED, "{v}");
+    fs::write(a.p("extra.txt"), b"extra").unwrap();
+    let (code, v) = a.json(&["append", &archive, &a.s("extra.txt")]);
+    assert_eq!(code, exit::OK, "{v}");
+    assert_eq!(v["seq"], 1);
+
+    let (code, v) = a.json(&["verify", &archive]);
+    assert_eq!(code, exit::OK, "{v}");
+    assert_eq!(v["dimensions"]["integrity"], "PASS");
+    assert!(
+        v["scope"].as_str().unwrap().contains("TAR stream"),
+        "{}",
+        v["scope"]
+    );
+    let (code, _) = a.json(&["fsck", &archive]);
+    assert_eq!(code, exit::OK);
+
+    let (code, v) = a.json(&["gc", "plan", &archive]);
+    assert_eq!(code, exit::OK, "{v}");
+    assert!(v["stream_framing"]["chunks"].as_u64().unwrap() > 0);
+    assert_eq!(v["collectable"]["chunks"], 0);
+
+    // The profile is the archive's: the same archive without it has none.
+    let plain = a.create();
+    let (_, v) = a.json(&["gc", "plan", &plain]);
+    assert_eq!(v["stream_framing"]["chunks"], 0);
+
+    let dest = a.s("restored");
+    let (code, v) = a.json(&["get", &archive, "-C", &dest]);
+    assert_eq!(code, exit::OK, "{v}");
+    assert_eq!(fs::read(a.p("restored/extra.txt")).unwrap(), b"extra");
 }
 
 /// A damaged local head history is reported, not mistaken for first sight

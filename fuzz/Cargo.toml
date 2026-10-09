@@ -83,3 +83,10 @@ path = "fuzz_targets/descriptor_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "tar_stream"
+path = "fuzz_targets/tar_stream.rs"
+test = false
+doc = false
+bench = false

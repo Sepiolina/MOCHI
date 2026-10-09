@@ -32,6 +32,13 @@
 //! "reference scope"): `REFERENCE_INVALID`, recoverability `FAIL`, integrity
 //! unaffected, and nothing about reading is refused.
 //!
+//! A TAR-compatible archive (descriptor constraint 0) is additionally checked
+//! at every level by [`tar_stream`]: each commit's data frames must parse as one
+//! complete TAR stream whose members are exactly the commit's puts, with fresh
+//! content in the version's own chunks and re-emitted content hashed from
+//! `content_integrity` up. A mismatch is `PROFILE_VIOLATION` (spec Annex B.2.9
+//! D19 rule 8).
+//!
 //! `inventory`, `search`, and `disaster_recovery` are not available in 1.0
 //! (Preservation profile; search is C13): nothing runs, and the report says
 //! `UNSUPPORTED`, exit 4. Nothing is ever reported as checked that was not.
@@ -70,6 +77,8 @@
 
 use std::collections::BTreeSet;
 
+mod tar_stream;
+
 use mochi_format::digest::CommitId;
 use mochi_format::frame::{walk_frame, FrameDetail};
 use mochi_format::registry::FrameKind;
@@ -104,6 +113,9 @@ pub mod phase {
     pub const OBJECTS: &str = "verify-objects";
     /// File versions reassembled: `completed` of `total` versions.
     pub const FILES: &str = "verify-files";
+    /// Each commit's TAR stream (TAR-compatible archives only): `completed`
+    /// of `total` commits.
+    pub const STREAMS: &str = "verify-streams";
 }
 
 /// What freshness is judged against (spec Annex B.1 D8).
@@ -227,7 +239,8 @@ pub fn classify(code: ErrorCode) -> ErrorClass {
         | ErrorCode::CheckpointMismatch
         | ErrorCode::RetentionUnresolved
         | ErrorCode::ReferenceInvalid
-        | ErrorCode::FreshnessFailed => ErrorClass::Violation,
+        | ErrorCode::FreshnessFailed
+        | ErrorCode::ProfileViolation => ErrorClass::Violation,
         ErrorCode::UnsupportedFeature | ErrorCode::ProfileChangeUnsupported => {
             ErrorClass::Unsupported
         }
@@ -278,6 +291,8 @@ struct Run {
     /// open of the same commit succeeded (`deep` only; Annex B D18, Q64).
     /// A recoverability failure, not an integrity one: the bytes are intact.
     recovery_failed: bool,
+    /// The archive is TAR-compatible and its streams were checked (D19).
+    tar_streams: bool,
 }
 
 impl Run {
@@ -343,6 +358,7 @@ pub fn verify(src: &dyn ReadStorage, opts: &VerifyOptions, ctx: &JobContext<'_>)
         data_complete: false,
         data_failed: false,
         recovery_failed: false,
+        tar_streams: false,
     };
     let mut head = None;
     let mut damage = None;
@@ -371,7 +387,7 @@ pub fn verify(src: &dyn ReadStorage, opts: &VerifyOptions, ctx: &JobContext<'_>)
                 head = c.head;
                 damage = c.damage;
             }
-            run.report.scope = Some(scope_text(opts, d));
+            run.report.scope = Some(scope_text(opts, d, run.tar_streams));
         }
     }
 
@@ -426,7 +442,7 @@ pub fn verify(src: &dyn ReadStorage, opts: &VerifyOptions, ctx: &JobContext<'_>)
     }
 }
 
-fn scope_text(opts: &VerifyOptions, d: u8) -> String {
+fn scope_text(opts: &VerifyOptions, d: u8, tar_streams: bool) -> String {
     let data = match d {
         1 => "control objects only; data objects not read",
         2 => "control objects; data-object references and frame boundaries",
@@ -435,10 +451,15 @@ fn scope_text(opts: &VerifyOptions, d: u8) -> String {
         _ => "control objects; every data object; every retained file version reassembled",
     };
     format!(
-        "full retained history: head, every commit record and footer, {data}{}. \
+        "full retained history: head, every commit record and footer, {data}{}{}. \
          Durability is not observable from the archive's bytes.",
         if opts.deep {
             "; every commit opened at its own footer"
+        } else {
+            ""
+        },
+        if tar_streams {
+            "; every commit's TAR stream parsed and matched to its puts (D19)"
         } else {
             ""
         }
@@ -597,6 +618,12 @@ fn check(
     if opts.deep
         && !(deep_history(src, ro, &opened, &history, ctx, run)
             && baseline_scope(src, ro, &history, ctx, run))
+    {
+        return cancelled_with(run, Some(verified), damage, freshness, key_availability);
+    }
+
+    if opened.descriptor.tar_compatible
+        && !tar_stream::check(src, ro, &opened.catalog, &history, depth, ctx, run)
     {
         return cancelled_with(run, Some(verified), damage, freshness, key_availability);
     }
@@ -1134,6 +1161,7 @@ pub fn check_catalog_contents(
         data_complete: false,
         data_failed: false,
         recovery_failed: false,
+        tar_streams: false,
     };
     let d = depth(level).unwrap_or(0);
     let mut finished = true;
@@ -1215,6 +1243,7 @@ mod tests {
             ErrorClass::Violation
         );
         assert_eq!(classify(ErrorCode::FreshnessFailed), ErrorClass::Violation);
+        assert_eq!(classify(ErrorCode::ProfileViolation), ErrorClass::Violation);
         assert_eq!(
             classify(ErrorCode::UnsupportedFeature),
             ErrorClass::Unsupported

@@ -145,6 +145,7 @@ use crate::storage::{
     check_file_name, DirectoryDurability, ReadStorage, Storage, StorageDir, StorageError,
     StorageReader,
 };
+use crate::tar::{self, encode_header, member_for};
 
 pub use crate::catalog::META_ARCHIVE_ID;
 /// `archive_meta` key holding the writer parameters recorded at creation
@@ -218,12 +219,33 @@ pub struct WriterOptions {
 /// never consulted for reachability.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Dedup {
-    /// Reference identical chunks already at the head (the default; spec D4
-    /// keeps deduplication in the default profile).
+    /// The profile decides (the default): in-archive deduplication in the
+    /// default profile (spec D4 keeps it there), none in the TAR-compatible
+    /// profile (Annex B.2.9 D19 rule 2).
     #[default]
+    Auto,
+    /// Reference identical chunks already at the head. Asking for it in the
+    /// TAR-compatible profile is `INVALID_ARGUMENT`.
     InArchive,
     /// Store every chunk.
     Off,
+}
+
+impl Dedup {
+    /// What the writer does for an archive of this profile.
+    fn resolve(self, tar_compatible: bool) -> Result<Dedup> {
+        match (self, tar_compatible) {
+            (Dedup::Auto, false) => Ok(Dedup::InArchive),
+            (Dedup::Auto, true) | (Dedup::Off, _) => Ok(Dedup::Off),
+            (Dedup::InArchive, false) => Ok(Dedup::InArchive),
+            (Dedup::InArchive, true) => Err(MochiError::new(
+                ErrorCode::InvalidArgument,
+                "in-archive deduplication is not available in the TAR-compatible profile \
+                 (Annex B.2.9 D19 rule 2): the stream needs each file's bytes where its \
+                 member is",
+            )),
+        }
+    }
 }
 
 /// What deduplication did in one commit.
@@ -2348,7 +2370,13 @@ pub struct ArchiveWriter<S: Storage> {
     /// [`CheckpointTamper`]).
     #[cfg(any(test, feature = "test-controls"))]
     tamper: Option<CheckpointTamper>,
+    /// Test control: damage the TAR stream a commit writes (see [`TarTamper`]).
+    #[cfg(any(test, feature = "test-controls"))]
+    tar_tamper: Option<TarTamper>,
     needs_directory_sync: bool,
+    /// The TAR-compatible profile (descriptor constraint 0): every commit
+    /// with a put also writes one TAR stream (Annex B.2.9 D19).
+    tar: bool,
     dedup: Dedup,
     /// Dedup index over the head (see [`Dedup`]); `None` until first used.
     dedup_index: Option<HashMap<DedupKey, ObjectId>>,
@@ -2367,18 +2395,13 @@ impl<S: Storage> std::fmt::Debug for ArchiveWriter<S> {
 }
 
 /// The profiles this build can write a new archive in: the default (Core)
-/// profile only, until the TAR-compatible and Encrypted writers exist.
+/// and the TAR-compatible profile (Annex B.2.9 D19); the Encrypted writer
+/// does not exist yet.
 fn check_create_profile(asked: Profile) -> Result<()> {
     if asked.encrypted {
         return Err(MochiError::new(
             ErrorCode::UnsupportedFeature,
             "this build cannot write the Encrypted profile (spec §7.3)",
-        ));
-    }
-    if asked.tar_compatible {
-        return Err(MochiError::new(
-            ErrorCode::UnsupportedFeature,
-            "this build cannot write the TAR-compatible profile (spec §7.2, D4)",
         ));
     }
     Ok(())
@@ -2415,13 +2438,6 @@ fn check_append_profile(descriptor: &Descriptor, asked: Option<Profile>) -> Resu
                 ),
             ));
         }
-    }
-    if have.tar_compatible {
-        return Err(MochiError::new(
-            ErrorCode::UnsupportedFeature,
-            "this archive was created with the TAR-compatible profile (spec D4), which this \
-             build cannot write; appending would break that constraint",
-        ));
     }
     Ok(())
 }
@@ -2538,6 +2554,7 @@ impl<S: Storage> ArchiveWriter<S> {
     /// first [`commit`](Self::commit); a file left empty is not an archive.
     pub fn create(mut storage: S, mut ids: Box<dyn IdSource>, opts: WriterOptions) -> Result<Self> {
         lock(&mut storage)?;
+        let mut dedup = Dedup::Off;
         let result = (|| -> Result<(ArchiveId, WriterParams, Catalog)> {
             if storage.size()? != 0 {
                 return Err(MochiError::new(
@@ -2545,7 +2562,9 @@ impl<S: Storage> ArchiveWriter<S> {
                     "create needs empty storage; use open_append for an existing archive",
                 ));
             }
-            check_create_profile(opts.profile.unwrap_or_default())?;
+            let profile = opts.profile.unwrap_or_default();
+            check_create_profile(profile)?;
+            dedup = opts.dedup.resolve(profile.tar_compatible)?;
             let params = WriterParams {
                 chunk_size: opts.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE),
                 zstd_level: opts.zstd_level.unwrap_or(EncodeParams::default().level),
@@ -2558,6 +2577,7 @@ impl<S: Storage> ArchiveWriter<S> {
             ))
         })();
         let policy = CheckpointPolicy::Trigger(opts.checkpoint_trigger.unwrap_or_default());
+        let tar = opts.profile.is_some_and(|p| p.tar_compatible);
         let (archive_id, params, catalog) = match result {
             Ok(v) => v,
             Err(e) => {
@@ -2577,14 +2597,17 @@ impl<S: Storage> ArchiveWriter<S> {
             attributes: BTreeMap::new(),
             retention: RetentionState::default(),
             // The default profile is not TAR-compatible (spec D4); choosing
-            // TAR compatibility at creation arrives with that profile.
-            new_descriptor: Some(Descriptor::new(archive_id, false)),
+            // it is explicit and fixed at creation (D12).
+            new_descriptor: Some(Descriptor::new(archive_id, tar)),
             policy,
             checkpoint_requested: false,
             #[cfg(any(test, feature = "test-controls"))]
             tamper: None,
+            #[cfg(any(test, feature = "test-controls"))]
+            tar_tamper: None,
             needs_directory_sync: true,
-            dedup: opts.dedup,
+            tar,
+            dedup,
             dedup_index: None,
             poisoned: None,
             audit: Vec::new(),
@@ -2819,6 +2842,16 @@ impl<S: Storage> ArchiveWriter<S> {
         lock(&mut storage)?;
         match Self::open_locked(&mut storage, &opts, tail) {
             Ok((head, params, state, truncation)) => {
+                // The profile is the archive's own (D12); an append that asks
+                // for another was refused in `open_locked`.
+                let tar = head.descriptor.tar_compatible;
+                let dedup = match opts.dedup.resolve(tar) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        let _ = storage.unlock();
+                        return Err(e);
+                    }
+                };
                 let mut audit = Vec::new();
                 if let Some(t) = &truncation {
                     audit.push(AuditEvent::TailTruncated(t.clone()));
@@ -2852,8 +2885,11 @@ impl<S: Storage> ArchiveWriter<S> {
                         checkpoint_requested: false,
                         #[cfg(any(test, feature = "test-controls"))]
                         tamper: None,
+                        #[cfg(any(test, feature = "test-controls"))]
+                        tar_tamper: None,
                         needs_directory_sync: false,
-                        dedup: opts.dedup,
+                        tar,
+                        dedup,
                         dedup_index: None,
                         poisoned: None,
                         audit,
@@ -3306,6 +3342,11 @@ impl<S: Storage> ArchiveWriter<S> {
         let mut dedup = DedupStats::default();
         let mut versions = Vec::new();
         let mut attributes = self.attributes.clone();
+        // TAR-compatible profile (Annex B.2.9 D19): framing bytes waiting for
+        // the next data frame, and the members written in this commit.
+        let tar = self.tar;
+        let mut pending: Vec<u8> = Vec::new();
+        let mut members = 0u64;
 
         // The archive descriptor, first byte of the file (D12). Written with
         // the first commit so that a failed or cancelled first commit rolls
@@ -3346,6 +3387,26 @@ impl<S: Storage> ArchiveWriter<S> {
                     attributes: attrs,
                 } => {
                     let mut extents = Vec::new();
+                    if tar {
+                        let m = self.tampered_member(
+                            member_for(
+                                path.as_stored(),
+                                EntryKind::File,
+                                content.len() as u64,
+                                attrs,
+                            ),
+                            members,
+                        );
+                        pending.extend(encode_header(&m)?);
+                        self.flush_framing(
+                            &mut pending,
+                            &mut cat,
+                            &mut chunks,
+                            &mut objects,
+                            &encode,
+                        )?;
+                        members += 1;
+                    }
                     let piece = usize::try_from(self.params.chunk_size).unwrap_or(usize::MAX);
                     for (i, part) in content.chunks(piece).enumerate() {
                         let decoded = DecodedBytes::new(part.to_vec());
@@ -3411,11 +3472,32 @@ impl<S: Storage> ArchiveWriter<S> {
                         extents,
                         attributes: *attrs,
                     });
+                    if tar {
+                        // The content chunks above are the member's bytes.
+                        pending = vec![0; tar::padding(content.len() as u64)];
+                    }
                 }
                 TxEntry::Dir {
                     path,
                     attributes: attrs,
                 } => {
+                    if tar {
+                        let m = self.tampered_member(
+                            member_for(path.as_stored(), EntryKind::Directory, 0, attrs),
+                            members,
+                        );
+                        if !self.drops_directory_member() {
+                            pending.extend(encode_header(&m)?);
+                        }
+                        self.flush_framing(
+                            &mut pending,
+                            &mut cat,
+                            &mut chunks,
+                            &mut objects,
+                            &encode,
+                        )?;
+                        members += 1;
+                    }
                     let version = FileVersion {
                         id: FileVersionId::from_bytes(self.ids.next_id()?),
                         kind: EntryKind::Directory,
@@ -3441,7 +3523,28 @@ impl<S: Storage> ArchiveWriter<S> {
                     chunks: stored,
                 } => {
                     let id = entry.version.id;
-                    match cat.file_version(&id)? {
+                    let held = cat.file_version(&id)?;
+                    if tar {
+                        let m = self.tampered_member(
+                            member_for(
+                                path.as_stored(),
+                                entry.version.kind,
+                                entry.version.logical_len,
+                                &entry.attributes,
+                            ),
+                            members,
+                        );
+                        pending.extend(encode_header(&m)?);
+                        self.flush_framing(
+                            &mut pending,
+                            &mut cat,
+                            &mut chunks,
+                            &mut objects,
+                            &encode,
+                        )?;
+                        members += 1;
+                    }
+                    match held {
                         Some((v, ex)) => {
                             if v != entry.version || ex != entry.extents {
                                 return Err(MochiError::new(
@@ -3449,9 +3552,29 @@ impl<S: Storage> ArchiveWriter<S> {
                                     format!("copied version {id:?} differs from the one held"),
                                 ));
                             }
+                            // Its chunks are old frames: the member's bytes
+                            // are written again (D19 rule 6).
+                            if tar {
+                                self.reemit_content(
+                                    &ex,
+                                    &mut cat,
+                                    &mut chunks,
+                                    &mut objects,
+                                    &encode,
+                                    ctx,
+                                )?;
+                            }
                         }
                         None => {
-                            for (record, bytes) in stored {
+                            // In the TAR profile the version's own chunk
+                            // frames are the member's content, so they go in
+                            // extent order and nothing else may land between.
+                            let ordered: Vec<&(ObjectRecord, StoredObject)> = if tar {
+                                order_copied_chunks(entry, stored, &cat)?
+                            } else {
+                                stored.iter().collect()
+                            };
+                            for (record, bytes) in ordered {
                                 if cat.object(&record.id)?.is_some() {
                                     continue;
                                 }
@@ -3468,6 +3591,9 @@ impl<S: Storage> ArchiveWriter<S> {
                             cat.insert_file_version(&entry.version, &entry.extents)?;
                             versions.push(entry.clone());
                         }
+                    }
+                    if tar {
+                        pending = vec![0; tar::padding(entry.version.logical_len)];
                     }
                     if let Some(a) = attributes.insert(id, entry.attributes) {
                         if a != entry.attributes {
@@ -3489,6 +3615,39 @@ impl<S: Storage> ArchiveWriter<S> {
                             "rename source does not exist in the head snapshot",
                         )
                     })?;
+                    if tar {
+                        // A rename puts an existing version at a new path:
+                        // its member's bytes are written again (D19 rule 6).
+                        let (v, extents) = cat.file_version(&version)?.ok_or_else(|| {
+                            MochiError::new(
+                                ErrorCode::CatalogInvalid,
+                                "the renamed version is not in the catalog",
+                            )
+                        })?;
+                        let attrs = attributes.get(&version).copied().unwrap_or_default();
+                        let m = self.tampered_member(
+                            member_for(to.as_stored(), v.kind, v.logical_len, &attrs),
+                            members,
+                        );
+                        pending.extend(encode_header(&m)?);
+                        self.flush_framing(
+                            &mut pending,
+                            &mut cat,
+                            &mut chunks,
+                            &mut objects,
+                            &encode,
+                        )?;
+                        members += 1;
+                        self.reemit_content(
+                            &extents,
+                            &mut cat,
+                            &mut chunks,
+                            &mut objects,
+                            &encode,
+                            ctx,
+                        )?;
+                        pending = vec![0; tar::padding(v.logical_len)];
+                    }
                     ops.push(NamespaceOp::Delete { path: from.clone() });
                     ops.push(NamespaceOp::Put {
                         path: to.clone(),
@@ -3496,6 +3655,13 @@ impl<S: Storage> ArchiveWriter<S> {
                     });
                 }
             }
+        }
+
+        // The commit's stream ends with two zero blocks (D19 rule 3); a commit
+        // without a put has no stream.
+        if tar && members > 0 {
+            self.tamper_end(&mut pending);
+            self.flush_framing(&mut pending, &mut cat, &mut chunks, &mut objects, &encode)?;
         }
 
         // Namespace validity against the completed commit state (§10.2).
@@ -3788,6 +3954,218 @@ impl<S: Storage> ArchiveWriter<S> {
             stored_hash: stored_object_hash(frame.view()),
         })
     }
+    #[cfg(any(test, feature = "test-controls"))]
+    fn tampered_member(&self, mut m: tar::Member, index: u64) -> tar::Member {
+        if self.tar_tamper == Some(TarTamper::ModeOff) && index == 0 {
+            m.mode ^= 1;
+        }
+        m
+    }
+
+    #[cfg(not(any(test, feature = "test-controls")))]
+    fn tampered_member(&self, m: tar::Member, _index: u64) -> tar::Member {
+        m
+    }
+
+    #[cfg(any(test, feature = "test-controls"))]
+    fn drops_directory_member(&self) -> bool {
+        self.tar_tamper == Some(TarTamper::DropDirectoryMember)
+    }
+
+    #[cfg(not(any(test, feature = "test-controls")))]
+    fn drops_directory_member(&self) -> bool {
+        false
+    }
+
+    #[cfg(any(test, feature = "test-controls"))]
+    fn tamper_end(&self, pending: &mut Vec<u8>) {
+        match self.tar_tamper {
+            Some(TarTamper::NoEndBlocks) => {}
+            Some(TarTamper::ExtraBlocks) => {
+                pending.extend_from_slice(&tar::END_BLOCKS);
+                pending.extend_from_slice(&[0; tar::BLOCK]);
+            }
+            Some(TarTamper::ExtraMember) => {
+                let m = tar::Member {
+                    path: b"extra".to_vec(),
+                    kind: tar::MemberKind::File,
+                    size: 0,
+                    mode: 0o644,
+                    uid: 0,
+                    gid: 0,
+                    mtime: (0, 0),
+                };
+                if let Ok(h) = encode_header(&m) {
+                    pending.extend_from_slice(&h);
+                }
+                pending.extend_from_slice(&tar::END_BLOCKS);
+            }
+            _ => pending.extend_from_slice(&tar::END_BLOCKS),
+        }
+    }
+
+    #[cfg(not(any(test, feature = "test-controls")))]
+    fn tamper_end(&self, pending: &mut Vec<u8>) {
+        pending.extend_from_slice(&tar::END_BLOCKS);
+    }
+
+    #[cfg(any(test, feature = "test-controls"))]
+    fn tamper_reemitted(&self, buf: &mut [u8], flipped: &mut bool) {
+        if self.tar_tamper == Some(TarTamper::ReemitFlipped) && !*flipped {
+            if let Some(b) = buf.first_mut() {
+                *b ^= 1;
+                *flipped = true;
+            }
+        }
+    }
+
+    #[cfg(not(any(test, feature = "test-controls")))]
+    fn tamper_reemitted(&self, _buf: &mut [u8], _flipped: &mut bool) {}
+
+    /// TAR profile: write `pending` as one **stream-only chunk** (Annex B.2.9
+    /// D19 rule 5): an ordinary data object that no extent references, in the
+    /// catalog and in this commit's delta manifest like any introduced chunk.
+    fn flush_framing(
+        &mut self,
+        pending: &mut Vec<u8>,
+        cat: &mut Catalog,
+        chunks: &mut Vec<ChunkEntry>,
+        objects: &mut u64,
+        encode: &EncodeParams,
+    ) -> Result<()> {
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let decoded = DecodedBytes::new(std::mem::take(pending));
+        let obj = build_object(
+            &decoded,
+            encode,
+            Protection::None,
+            self.ids.as_mut(),
+            &self.read.limits,
+        )?;
+        let offset = self.storage.append(obj.stored.as_bytes())?;
+        cat.insert_object(&obj.record, Some(offset))?;
+        chunks.push(ChunkEntry {
+            record: obj.record,
+            location: Some(offset),
+        });
+        *objects += 1;
+        Ok(())
+    }
+
+    /// TAR profile: write the bytes of an existing version again, in order,
+    /// as stream-only chunks of at most the archive's chunk size (D19 rule 6).
+    /// One chunk is decoded at a time. A hole cannot be written (D19 rule 2).
+    fn reemit_content(
+        &mut self,
+        extents: &[Extent],
+        cat: &mut Catalog,
+        chunks: &mut Vec<ChunkEntry>,
+        objects: &mut u64,
+        encode: &EncodeParams,
+        ctx: &JobContext<'_>,
+    ) -> Result<()> {
+        let piece = usize::try_from(self.params.chunk_size)
+            .unwrap_or(usize::MAX)
+            .max(1);
+        let mut buf: Vec<u8> = Vec::new();
+        let mut flipped = false;
+        for e in extents {
+            ctx.check_cancelled()?;
+            let ExtentSource::Chunk {
+                chunk,
+                chunk_offset,
+            } = e.source
+            else {
+                return Err(MochiError::new(
+                    ErrorCode::InvalidArgument,
+                    "a hole cannot be written into a TAR-compatible archive's stream",
+                ));
+            };
+            let unknown = || {
+                MochiError::new(
+                    ErrorCode::CatalogInvalid,
+                    "an extent names a chunk the catalog cannot read",
+                )
+            };
+            let record = cat.object(&chunk)?.ok_or_else(unknown)?;
+            let at = cat.object_location(&chunk)?.ok_or_else(unknown)?;
+            let stored = load_stored(&self.storage, at, &record, &self.read.limits)?;
+            let decoded = decode_verified(&record, &stored, &self.read.limits)?;
+            let range = usize::try_from(chunk_offset)
+                .ok()
+                .zip(usize::try_from(e.length).ok())
+                .and_then(|(start, len)| Some(start..start.checked_add(len)?));
+            let part = range
+                .and_then(|r| decoded.as_bytes().get(r))
+                .ok_or_else(|| {
+                    MochiError::new(ErrorCode::ExtentInvalid, "an extent reads past its chunk")
+                })?;
+            buf.extend_from_slice(part);
+            self.tamper_reemitted(&mut buf, &mut flipped);
+            while buf.len() >= piece {
+                let rest = buf.split_off(piece);
+                let mut head = std::mem::replace(&mut buf, rest);
+                self.flush_framing(&mut head, cat, chunks, objects, encode)?;
+            }
+        }
+        self.flush_framing(&mut buf, cat, chunks, objects, encode)
+    }
+}
+
+/// TAR profile, a copied version the archive does not hold: its own chunk
+/// frames are the member's content, so they must be whole chunks, used once,
+/// in logical order, none already held (D19 rule 6). Returns them in extent
+/// order; anything else is `INVALID_ARGUMENT` and nothing is written.
+fn order_copied_chunks<'a>(
+    entry: &FileVersionEntry,
+    stored: &'a [(ObjectRecord, StoredObject)],
+    cat: &Catalog,
+) -> Result<Vec<&'a (ObjectRecord, StoredObject)>> {
+    let bad = |why: &str| {
+        MochiError::new(
+            ErrorCode::InvalidArgument,
+            format!("cannot copy this version into a TAR-compatible archive: {why}"),
+        )
+    };
+    let mut ordered = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut logical = 0u64;
+    for (i, e) in entry.extents.iter().enumerate() {
+        let ExtentSource::Chunk {
+            chunk,
+            chunk_offset,
+        } = e.source
+        else {
+            return Err(bad("it has a hole"));
+        };
+        if usize::try_from(e.ordinal) != Ok(i) || e.logical_offset != logical {
+            return Err(bad("its extents are not contiguous and in order"));
+        }
+        let Some(item) = stored.iter().find(|(r, _)| r.id == chunk) else {
+            return Err(bad(
+                "a chunk it needs is already held, so it cannot sit in the stream",
+            ));
+        };
+        if chunk_offset != 0 || e.length != item.0.decoded_len {
+            return Err(bad("a chunk is not used whole"));
+        }
+        if !seen.insert(chunk) {
+            return Err(bad("a chunk is used twice"));
+        }
+        if cat.object(&chunk)?.is_some() {
+            return Err(bad("a chunk it needs is already held"));
+        }
+        logical = logical
+            .checked_add(e.length)
+            .ok_or_else(|| bad("its length overflows"))?;
+        ordered.push(item);
+    }
+    if ordered.len() != stored.len() {
+        return Err(bad("it brings chunks its extents do not use"));
+    }
+    Ok(ordered)
 }
 
 /// D10.7, §18.1: re-read the two checkpoint representations from `storage`,
@@ -4018,6 +4396,11 @@ impl<S: Storage> ArchiveWriter<S> {
         self.tamper = t;
     }
 
+    /// Damage the TAR stream of the next commits. `None` turns it off.
+    pub fn set_tar_tamper(&mut self, t: Option<TarTamper>) {
+        self.tar_tamper = t;
+    }
+
     /// A catalog like the one about to be published, except that commit `seq`
     /// omits the transaction's last namespace operation.
     fn catalog_without_last_op(&self, manifest: &Manifest, seq: u64) -> Result<Catalog> {
@@ -4044,6 +4427,25 @@ impl<S: Storage> ArchiveWriter<S> {
         })?;
         Ok(c)
     }
+}
+
+/// How [`ArchiveWriter::set_tar_tamper`] damages a commit's TAR stream
+/// (test controls only). Each is a violation `verify` must name.
+#[cfg(any(test, feature = "test-controls"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TarTamper {
+    /// The first member's header carries a different mode than its version.
+    ModeOff,
+    /// The stream lacks its two end blocks.
+    NoEndBlocks,
+    /// A third zero block follows the two end blocks.
+    ExtraBlocks,
+    /// One more (empty) member than the commit has puts.
+    ExtraMember,
+    /// A re-emitted member's first byte differs from the version's.
+    ReemitFlipped,
+    /// A directory put has no member in the stream.
+    DropDirectoryMember,
 }
 
 /// How [`ArchiveWriter::set_checkpoint_tamper`] damages a checkpoint's

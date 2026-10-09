@@ -71,8 +71,10 @@ pub struct CreateArgs {
     /// Chunk size in bytes (fixed for the archive's life).
     #[arg(long, value_name = "BYTES")]
     pub chunk_size: Option<u64>,
-    /// Create a TAR-compatible archive (spec D4). Not available in this
-    /// build (plan C10): refused with exit 4.
+    /// Create a TAR-compatible archive (spec 7.2, Annex B.2.9 D19): every
+    /// commit also writes a TAR stream, so `zstd -dc` of the file yields the
+    /// commits' streams. The choice is fixed for the archive's life, turns
+    /// deduplication off, and costs space (see docs/c10-tar-compat.md).
     #[arg(long)]
     pub tar_compatible: bool,
     /// Most content bytes one commit may hold in memory.

@@ -209,6 +209,24 @@ pub fn encode_object_sealed(
     frame_sealed(payload, limits)
 }
 
+/// Seal an existing Zstandard data frame (one frame, walked structurally) for
+/// the chunk `object_id` under `ctx`: the second half of a rewrite, which has
+/// the frame but not the decoded bytes.
+pub fn seal_data_frame(
+    frame: &[u8],
+    ctx: &SealContext<'_>,
+    object_id: &[u8; 32],
+    rng: &mut dyn Random,
+    limits: &Limits,
+) -> Result<StoredObject> {
+    single_data_frame(frame, limits)?;
+    let target = SealTarget::Chunk {
+        object_id: *object_id,
+    };
+    let payload = StoredPayload::from_codec(seal_payload(ctx, &target, frame, rng)?);
+    frame_sealed(payload, limits)
+}
+
 /// Open a sealed chunk and hand back its Zstandard frame, without
 /// decompressing it: what a rewrite carries from one archive to another
 /// (it re-seals the same frame under the new key and archive). The sealed

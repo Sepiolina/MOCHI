@@ -348,7 +348,7 @@ fn validate_locations(src: &SimStorage, head: &OpenedHead, e: &HistoryEntry, who
             record.stored_hash,
             "{who}: stored hash at {at}"
         );
-        decode_verified(&record, &stored, &limits)
+        decode_verified(&record, &stored, &limits, None)
             .unwrap_or_else(|err| panic!("{who}: object at {at} does not decode: {err}"));
     }
 }

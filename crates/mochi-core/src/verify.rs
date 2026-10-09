@@ -951,6 +951,8 @@ fn data_objects(
         }
     };
     let total = ids.len() as u64;
+    let key = crate::keys::catalog_key(ro, cat);
+    let seal = key.as_deref().map(crate::keys::Unlocked::context);
     let mut expected_bytes = 0u64;
     let mut checked_objects = 0u64;
     let mut checked_bytes = 0u64;
@@ -990,7 +992,7 @@ fn data_objects(
         if depth >= 3 {
             let result = load_stored(src, at, &record, &ro.limits).and_then(|stored| {
                 if depth >= 4 {
-                    decode_verified(&record, &stored, &ro.limits).map(|_| ())
+                    decode_verified(&record, &stored, &ro.limits, seal.as_ref()).map(|_| ())
                 } else {
                     verify_stored(&record, &stored)
                 }

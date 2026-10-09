@@ -78,7 +78,7 @@ proptest! {
 
         // Load and decode through the verifier.
         let loaded = load_stored(&storage, offset, &obj.record, &limits).unwrap();
-        let decoded = decode_verified(&obj.record, &loaded, &limits).unwrap();
+        let decoded = decode_verified(&obj.record, &loaded, &limits, None).unwrap();
         prop_assert_eq!(decoded.as_bytes(), &content[..]);
 
         // Independent recomputation of every digest over its own representation.
@@ -139,7 +139,7 @@ proptest! {
         let mut bytes = obj.stored.as_bytes().to_vec();
         let i = at.index(bytes.len());
         bytes[i] ^= 1 << bit;
-        let e = decode_verified(&obj.record, &StoredObject::from_loaded(bytes), &Limits::default())
+        let e = decode_verified(&obj.record, &StoredObject::from_loaded(bytes), &Limits::default(), None)
             .unwrap_err();
         prop_assert_eq!(e.code, ErrorCode::StoredIntegrityFailed);
     }
@@ -164,7 +164,7 @@ proptest! {
         record.stored_hash = stored_object_hash(damaged.view());
         prop_assert!(verify_stored(&record, &damaged).is_ok());
 
-        match decode_verified(&record, &damaged, &limits) {
+        match decode_verified(&record, &damaged, &limits, None) {
             Ok(decoded) => prop_assert_eq!(decoded.as_bytes(), &content[..]),
             Err(e) => prop_assert!(
                 matches!(
@@ -192,13 +192,13 @@ fn truncation_at_every_byte_is_rejected() {
         let full = obj.stored.as_bytes();
         for cut in 0..full.len() {
             let prefix = StoredObject::from_loaded(full[..cut].to_vec());
-            let e = decode_verified(&obj.record, &prefix, &limits).unwrap_err();
+            let e = decode_verified(&obj.record, &prefix, &limits, None).unwrap_err();
             assert_eq!(e.code, ErrorCode::StoredIntegrityFailed, "cut {cut}");
 
             let mut resealed = obj.record.clone();
             resealed.stored_len = prefix.len();
             resealed.stored_hash = stored_object_hash(prefix.view());
-            let e = decode_verified(&resealed, &prefix, &limits).unwrap_err();
+            let e = decode_verified(&resealed, &prefix, &limits, None).unwrap_err();
             assert_ne!(e.code, ErrorCode::StoredIntegrityFailed, "cut {cut}");
         }
     }
@@ -213,12 +213,12 @@ fn wrong_decoded_claims_fail_content_integrity() {
 
     let mut r = obj.record.clone();
     r.decoded_len += 1;
-    let e = decode_verified(&r, &obj.stored, &limits).unwrap_err();
+    let e = decode_verified(&r, &obj.stored, &limits, None).unwrap_err();
     assert_eq!(e.code, ErrorCode::ContentIntegrityFailed, "{}", e.message);
 
     let mut r = obj.record.clone();
     r.content_hash = chunk_content_hash(&DecodedBytes::new(b"other content".to_vec()));
-    let e = decode_verified(&r, &obj.stored, &limits).unwrap_err();
+    let e = decode_verified(&r, &obj.stored, &limits, None).unwrap_err();
     assert_eq!(e.code, ErrorCode::ContentIntegrityFailed, "{}", e.message);
 }
 

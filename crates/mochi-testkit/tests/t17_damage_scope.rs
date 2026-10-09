@@ -434,7 +434,7 @@ fn t17_invalid_record_is_not_treated_as_damage() {
     let mut f = Forge::new(s.contents());
     f.bytes.truncate(h[1].commit_offset as usize);
     let r = f.append_manifest_edited(&delta, |v| {
-        *forge::field(v, 9) = Value::Array(vec![Value::Uint(1)]);
+        *forge::field(v, 9) = Value::Array(vec![Value::Uint(2)]);
     });
     let mut rec = h[1].commit.clone();
     rec.delta_manifest = r;

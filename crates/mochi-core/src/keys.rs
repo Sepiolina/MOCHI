@@ -375,10 +375,36 @@ impl KeySession {
         })
     }
 
-    /// The first passphrase, which a rewrite uses for its new envelope when
-    /// none is named (`compact`, `gc apply`, `repair apply`).
+    /// The supplied passphrases, for the envelopes of a rewritten archive
+    /// (`compact`, `gc apply`, `repair apply`, `rekey --reencrypt`): a
+    /// passphrase not given again does not carry over (B.2.10 item 10).
     pub(crate) fn passphrases(&self) -> &[Passphrase] {
         &self.passphrases
+    }
+
+    /// The data key of `archive`, if some envelope of it was opened (or its
+    /// writer registered it). The head open decides **which commit's** key
+    /// set a passphrase may open ([`KeySession::unlock`]); every later read of
+    /// that archive reuses the key, because the data key is archive-wide.
+    pub fn unlocked_for(&self, archive: &ArchiveId) -> Option<Arc<Unlocked>> {
+        let guard = self.opened.lock().ok()?;
+        guard
+            .iter()
+            .find(|(_, u)| &u.archive_id == archive)
+            .map(|(_, u)| u.clone())
+    }
+
+    /// Remember the key of an archive this process just wrote, under each of
+    /// the envelopes now valid, so that reading it back (verification after a
+    /// rewrite, a later append) needs no second derivation.
+    pub fn register_envelopes(&self, unlocked: Arc<Unlocked>, envelope_ids: &[[u8; 16]]) {
+        if let Ok(mut guard) = self.opened.lock() {
+            for id in envelope_ids {
+                if !guard.iter().any(|(known, _)| known == id) {
+                    guard.push((*id, unlocked.clone()));
+                }
+            }
+        }
     }
 
     /// Open the data key through whichever of `envelopes` one of the session's
@@ -434,6 +460,72 @@ impl std::fmt::Debug for KeySession {
             .field("passphrases", &self.passphrases.len())
             .finish()
     }
+}
+
+// ---- sealed records ------------------------------------------------------------------
+
+/// The data key of `archive` from `opts`, or `KEY_UNAVAILABLE`: the single
+/// place a read of a sealed object finds its key.
+pub(crate) fn require_key(opts: &ReadOptions, archive: &ArchiveId) -> Result<Arc<Unlocked>> {
+    opts.keys
+        .as_ref()
+        .and_then(|k| k.unlocked_for(archive))
+        .ok_or_else(|| {
+            MochiError::new(
+                ErrorCode::KeyUnavailable,
+                "this archive is encrypted: a passphrase is required to read it",
+            )
+        })
+}
+
+/// The data key of the archive `cat` belongs to, if `opts` carries one that
+/// opened it: how a reader that holds a catalog but no commit finds the key its
+/// sealed chunks need. `None` for a Core archive and for a keyless reader; a
+/// sealed chunk then fails with `KEY_UNAVAILABLE` when it is decoded.
+pub(crate) fn catalog_key(
+    opts: &ReadOptions,
+    cat: &crate::catalog::Catalog,
+) -> Option<Arc<Unlocked>> {
+    let session = opts.keys.as_ref()?;
+    let id = cat.meta(crate::catalog::META_ARCHIVE_ID).ok().flatten()?;
+    let archive = ArchiveId::from_bytes(<[u8; 32]>::try_from(id.as_slice()).ok()?);
+    session.unlocked_for(&archive)
+}
+
+/// Open a sealed record (a manifest or an image) that was read from `stored`
+/// and whose stored-object hash has been verified: exactly one
+/// `0x184D2A59` frame, authenticated for `target`. A tag failure is
+/// `CONTENT_INTEGRITY_FAILED` (the bytes are as written; they are not what
+/// should be sealed there).
+pub(crate) fn open_sealed_record(
+    stored: &StoredObject,
+    key: &Unlocked,
+    target: &mochi_format::seal::SealTarget,
+    limits: &Limits,
+) -> Result<Vec<u8>> {
+    let payload = mochi_format::seal::sealed_frame_payload(stored, limits)?;
+    Ok(mochi_format::seal::open_payload(
+        &key.context(),
+        target,
+        payload,
+    )?)
+}
+
+/// Seal a record's plaintext for `target` as one sealed frame, within the
+/// writer defaults (B.2.3): a record that does not fit is `CAPACITY_EXCEEDED`.
+pub(crate) fn seal_record(
+    key: &Unlocked,
+    target: &mochi_format::seal::SealTarget,
+    plaintext: &[u8],
+    rng: &mut dyn Random,
+) -> Result<StoredObject> {
+    Ok(mochi_format::seal::seal_frame(
+        &key.context(),
+        target,
+        plaintext,
+        rng,
+        &Limits::WRITER_DEFAULT,
+    )?)
 }
 
 // ---- reading a commit's envelopes ---------------------------------------------------

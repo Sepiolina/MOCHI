@@ -1126,9 +1126,9 @@ pub fn c4_manifest_vectors() -> Vec<ManifestVector> {
     // ---- D11 required features
     v.push(reject(
         "reject-manifest-required-feature",
-        "requires feature 1, which no build defines",
+        "requires feature 2, which no build defines",
         c4_edit(&root, |r| {
-            *c4_field(r, 9) = Value::Array(vec![Value::Uint(1)])
+            *c4_field(r, 9) = Value::Array(vec![Value::Uint(2)])
         }),
         "UNSUPPORTED_FEATURE",
     ));
@@ -1558,8 +1558,8 @@ pub fn c5_commit_vectors() -> Vec<ManifestVector> {
         ),
         reject(
             "reject-commit-schema-version",
-            "schema version 2",
-            c5_edit(&root, true, |r| c5_set(r, 0, Value::Uint(2))),
+            "schema version 3",
+            c5_edit(&root, true, |r| c5_set(r, 0, Value::Uint(3))),
             "UNSUPPORTED_FEATURE",
         ),
         reject(
@@ -1642,9 +1642,9 @@ pub fn c5_commit_vectors() -> Vec<ManifestVector> {
         // ---- D11 required features
         reject(
             "reject-commit-required-feature",
-            "requires feature 1, which no build defines",
+            "requires feature 2, which no build defines",
             c5_edit(&root, true, |r| {
-                c5_set(r, 7, Value::Array(vec![Value::Uint(1)]))
+                c5_set(r, 7, Value::Array(vec![Value::Uint(2)]))
             }),
             "UNSUPPORTED_FEATURE",
         ),
@@ -1929,9 +1929,9 @@ pub fn b2_envelope_vectors() -> Vec<EnvelopeVector> {
     );
     push(
         "reject-envelope-unknown-feature",
-        "required feature 1, which this build does not know",
-        v().with_features(&[1]),
-        Err(FormatError::UnsupportedRequiredFeature { feature: 1 }),
+        "required feature 2, which this build does not know",
+        v().with_features(&[2]),
+        Err(FormatError::UnsupportedRequiredFeature { feature: 2 }),
     );
     push(
         "reject-envelope-features-not-increasing",
@@ -2160,8 +2160,8 @@ pub fn b2_descriptor_vectors() -> Vec<DescriptorVector> {
     );
     push(
         "reject-descriptor-unknown-feature",
-        "key 4 = [1]",
-        descriptor_frame_of(edit(4, Some(Value::Array(vec![Value::Uint(1)])))),
+        "key 4 = [2]",
+        descriptor_frame_of(edit(4, Some(Value::Array(vec![Value::Uint(2)])))),
         Err(u),
     );
     push(
@@ -2656,7 +2656,7 @@ pub fn c5_archive_vectors() -> Vec<ArchiveVector> {
         "reject-archive-unknown-feature",
         "an unknown required feature in a delta manifest mid-segment",
         ArchiveExpect::Rejected("UNSUPPORTED_FEATURE"),
-        forge_c2_edited_then_c3(|v| *forge::field(v, 9) = Value::Array(vec![Value::Uint(1)])),
+        forge_c2_edited_then_c3(|v| *forge::field(v, 9) = Value::Array(vec![Value::Uint(2)])),
     );
     // Added 2026-10-04 (Q23 decided with clarification B; D10.6 amended).
     // Appended last so earlier vectors.txt lines stay byte-identical.

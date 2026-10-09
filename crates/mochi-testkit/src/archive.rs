@@ -68,6 +68,42 @@ pub fn test_options() -> WriterOptions {
         profile: None,
         checkpoint_trigger: None,
         dedup: Dedup::default(),
+        kdf: None,
+    }
+}
+
+/// A cheap Argon2id cost for tests (the key-derivation limits and the
+/// production defaults are tested separately): 64 KiB, 2 passes, 1 lane.
+pub const TEST_KDF: mochi_format::kdf::KdfParams = mochi_format::kdf::KdfParams {
+    memory_kib: 64,
+    iterations: 2,
+    lanes: 1,
+};
+
+/// Reader options holding a fresh key session over `passphrases`, as one
+/// process would: nothing is derived until something needs the key.
+pub fn keyed_read(passphrases: &[&str]) -> ReadOptions {
+    let keys = passphrases
+        .iter()
+        .map(|p| mochi_format::secret::Passphrase::new(p).expect("valid test passphrase"))
+        .collect();
+    ReadOptions {
+        keys: Some(mochi_core::keys::KeySession::new(keys).expect("a passphrase")),
+        ..ReadOptions::default()
+    }
+}
+
+/// Writer options for an Encrypted-profile archive (Annex B.2.10 D20) that
+/// the given passphrases open, with the test chunk size and a cheap KDF.
+pub fn encrypted_options(passphrases: &[&str]) -> WriterOptions {
+    WriterOptions {
+        read: keyed_read(passphrases),
+        profile: Some(mochi_core::descriptor::Profile {
+            tar_compatible: false,
+            encrypted: true,
+        }),
+        kdf: Some(TEST_KDF),
+        ..test_options()
     }
 }
 
@@ -199,6 +235,8 @@ pub fn build<S: Storage>(storage: S, seed: u64, steps: &[Step]) -> Result<Vec<Co
 pub fn read_state(src: &dyn ReadStorage, head: &OpenedHead) -> Result<State> {
     let limits = ReadOptions::default().limits;
     let cat = &head.catalog;
+    // An Encrypted archive's chunks are opened under the head's data key.
+    let seal = head.seal_context();
     let mut out = State::new();
     for (p, entry) in cat.replay(None)?.iter() {
         let key = p.as_stored().to_vec();
@@ -230,7 +268,7 @@ pub fn read_state(src: &dyn ReadStorage, head: &OpenedHead) -> Result<State> {
                 MochiError::new(ErrorCode::CatalogInvalid, "chunk has no location")
             })?;
             let stored = load_stored(src, at, &record, &limits)?;
-            let decoded = decode_verified(&record, &stored, &limits)?;
+            let decoded = decode_verified(&record, &stored, &limits, seal.as_ref())?;
             let from = chunk_offset as usize;
             let to = from + e.length as usize;
             let lo = e.logical_offset as usize;

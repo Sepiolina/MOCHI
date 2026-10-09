@@ -1373,6 +1373,22 @@ impl Manifest {
         transaction_id: [u8; 16],
         attributes: &std::collections::BTreeMap<FileVersionId, Attributes>,
     ) -> Result<Manifest> {
+        Self::snapshot_from_catalog_in(catalog, archive_id, seq, transaction_id, attributes, None)
+    }
+
+    /// [`snapshot_from_catalog`](Self::snapshot_from_catalog) for an archive
+    /// of any profile. `key_state` is `Some(envelope IDs valid at this
+    /// commit, strictly increasing)` exactly for the Encrypted profile (D20
+    /// item 10): the snapshot then lists the Encrypted required feature and
+    /// carries the key state, so that it is a valid schema-3 manifest.
+    pub fn snapshot_from_catalog_in(
+        catalog: &Catalog,
+        archive_id: ArchiveId,
+        seq: u64,
+        transaction_id: [u8; 16],
+        attributes: &std::collections::BTreeMap<FileVersionId, Attributes>,
+        key_state: Option<Vec<[u8; 16]>>,
+    ) -> Result<Manifest> {
         let snapshot = catalog.replay(Some(seq))?;
         let mut versions = std::collections::BTreeMap::new();
         let mut chunk_ids = BTreeSet::new();
@@ -1434,6 +1450,10 @@ impl Manifest {
             provenance: None,
             keys: Default::default(),
         };
+        if let Some(state) = key_state {
+            m.required_features = vec![FEATURE_ENCRYPTED];
+            m.keys.state = state;
+        }
         m.canonicalize();
         m.check_structure(&Limits::WRITER_DEFAULT)?;
         Ok(m)

@@ -31,6 +31,7 @@ pub mod descriptor;
 pub mod error;
 pub mod exit;
 pub mod gc;
+pub mod health;
 pub mod image;
 pub mod import;
 pub mod job;

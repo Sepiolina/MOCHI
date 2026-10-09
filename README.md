@@ -168,7 +168,7 @@ a new archive, leave out and list anything that cannot be recovered, verify
 the result before publishing it, and never write to the damaged source. A
 partial repair is labelled partial and exits `2`.
 
-Commands not built yet (`health`, `rekey`) exit `3` with
+Commands not built yet (`rekey`) exit `3` with
 `NOT_IMPLEMENTED`, and post-1.0 commands (`inventory`, `split`, `join`,
 `mount`) exit `4` with `UNSUPPORTED_FEATURE`, as spec §23.2 requires. See
 `docs/implementation-plan.md` for the status of every phase.

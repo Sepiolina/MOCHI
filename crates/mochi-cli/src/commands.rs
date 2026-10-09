@@ -14,6 +14,10 @@ use mochi_core::compact::{self, CompactOptions, Keep};
 use mochi_core::descriptor::Profile;
 use mochi_core::exit;
 use mochi_core::gc::{self, GcPlan, PlanHead};
+use mochi_core::health::{
+    self, AnchorRef, CurrentHead, EvidenceCommand, EvidenceHead, EvidenceRecord, HealthPolicy,
+    Inputs, EVIDENCE_SCHEMA,
+};
 use mochi_core::import::{import_into, ImportOptions, SourceKind, DEFAULT_MAX_TOTAL_BYTES};
 use mochi_core::job::{CancellationToken, JobContext, NullProgress};
 use mochi_core::object::{ArchiveId, OsIds};
@@ -28,18 +32,21 @@ use mochi_core::repair::{self, Outcome, RepairOptions, RepairPlan, RetentionPlan
 use mochi_core::report::{Finding, Report, Severity};
 use mochi_core::restore::{restore_selected, ExceptionKind, RestoreOptions, RestoreReport};
 use mochi_core::search::{search, FullText, PathMatch, Query, SnapshotScope};
-use mochi_core::status::{Dimension, VerificationLevel};
+use mochi_core::status::{Dimension, Status, VerificationLevel};
 use mochi_core::storage::os::{OsDir, OsReadStorage, OsRestoreDir, OsSourceTree, OsStorage};
 use mochi_core::timestamp::Timestamp;
-use mochi_core::verify::{parse_commit_id, verify, FreshnessAnchor, VerifyOptions};
+use mochi_core::verify::{
+    judge_freshness_of, parse_commit_id, verify, FreshnessAnchor, FreshnessJudgement, VerifyOptions,
+};
 use mochi_core::{ErrorCode, MochiError, Result};
 use mochi_format::digest::FileContentHash;
 use serde_json::{json, Value};
 
 use crate::cli::{
     AppendArgs, CheckpointArgs, CompactArgs, CreateArgs, DumpIndexArgs, ExpireArgs, GcApplyArgs,
-    GcPlanArgs, GetArgs, KindArg, Level, ListArgs, ReleaseArgs, RepairApplyArgs, RepairPlanArgs,
-    RestoreTestArgs, RetainArgs, SearchArgs, SearchSnapshots, SnapshotListArgs, VerifyArgs,
+    GcPlanArgs, GetArgs, HealthArgs, KindArg, Level, ListArgs, ReleaseArgs, RepairApplyArgs,
+    RepairPlanArgs, RestoreTestArgs, RetainArgs, SearchArgs, SearchSnapshots, SnapshotListArgs,
+    VerifyArgs,
 };
 use crate::render::{archive_path_arg, hex, path_fields, text};
 use crate::state::{HeadStore, SeenHead};
@@ -65,6 +72,20 @@ impl Env<'_> {
 
     fn line(&mut self, s: impl std::fmt::Display) {
         let _ = writeln!(self.out, "{s}");
+    }
+
+    /// Append a completed run to the archive's evidence log, for
+    /// `mochi health`. Nothing is recorded under `--no-local-history`, and a
+    /// failure to record is a warning, never a failure of the command.
+    fn record_evidence(&mut self, archive: ArchiveId, record: Option<EvidenceRecord>) {
+        let (Some(store), Some(record)) = (self.store.clone(), record) else {
+            return;
+        };
+        if let Err(e) = store.append_evidence(&archive, &record) {
+            self.warn(format!(
+                "the result was not recorded as health evidence: {e}"
+            ));
+        }
     }
 
     /// Record a head this client saw, as a later freshness anchor (D8).
@@ -1034,7 +1055,55 @@ pub fn restore_test(env: &mut Env<'_>, a: &RestoreTestArgs) -> Result<u8> {
         &env.read,
         &ctx,
     )?;
+    env.record_evidence(
+        head.commit.archive_id,
+        restore_evidence(head.seq(), head.commit_id.to_hex(), &r),
+    );
     Ok(emit_restore(env, "restore-test", &head, &a.destination, &r))
+}
+
+/// Health evidence from a `restore-test`: recoverability `PASS` when every
+/// entry of the commit was restored and verified, `FAIL` when an entry failed
+/// its integrity check, and nothing when the restore was incomplete for a
+/// reason that says nothing about the archive (a name the destination cannot
+/// hold, for example).
+fn restore_evidence(seq: u64, commit_id: String, r: &RestoreReport) -> Option<EvidenceRecord> {
+    let (status, finding_codes) = if r.complete() {
+        (Status::Pass, Vec::new())
+    } else if r
+        .exceptions
+        .iter()
+        .any(|e| matches!(e.kind, ExceptionKind::Integrity { .. }))
+    {
+        let mut codes = Vec::new();
+        for f in r
+            .findings()
+            .iter()
+            .filter(|f| f.severity == Severity::Error)
+        {
+            if !codes.contains(&f.code) {
+                codes.push(f.code);
+            }
+        }
+        (Status::Fail, codes)
+    } else {
+        return None;
+    };
+    Some(EvidenceRecord {
+        schema: EVIDENCE_SCHEMA,
+        command: EvidenceCommand::RestoreTest,
+        level: Some(VerificationLevel::Restoration),
+        completed_at: Timestamp::now().ok()?.to_string(),
+        head: EvidenceHead { seq, commit_id },
+        dimensions: [(Dimension::Recoverability, status)].into(),
+        exit_code: restore_exit(r),
+        scope: Some(
+            "the whole commit restored into an isolated destination, every file verified \
+             before it was published"
+                .into(),
+        ),
+        finding_codes,
+    })
 }
 
 // ---- verification -----------------------------------------------------------
@@ -1063,13 +1132,18 @@ fn claimed_archive_id(src: &OsReadStorage, ro: &ReadOptions) -> Option<ArchiveId
 }
 
 fn print_report(env: &mut Env<'_>, command: &str, r: &Report) {
-    env.line(format!(
+    let heading = format!(
         "{command}: level {}",
         serde_json::to_value(r.level)
             .ok()
             .and_then(|v| v.as_str().map(str::to_owned))
             .unwrap_or_default()
-    ));
+    );
+    print_report_body(env, &heading, "skipped", r);
+}
+
+fn print_report_body(env: &mut Env<'_>, heading: &str, skipped_label: &str, r: &Report) {
+    env.line(heading);
     if let Some(id) = &r.archive_id {
         env.line(format!("archive   {id}"));
     }
@@ -1115,7 +1189,7 @@ fn print_report(env: &mut Env<'_>, command: &str, r: &Report) {
         print_findings(env, &r.findings);
     }
     for s in &r.skipped {
-        env.line(format!("skipped: {} ({})", s.item, s.reason));
+        env.line(format!("{skipped_label}: {} ({})", s.item, s.reason));
     }
     let policy = serde_json::to_value(r.policy_result)
         .ok()
@@ -1187,6 +1261,23 @@ pub fn verify_cmd(env: &mut Env<'_>, a: &VerifyArgs, deep: bool) -> Result<u8> {
             env.remember(h.archive_id, h.seq, h.commit_id);
         }
     }
+    // Health evidence: every completed run with a verified head, failures
+    // included (a failure must outlive the run that found it).
+    if let Some(h) = v.head {
+        let command = if deep {
+            EvidenceCommand::Fsck
+        } else {
+            EvidenceCommand::Verify
+        };
+        let head = EvidenceHead {
+            seq: h.seq,
+            commit_id: h.commit_id.to_hex(),
+        };
+        env.record_evidence(
+            h.archive_id,
+            EvidenceRecord::from_report(command, &v.report, head),
+        );
+    }
     if env.json {
         let value = serde_json::to_value(&v.report).map_err(|e| {
             MochiError::new(ErrorCode::IoError, format!("rendering the report: {e}"))
@@ -1196,6 +1287,144 @@ pub fn verify_cmd(env: &mut Env<'_>, a: &VerifyArgs, deep: bool) -> Result<u8> {
         print_report(env, command, &v.report);
     }
     Ok(v.report.exit_code)
+}
+
+/// `mochi health` (spec §20, §21, §23.2; plan K5): what this machine has
+/// recorded about the archive's health, judged against a policy for the
+/// archive's current head. It runs no check and writes nothing; it opens the
+/// archive only to locate the head and read the commit history that
+/// freshness needs (no stored object is read or hashed).
+pub fn health_cmd(env: &mut Env<'_>, a: &HealthArgs) -> Result<u8> {
+    let policy = match &a.policy {
+        None => HealthPolicy::default(),
+        Some(p) => {
+            let bytes = std::fs::read(p).map_err(|e| {
+                MochiError::new(ErrorCode::IoError, format!("{}: {e}", p.display()))
+            })?;
+            let policy: HealthPolicy = serde_json::from_slice(&bytes)
+                .map_err(|e| invalid(format!("{}: not a health policy ({e})", p.display())))?;
+            policy
+                .validate()
+                .map_err(|e| invalid(format!("{}: {}", p.display(), e.message)))?;
+            policy
+        }
+    };
+    let src = open_archive(&a.archive)?;
+    let loc = locate_head(&src, &env.read.limits)?;
+    let (commit, commit_id) = read_commit(&src, &loc.footer, &env.read)?;
+    let archive_id = commit.archive_id;
+    let current = CurrentHead {
+        archive_id: archive_id.to_hex(),
+        seq: commit.seq,
+        commit_id: commit_id.to_hex(),
+    };
+
+    // This machine's evidence and the head it last saw.
+    let mut evidence = crate::state::EvidenceRead::default();
+    let mut unavailable = None;
+    let mut seen = None;
+    match env.store.clone() {
+        None => {
+            unavailable = Some(
+                "local history is off (--no-local-history) or has no location on this machine, \
+                 so no recorded evidence was consulted"
+                    .to_owned(),
+            );
+        }
+        Some(store) => {
+            match store.read_evidence(&archive_id) {
+                Ok(e) => evidence = e,
+                Err(e) => {
+                    unavailable =
+                        Some(format!("the evidence log could not be read: {}", e.message));
+                    env.warn(format!("{e}"));
+                }
+            }
+            if evidence.unreadable > 0 {
+                env.warn(format!(
+                    "{} line(s) of {} could not be read and were ignored; no dimension can pass \
+                     until they are removed or the log is replaced",
+                    evidence.unreadable,
+                    store.evidence_path(&archive_id).display()
+                ));
+            }
+            match store.get(&archive_id) {
+                Ok(h) => seen = h,
+                Err(e) => env.warn(format!(
+                    "the local head history could not be read, so freshness has no anchor: {e}"
+                )),
+            }
+        }
+    }
+
+    // Freshness as `verify` judges it: does the history contain the head
+    // this client last saw?
+    let mut freshness = FreshnessJudgement {
+        status: Status::Unknown,
+        findings: Vec::new(),
+    };
+    let mut freshness_note = None;
+    if let Some(h) = seen {
+        match commit_history(&src, &env.read) {
+            Ok(history) => {
+                freshness = judge_freshness_of(
+                    &FreshnessAnchor::LocalHistory {
+                        seq: h.seq,
+                        commit_id: h.commit_id,
+                    },
+                    &history,
+                );
+            }
+            Err(e) => {
+                freshness_note = Some(format!(
+                    "the commit history could not be read, so the head cannot be compared with \
+                     the one last seen: {}",
+                    e.message
+                ));
+            }
+        }
+    }
+
+    let now = Timestamp::now()?;
+    let report = health::assess(
+        &Inputs {
+            evidence: &evidence.records,
+            unreadable_evidence: evidence.unreadable,
+            evidence_unavailable: unavailable,
+            current: &current,
+            anchor: seen.map(|h| AnchorRef {
+                seq: h.seq,
+                commit_id: h.commit_id.to_hex(),
+            }),
+            freshness,
+            freshness_note,
+            now,
+        },
+        &policy,
+    );
+    if let Err(violations) = report.validate() {
+        let msg: Vec<String> = violations.iter().map(ToString::to_string).collect();
+        return Err(MochiError::new(
+            ErrorCode::ReportInconsistent,
+            format!("internal: the report is inconsistent: {}", msg.join("; ")),
+        ));
+    }
+    if env.json {
+        let value = serde_json::to_value(&report).map_err(|e| {
+            MochiError::new(ErrorCode::IoError, format!("rendering the report: {e}"))
+        })?;
+        env.emit_json(&value);
+    } else {
+        let heading = format!(
+            "health: {}",
+            report.scope.as_deref().unwrap_or("recorded evidence only")
+        );
+        print_report_body(env, &heading, "note", &report);
+        if let Some(age) = report.coverage.evidence_age_seconds {
+            env.line(format!("oldest evidence used: {} day(s) old", age / 86_400));
+        }
+    }
+    Ok(report.exit_code)
 }
 
 // ---- retention, checkpoint, compaction, collection (plan C9) ---------------------
@@ -1860,7 +2089,43 @@ pub fn repair_apply(env: &mut Env<'_>, a: &RepairApplyArgs) -> Result<u8> {
     // Remember the new archive's head: a later verify of it then has an
     // anchor (D8).
     match open_archive(&a.output).and_then(|s| open_head(&s, &env.read)) {
-        Ok(h) => env.remember(h.commit.archive_id, h.seq(), h.commit_id),
+        Ok(h) => {
+            env.remember(h.commit.archive_id, h.seq(), h.commit_id);
+            // The re-verification before publication is evidence about the
+            // new archive, but only a complete repair says nothing was left
+            // out: a partial one is not recorded (the user runs `verify`).
+            if report.outcome == Outcome::Complete
+                && report.reverification.policy_result == Status::Pass
+            {
+                if let Ok(now) = Timestamp::now() {
+                    env.record_evidence(
+                        h.commit.archive_id,
+                        Some(EvidenceRecord {
+                            schema: EVIDENCE_SCHEMA,
+                            command: EvidenceCommand::RepairApply,
+                            level: Some(VerificationLevel::Restoration),
+                            completed_at: now.to_string(),
+                            head: EvidenceHead {
+                                seq: h.seq(),
+                                commit_id: h.commit_id.to_hex(),
+                            },
+                            dimensions: [
+                                (Dimension::Integrity, Status::Pass),
+                                (Dimension::Recoverability, Status::Pass),
+                            ]
+                            .into(),
+                            exit_code: report.reverification.exit_code,
+                            scope: Some(
+                                "the new archive re-verified before publication (restoration \
+                                 level, fsck depth)"
+                                    .into(),
+                            ),
+                            finding_codes: Vec::new(),
+                        }),
+                    );
+                }
+            }
+        }
         Err(e) => env.warn(format!("the new archive's head was not recorded: {e}")),
     }
     if env.json {
@@ -1972,5 +2237,72 @@ mod tests {
         );
         assert_eq!(dump_value_text(&DumpValue::Null), "NULL");
         assert_eq!(dump_value_text(&DumpValue::Integer(42)), "42");
+    }
+
+    fn restore_report(exceptions: Vec<mochi_core::restore::RestoreException>) -> RestoreReport {
+        RestoreReport {
+            files: 1,
+            directories: 0,
+            bytes: 1,
+            exceptions,
+            directory_durability: mochi_core::storage::DirectoryDurability::Confirmed,
+            attributes_unavailable: None,
+            attribute_exceptions: Vec::new(),
+            case_behavior: mochi_core::storage::CaseBehavior::Sensitive,
+        }
+    }
+
+    /// What a `restore-test` says about recoverability: `PASS` only when
+    /// everything was restored and verified, `FAIL` (with the code) when an
+    /// entry failed its integrity check, and nothing when the restore fell
+    /// short for a reason that says nothing about the archive.
+    #[test]
+    fn restore_evidence_follows_what_the_restore_proved() {
+        use mochi_core::restore::RestoreException;
+        let path = |s: &str| ArchivePath::from_stored(s.as_bytes()).unwrap();
+        let id = "ab".repeat(32);
+
+        let ok = restore_evidence(3, id.clone(), &restore_report(Vec::new())).unwrap();
+        assert_eq!(ok.command, EvidenceCommand::RestoreTest);
+        assert_eq!(ok.dimensions[&Dimension::Recoverability], Status::Pass);
+        assert_eq!(
+            ok.dimensions.len(),
+            1,
+            "restoring says nothing about integrity"
+        );
+        assert_eq!((ok.head.seq, ok.head.commit_id.as_str()), (3, id.as_str()));
+        assert!(ok.finding_codes.is_empty());
+        ok.validate().unwrap();
+
+        let integrity = restore_report(vec![RestoreException {
+            path: path("a"),
+            kind: ExceptionKind::Integrity {
+                code: ErrorCode::StoredIntegrityFailed,
+                message: "x".into(),
+            },
+        }]);
+        let bad = restore_evidence(3, id.clone(), &integrity).unwrap();
+        assert_eq!(bad.dimensions[&Dimension::Recoverability], Status::Fail);
+        assert_eq!(bad.finding_codes, [ErrorCode::StoredIntegrityFailed]);
+
+        for kind in [
+            ExceptionKind::Collision,
+            ExceptionKind::Failed {
+                code: ErrorCode::IoError,
+                message: "x".into(),
+            },
+            ExceptionKind::ParentNotRestored {
+                cause: ErrorCode::NameCollision,
+            },
+        ] {
+            let r = restore_report(vec![RestoreException {
+                path: path("a"),
+                kind,
+            }]);
+            assert!(
+                restore_evidence(3, id.clone(), &r).is_none(),
+                "an incomplete restore for a reason unrelated to the archive is not evidence"
+            );
+        }
     }
 }

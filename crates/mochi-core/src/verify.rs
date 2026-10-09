@@ -648,67 +648,101 @@ fn cancelled_with(
     })
 }
 
-/// D8: does the verified history contain the anchor?
-fn judge_freshness(anchor: &FreshnessAnchor, history: &[HistoryEntry], run: &mut Run) -> Status {
+/// The D8 verdict on an anchor: a status and the findings behind it.
+/// Shared by [`verify`] and `mochi health`, which must judge freshness the
+/// same way (plan K5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FreshnessJudgement {
+    pub status: Status,
+    pub findings: Vec<Finding>,
+}
+
+fn freshness_finding(severity: Severity, message: String) -> Finding {
+    Finding {
+        code: ErrorCode::FreshnessFailed,
+        severity,
+        message: Some(message),
+        expected: None,
+        observed: None,
+        affected: None,
+    }
+}
+
+/// D8: does the history contain the anchor? No archive access: the caller
+/// walked the history (head last). An empty history, or no anchor, is
+/// `UNKNOWN`.
+pub fn judge_freshness_of(
+    anchor: &FreshnessAnchor,
+    history: &[HistoryEntry],
+) -> FreshnessJudgement {
     let Some(head) = history.last() else {
-        return Status::Unknown;
+        return FreshnessJudgement {
+            status: Status::Unknown,
+            findings: Vec::new(),
+        };
     };
-    let fail = |run: &mut Run, msg: String| {
-        run.violation = true;
-        run.finding(ErrorCode::FreshnessFailed, Severity::Error, msg);
-        Status::Fail
+    let fail = |msg: String| FreshnessJudgement {
+        status: Status::Fail,
+        findings: vec![freshness_finding(Severity::Error, msg)],
+    };
+    let pass = FreshnessJudgement {
+        status: Status::Pass,
+        findings: Vec::new(),
     };
     match anchor {
-        FreshnessAnchor::None => Status::Unknown,
+        FreshnessAnchor::None => FreshnessJudgement {
+            status: Status::Unknown,
+            findings: Vec::new(),
+        },
         FreshnessAnchor::User { commit_id } => {
             match history.iter().find(|e| e.commit_id == *commit_id) {
-                Some(e) if e.commit.seq == head.commit.seq => Status::Pass,
-                Some(e) => {
-                    run.finding(
-                        ErrorCode::FreshnessFailed,
+                Some(e) if e.commit.seq == head.commit.seq => pass,
+                Some(e) => FreshnessJudgement {
+                    status: Status::Pass,
+                    findings: vec![freshness_finding(
                         Severity::Info,
                         format!(
                             "the expected head is commit {}; the archive has advanced to \
                              commit {} and still contains it",
                             e.commit.seq, head.commit.seq
                         ),
-                    );
-                    Status::Pass
-                }
-                None => fail(
-                    run,
-                    format!(
-                        "the expected head {} is not in this archive's history (head is commit \
-                         {}): rolled back or substituted",
-                        commit_id.to_hex(),
-                        head.commit.seq
-                    ),
-                ),
+                    )],
+                },
+                None => fail(format!(
+                    "the expected head {} is not in this archive's history (head is commit \
+                     {}): rolled back or substituted",
+                    commit_id.to_hex(),
+                    head.commit.seq
+                )),
             }
         }
         FreshnessAnchor::LocalHistory { seq, commit_id } => {
             match history.iter().find(|e| e.commit.seq == *seq) {
-                None => fail(
-                    run,
-                    format!(
-                        "this client last saw commit {seq} of this archive, but its head is \
-                         commit {}: rolled back",
-                        head.commit.seq
-                    ),
-                ),
-                Some(e) if e.commit_id != *commit_id => fail(
-                    run,
-                    format!(
-                        "commit {seq} is not the commit this client last saw ({} expected, {} \
-                         found): substituted",
-                        commit_id.to_hex(),
-                        e.commit_id.to_hex()
-                    ),
-                ),
-                Some(_) => Status::Pass,
+                None => fail(format!(
+                    "this client last saw commit {seq} of this archive, but its head is \
+                     commit {}: rolled back",
+                    head.commit.seq
+                )),
+                Some(e) if e.commit_id != *commit_id => fail(format!(
+                    "commit {seq} is not the commit this client last saw ({} expected, {} \
+                     found): substituted",
+                    commit_id.to_hex(),
+                    e.commit_id.to_hex()
+                )),
+                Some(_) => pass,
             }
         }
     }
+}
+
+/// D8: does the verified history contain the anchor?
+fn judge_freshness(anchor: &FreshnessAnchor, history: &[HistoryEntry], run: &mut Run) -> Status {
+    let j = judge_freshness_of(anchor, history);
+    if j.status == Status::Fail {
+        run.violation = true;
+    }
+    run.report.findings.extend(j.findings);
+    j.status
 }
 
 /// `deep`: open every commit at its footer and compare its namespace with

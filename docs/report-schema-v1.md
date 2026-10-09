@@ -49,9 +49,14 @@ From `mochi_core::verify` (plan C7 records these as delegated decisions):
 
 The policy requires integrity and recoverability, plus freshness under D15's conditions (and searchability when the `search` level is asked for). Because searchability and retention are unsupported, `overall_status` is never `PASS` in this build; `policy_result` and `exit_code` are what automation should read.
 
+## Health reports (`mochi health`)
+
+`mochi health` emits this same schema from `mochi_core::health`, with these conventions (plan K5): `level` is `structural` (its only look at the archive is locating the head) and `scope` says that no check was run; `checked_commit` is the current head; the dimensions come from locally recorded evidence (rules in `docs/c14-cli.md`, rule 13); reasons a dimension is `UNKNOWN` or `OVERDUE` are `skipped` items named after the dimension, plus one named `unreadable_evidence` when evidence log lines could not be read; a recorded failure appears as a finding with the stable codes of the run that found it; `coverage.evidence_age_seconds` is the age of the oldest evidence behind integrity or recoverability. Durability and key availability are `UNKNOWN`, searchability and retention compliance `UNSUPPORTED`, so the overall status is never `PASS` in 1.0.
+
 ## Open for R7
 
 - Final field names and the JSON Schema document itself.
 - Whether control objects get their own coverage counts.
 - Whether `UNCOMMITTED_TAIL` (an interrupted write) should lower durability rather than stay a warning.
+- Whether health reports need their own marker (today only `level` and `scope` distinguish them).
 - A dedicated not-found code for a path absent from a snapshot (today `INVALID_ARGUMENT`, plan C6).

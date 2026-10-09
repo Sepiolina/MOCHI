@@ -27,7 +27,7 @@ If the spec does not answer a question, **do not invent an answer.** Stop, state
 
 ## Commands
 
-Live today (plan phases C1–C5 complete; C6, C7, C9, C10, C13 discovery, C8 through §22 step 4, and most of C14 implemented, `docs/c14-cli.md`):
+Live today (plan phases C1–C5 complete; C6, C7, C9, C10, C11, C13 discovery, C8 through §22 step 4, and C14 implemented, `docs/c14-cli.md`):
 
 ```bash
 cargo fmt --all --check
@@ -45,7 +45,7 @@ Pinned `compile_fail` error codes are only checked on nightly (CI job `doc-night
 cargo +nightly test --doc -p mochi-format
 ```
 
-Fuzzing (nightly plus `cargo install cargo-fuzz`; targets `frame_walker`, `footer`, `envelope`, `object_decode`, `catalog_image`, `cbor_decode`, `manifest_decode`, `commit_decode`, `archive_open`, `descriptor_decode`, `tar_stream`):
+Fuzzing (nightly plus `cargo install cargo-fuzz`; targets `frame_walker`, `footer`, `envelope`, `object_decode`, `catalog_image`, `cbor_decode`, `manifest_decode`, `commit_decode`, `archive_open`, `descriptor_decode`, `tar_stream`, `key_envelope`, `sealed_object`):
 
 ```bash
 cd fuzz && cargo +nightly fuzz run frame_walker corpus/frame_walker ../fixtures/golden/c1 ../fixtures/golden/c2 -- -max_total_time=60
@@ -84,6 +84,7 @@ These come from the spec. Code review rejects changes that violate them, regardl
 - The writer's default profile is **not** TAR-compatible (spec D4); TAR compatibility is an explicit, per-archive choice at creation. In that profile (Annex B.2.9 D19) stream framing lives in *stream-only chunks* (ordinary data objects no extent references): never add a frame kind or a catalog field for it, never let GC treat them as collectable (`stream_framing`), and write a rewrite through the writer so framing is regenerated. Claims about generic tools name only what `ci/tar-interop.sh` ran.
 - New dependencies must be MIT/Apache-2.0-compatible (the project is MIT OR Apache-2.0, plan O23). The one exception is UnRAR, confined to `mochi-foreign`, with its notice in `THIRD-PARTY-NOTICES.md`.
 - The catalog is in-memory SQLite; images move as bytes through `Storage` (O25). Never open SQLite on a file, `ATTACH`, or `VACUUM INTO` in `mochi-core` (`ci/check-invariants.sh` rule 8).
+- **Encrypted profile (D20, `docs/c11-encrypted.md`).** Every nonce is fresh from the OS CSPRNG: never a counter, never derived from content or position. A sealed object's associated data binds its archive ID, so a rewrite re-seals under a new data key and **needs the passphrase**; never copy a sealed frame between archives. Secrets (passphrases, the data key, the KEK) live in `zeroize` types, are never `Debug`-printed, logged, or put in an error message, and a passphrase is **never a command-line argument** (file, prompt, or the `--passphrase-env-for-automation` switch only). A command that needs the key opens it before it creates anything. A wrong passphrase is `KEY_UNAVAILABLE` (operational, exit 3), never a verification result; a tag failure on a hash-verified object is `CONTENT_INTEGRITY_FAILED`. Keyless `verify` reports `UNKNOWN` for everything it did not check and is never `PASS` overall. Removing a key envelope is **not revocation**: say so, and never write "revoked" or "secure". There is no KDF-cost knob in the shipped CLI.
 - **Hash-verify a catalog image before `Catalog::open_image`.** SQLite has no page checksums; a flipped bit in a stored value yields a different, fully valid catalog.
 - Paths are byte components joined by `/`; Windows names are WTF-8 (O24). Never normalize, case-fold, or lossily convert a name that is used as identity.
 

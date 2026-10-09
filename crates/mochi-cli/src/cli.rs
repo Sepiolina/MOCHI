@@ -64,22 +64,6 @@ pub struct Cli {
     pub command: Command,
 }
 
-/// Argon2id cost of the key envelopes a command writes (spec Annex B.2.10 D20
-/// item 1). Defaults: 64 MiB, 3 passes, 4 lanes. Readers accept what the
-/// archive declares, up to their limits.
-#[derive(Debug, Args, Clone, Copy, Default)]
-pub struct KdfArgs {
-    /// Argon2id memory in KiB.
-    #[arg(long, value_name = "KIB")]
-    pub kdf_memory_kib: Option<u64>,
-    /// Argon2id passes.
-    #[arg(long, value_name = "N")]
-    pub kdf_iterations: Option<u64>,
-    /// Argon2id lanes (and threads).
-    #[arg(long, value_name = "N")]
-    pub kdf_lanes: Option<u64>,
-}
-
 /// Arguments accepted (and ignored) by commands that are not built yet.
 #[derive(Debug, Args)]
 pub struct PendingArgs {
@@ -115,8 +99,6 @@ pub struct CreateArgs {
     /// archive: there is no recovery.
     #[arg(long)]
     pub encrypted: bool,
-    #[command(flatten)]
-    pub kdf: KdfArgs,
     /// Most content bytes one commit may hold in memory.
     #[arg(long, value_name = "BYTES")]
     pub max_memory: Option<u64>,
@@ -394,8 +376,6 @@ pub struct CompactArgs {
     /// publication (spec §18.2 step 3). Recorded in the output.
     #[arg(long)]
     pub no_verify_content: bool,
-    #[command(flatten)]
-    pub kdf: KdfArgs,
 }
 
 #[derive(Debug, Args)]
@@ -421,8 +401,6 @@ pub struct GcApplyArgs {
     /// publication (spec §18.2 step 3). Recorded in the output.
     #[arg(long)]
     pub no_verify_content: bool,
-    #[command(flatten)]
-    pub kdf: KdfArgs,
 }
 
 #[derive(Debug, Args)]
@@ -455,8 +433,6 @@ pub struct RekeyArgs {
     /// --reencrypt, repeatable.
     #[arg(long, value_name = "PATH")]
     pub new_passphrase_file: Vec<PathBuf>,
-    #[command(flatten)]
-    pub kdf: KdfArgs,
 }
 
 #[derive(Debug, Args)]
@@ -488,8 +464,6 @@ pub struct RepairApplyArgs {
     /// expired. Recorded in the output.
     #[arg(long)]
     pub accept_retention_loss: bool,
-    #[command(flatten)]
-    pub kdf: KdfArgs,
 }
 
 #[derive(Debug, Subcommand)]

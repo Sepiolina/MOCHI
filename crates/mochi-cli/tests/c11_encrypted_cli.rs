@@ -2,8 +2,9 @@
 //! on the real filesystem, with JSON output and exit codes (spec Annex B.2.10
 //! D20 items 9 to 12).
 //!
-//! The KDF is made cheap with `--kdf-memory-kib 64 --kdf-iterations 1
-//! --kdf-lanes 1`; the default cost is covered by the format tests.
+//! The Argon2id cost is made cheap with the core's `test-controls` default
+//! (the shipped CLI has no knob for it, D20 item 1); the default cost is covered
+//! by the format tests and by hand.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -14,14 +15,6 @@ use mochi_cli::{exit, run};
 use serde_json::Value;
 
 const SECRET_NAME: &str = "very-secret-plans.txt";
-const CHEAP: [&str; 6] = [
-    "--kdf-memory-kib",
-    "64",
-    "--kdf-iterations",
-    "1",
-    "--kdf-lanes",
-    "1",
-];
 
 const CREATED: u8 = if cfg!(windows) {
     exit::DEGRADED
@@ -29,12 +22,23 @@ const CREATED: u8 = if cfg!(windows) {
     exit::OK
 };
 
+/// Every Encrypted archive these tests create wraps its key with a tiny
+/// Argon2id cost.
+fn cheap_kdf() {
+    mochi_core::publish::test_controls::set_default_kdf(Some(mochi_format::kdf::KdfParams {
+        memory_kib: 64,
+        iterations: 1,
+        lanes: 1,
+    }));
+}
+
 struct Area {
     dir: tempfile::TempDir,
 }
 
 impl Area {
     fn new() -> Self {
+        cheap_kdf();
         let a = Area {
             dir: tempfile::tempdir().unwrap(),
         };
@@ -91,7 +95,7 @@ impl Area {
     fn create_encrypted(&self, pass: &str) -> String {
         let archive = self.s("a.mochi");
         let src = self.s("src");
-        let mut args = vec![
+        let args = vec![
             "create",
             "--encrypted",
             "--passphrase-file",
@@ -99,7 +103,6 @@ impl Area {
             &archive,
             &src,
         ];
-        args.extend_from_slice(&CHEAP);
         let (code, v) = self.json(&args);
         assert_eq!(code, CREATED, "{v}");
         assert_eq!(v["encrypted"], true);
@@ -258,10 +261,9 @@ fn append_compact_and_the_environment_switch() {
     assert_eq!(v["encrypted"], true);
 
     let out = a.s("compact.mochi");
-    let mut args = vec!["compact", &archive, "-o", &out, "--passphrase-file", &pass];
-    args.extend_from_slice(&CHEAP);
+    let args = vec!["compact", &archive, "-o", &out, "--passphrase-file", &pass];
     let (code, v) = a.json(&args);
-    assert_eq!(code, exit::OK, "{v}");
+    assert_eq!(code, CREATED, "{v}");
     assert_eq!(v["resealed"], true);
     assert_ne!(v["new_archive_id"], v["source_archive_id"]);
 
@@ -292,7 +294,7 @@ fn rekey_list_add_remove_and_reencrypt() {
     let first_id = envs[0]["envelope_id"].as_str().unwrap().to_owned();
 
     // Add a passphrase: one commit; both open the archive.
-    let mut args = vec![
+    let args = vec![
         "rekey",
         &archive,
         "--add-passphrase",
@@ -301,7 +303,6 @@ fn rekey_list_add_remove_and_reencrypt() {
         "--passphrase-file",
         &p1,
     ];
-    args.extend_from_slice(&CHEAP);
     let (code, v) = a.json(&args);
     assert_eq!(code, exit::OK, "{v}");
     assert_eq!(v["seq"], 1);
@@ -350,7 +351,7 @@ fn rekey_list_add_remove_and_reencrypt() {
     // Re-encrypt into a new archive under a third passphrase.
     let p3 = a.pass_file("p3", "third");
     let new = a.s("new.mochi");
-    let mut args = vec![
+    let args = vec![
         "rekey",
         &archive,
         "--reencrypt",
@@ -361,9 +362,8 @@ fn rekey_list_add_remove_and_reencrypt() {
         "--passphrase-file",
         &p2,
     ];
-    args.extend_from_slice(&CHEAP);
     let (code, v) = a.json(&args);
-    assert_eq!(code, exit::OK, "{v}");
+    assert_eq!(code, CREATED, "{v}");
     assert_eq!(v["revocation"], false);
     let (code, _, err) = a.go(&["list", &new, "--passphrase-file", &p3]);
     assert_eq!(code, exit::OK, "{err}");

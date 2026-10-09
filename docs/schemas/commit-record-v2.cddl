@@ -101,7 +101,7 @@ object-ref = {
 ; complete frames of that shape is RECORD_INVALID.
 data-region = {
   0: uint,                    ; offset of the first frame
-  1: uint .ge 72,             ; length: at least one sealed frame (8 + 64)
+  1: uint .ge 73,             ; length: at least one sealed frame (8 + 48 header + 1 + 16 tag)
   2: hash32,
 }
 

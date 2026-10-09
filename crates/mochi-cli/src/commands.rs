@@ -44,7 +44,7 @@ use serde_json::{json, Value};
 
 use crate::cli::{
     AppendArgs, CheckpointArgs, CompactArgs, CreateArgs, DumpIndexArgs, ExpireArgs, GcApplyArgs,
-    GcPlanArgs, GetArgs, HealthArgs, KdfArgs, KindArg, Level, ListArgs, RekeyArgs, ReleaseArgs,
+    GcPlanArgs, GetArgs, HealthArgs, KindArg, Level, ListArgs, RekeyArgs, ReleaseArgs,
     RepairApplyArgs, RepairPlanArgs, RestoreTestArgs, RetainArgs, SearchArgs, SearchSnapshots,
     SnapshotListArgs, VerifyArgs,
 };
@@ -85,19 +85,6 @@ fn is_encrypted(archive: &Path, ro: &ReadOptions) -> bool {
         return false;
     };
     read_commit(&src, &loc.footer, ro).is_ok_and(|(c, _)| c.encrypted())
-}
-
-/// The cost of the key envelopes a command writes (`None`: the defaults).
-fn kdf_params(a: &KdfArgs) -> Option<mochi_format::kdf::KdfParams> {
-    if a.kdf_memory_kib.is_none() && a.kdf_iterations.is_none() && a.kdf_lanes.is_none() {
-        return None;
-    }
-    let d = mochi_format::kdf::KdfParams::WRITER_DEFAULT;
-    Some(mochi_format::kdf::KdfParams {
-        memory_kib: a.kdf_memory_kib.unwrap_or(d.memory_kib),
-        iterations: a.kdf_iterations.unwrap_or(d.iterations),
-        lanes: a.kdf_lanes.unwrap_or(d.lanes),
-    })
 }
 
 impl Env<'_> {
@@ -457,7 +444,7 @@ pub fn create(env: &mut Env<'_>, a: &CreateArgs) -> Result<u8> {
             tar_compatible: a.tar_compatible,
             encrypted: a.encrypted,
         }),
-        kdf: kdf_params(&a.kdf),
+        kdf: None,
         ..WriterOptions::default()
     };
     let (w, outcome) = ArchiveWriter::create_in(
@@ -1828,7 +1815,6 @@ fn rewrite(
     archive: &Path,
     output: &Path,
     no_verify_content: bool,
-    kdf: &KdfArgs,
     plan: Option<&Path>,
 ) -> Result<u8> {
     let (progress, cancel) = job();
@@ -1885,7 +1871,7 @@ fn rewrite(
         // An Encrypted source is opened with the passphrases given, and the
         // new archive is wrapped under those same ones (D20 item 10).
         read: env.read.clone(),
-        kdf: kdf_params(kdf),
+        kdf: None,
         verify_content: !no_verify_content,
         ..CompactOptions::default()
     };
@@ -1988,7 +1974,6 @@ pub fn compact_cmd(env: &mut Env<'_>, a: &CompactArgs) -> Result<u8> {
         &a.archive,
         &a.output,
         a.no_verify_content,
-        &a.kdf,
         None,
     )
 }
@@ -2000,7 +1985,6 @@ pub fn gc_apply(env: &mut Env<'_>, a: &GcApplyArgs) -> Result<u8> {
         &a.archive,
         &a.output,
         a.no_verify_content,
-        &a.kdf,
         Some(&a.plan),
     )
 }
@@ -2222,7 +2206,7 @@ pub fn repair_apply(env: &mut Env<'_>, a: &RepairApplyArgs) -> Result<u8> {
     let src = open_archive(&a.archive)?;
     let options = RepairOptions {
         accept_retention_loss: a.accept_retention_loss,
-        kdf: kdf_params(&a.kdf),
+        kdf: None,
         ..RepairOptions::default()
     };
     let report = repair::apply(
@@ -2468,7 +2452,7 @@ pub fn rekey(env: &mut Env<'_>, a: &RekeyArgs) -> Result<u8> {
     };
     let added = add.len();
     let tx = rekey::rewrap_transaction(add, remove.clone())?;
-    let w = open_writer(&a.archive, env.read.clone(), kdf_params(&a.kdf))?;
+    let w = open_writer(&a.archive, env.read.clone(), None)?;
     let what = format!(
         "key envelopes changed: {added} added, {} removed; the data key and the data are \
          unchanged. Removing an envelope is not revocation: the envelope stays in the file's \
@@ -2518,7 +2502,7 @@ fn reencrypt_cmd(env: &mut Env<'_>, a: &RekeyArgs) -> Result<u8> {
         Box::new(OsIds),
         env.read.clone(),
         new,
-        kdf_params(&a.kdf),
+        None,
         &ctx,
     )?;
     if let Err(e) = w.close() {

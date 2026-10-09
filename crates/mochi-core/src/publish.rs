@@ -1028,6 +1028,42 @@ pub(crate) fn check_key_state(
     Ok(())
 }
 
+/// The Argon2id cost a writer uses: the one it was given, else the D20
+/// defaults. Shipped builds have no other source (D20 item 1: writers expose no
+/// other parameters); builds with `test-controls` may set a process-wide default
+/// with [`test_controls::set_default_kdf`] so tests that go through a binary's
+/// whole surface do not spend seconds in Argon2 on every command.
+fn writer_kdf(requested: Option<KdfParams>) -> KdfParams {
+    #[cfg(any(test, feature = "test-controls"))]
+    if requested.is_none() {
+        if let Some(k) = test_controls::default_kdf() {
+            return k;
+        }
+    }
+    requested.unwrap_or(KdfParams::WRITER_DEFAULT)
+}
+
+/// Test-only controls (review decision 14); absent from shipped builds.
+#[cfg(any(test, feature = "test-controls"))]
+pub mod test_controls {
+    use mochi_format::kdf::KdfParams;
+    use std::sync::Mutex;
+
+    static DEFAULT_KDF: Mutex<Option<KdfParams>> = Mutex::new(None);
+
+    /// Use `kdf` for every writer that is not given one (`None` restores the
+    /// D20 defaults).
+    pub fn set_default_kdf(kdf: Option<KdfParams>) {
+        if let Ok(mut g) = DEFAULT_KDF.lock() {
+            *g = kdf;
+        }
+    }
+
+    pub(super) fn default_kdf() -> Option<KdfParams> {
+        DEFAULT_KDF.lock().ok().and_then(|g| *g)
+    }
+}
+
 /// Encrypted profile (D20 item 10), for `verify`: for **every** commit of
 /// `history`, the envelopes it lists equal the key state its segment's
 /// manifests replay to (S(*b*), then each delta's key operations). Returns each
@@ -2891,7 +2927,7 @@ impl<S: Storage> ArchiveWriter<S> {
                         "an Encrypted archive needs a passphrase to wrap its data key",
                     ));
                 }
-                let kdf = opts.kdf.unwrap_or(KdfParams::WRITER_DEFAULT);
+                let kdf = writer_kdf(opts.kdf);
                 kdf.check(&Limits::WRITER_DEFAULT)
                     .map_err(MochiError::from)?;
                 crypto = Some(WriterCrypto::create(archive_id, kdf, Box::new(OsRandom))?);
@@ -3210,7 +3246,7 @@ impl<S: Storage> ArchiveWriter<S> {
                         Ok(WriterCrypto {
                             key,
                             rng: Box::new(OsRandom),
-                            kdf: opts.kdf.unwrap_or(KdfParams::WRITER_DEFAULT),
+                            kdf: writer_kdf(opts.kdf),
                             envelopes,
                         })
                     })();

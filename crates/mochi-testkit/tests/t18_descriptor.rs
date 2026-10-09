@@ -452,16 +452,18 @@ fn t18_enabling_encryption_in_place_is_refused() {
 /// TAR compatibility is writable (D19).
 #[test]
 fn t18_create_with_an_unwritable_profile_is_unsupported() {
-    for p in [ENCRYPT] {
-        let s = SimStorage::new();
-        let e = ArchiveWriter::create(s.clone(), Box::new(SeqIds::new(1)), with_profile(Some(p)))
-            .map(|_| ())
-            .unwrap_err();
-        assert_eq!(e.code, ErrorCode::UnsupportedFeature, "{p:?}");
-        assert!(s.contents().is_empty());
-        // The lock was released.
-        ArchiveWriter::create(s, Box::new(SeqIds::new(1)), test_options()).unwrap();
-    }
+    let s = SimStorage::new();
+    let e = ArchiveWriter::create(
+        s.clone(),
+        Box::new(SeqIds::new(1)),
+        with_profile(Some(ENCRYPT)),
+    )
+    .map(|_| ())
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::UnsupportedFeature);
+    assert!(s.contents().is_empty());
+    // The lock was released.
+    ArchiveWriter::create(s, Box::new(SeqIds::new(1)), test_options()).unwrap();
     for p in [Profile::default(), TAR] {
         ArchiveWriter::create(
             SimStorage::new(),

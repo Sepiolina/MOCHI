@@ -16,8 +16,9 @@
 //!   order, directly where the member's content belongs (those bytes are not
 //!   decoded here: the data-object checks hash them);
 //! * a put of a version held earlier (a rename's target, a re-put) re-emits
-//!   its content, whose length is the version's and, at `content_integrity`
-//!   and deeper, whose file-content hash is the version's.
+//!   its content, whose file-content hash, at `content_integrity` and
+//!   deeper, is the version's (its length is the header's, which the member
+//!   comparison pins to the version's).
 //!
 //! The first problem of a commit is the one reported for it. A mismatch is
 //! `PROFILE_VIOLATION` (a violation, exit 1); a frame that cannot be read or
@@ -57,9 +58,6 @@ fn violation(msg: impl Into<String>) -> MochiError {
 /// The member being read.
 struct Current {
     path: Vec<u8>,
-    len: u64,
-    /// Bytes of content seen (re-emitted) or accounted for (fresh).
-    got: u64,
     /// Re-emitted content is hashed from `content_integrity` up.
     hasher: Option<(FileContentHasher, Option<FileContentHash>)>,
     /// A fresh put: the version's own chunks, in order, still to come.
@@ -129,8 +127,6 @@ impl Check<'_> {
         let hashed = self.hash_content && entry.is_none() && info.kind == EntryKind::File;
         self.cur = Some(Current {
             path: m.path.clone(),
-            len: m.size,
-            got: 0,
             hasher: hashed.then(|| (FileContentHasher::new(), info.hash)),
             own,
             fresh: entry.is_some(),
@@ -149,7 +145,6 @@ impl Check<'_> {
             ));
             return;
         }
-        cur.got += bytes.len() as u64;
         if let Some((h, _)) = cur.hasher.as_mut() {
             let _ = h.update(DecodedSlice::from_logical(bytes));
         }
@@ -163,13 +158,6 @@ impl Check<'_> {
             if !cur.own.is_empty() {
                 self.fail(format!("{name}: the version's own chunks are missing"));
             }
-            return;
-        }
-        if cur.got != cur.len {
-            self.fail(format!(
-                "{name}: re-emitted content is {} bytes, the version has {}",
-                cur.got, cur.len
-            ));
             return;
         }
         if let Some((h, Some(want))) = cur.hasher {
@@ -306,7 +294,6 @@ fn commit_stream(
             if let Some(cur) = st.cur.as_mut().filter(|c| c.fresh) {
                 match cur.own.pop_front() {
                     Some((id, len)) if id == record.id && len == record.decoded_len => {
-                        cur.got += len;
                         parser.skip_content(len)?;
                         continue;
                     }

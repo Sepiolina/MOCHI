@@ -221,19 +221,17 @@ fn c10_identical_files_are_written_twice_and_dedup_is_refused() {
     // Three copies of 300 bytes at chunk size 64 compress to well over one.
     assert!(at > 300, "{at}");
 
-    for dedup in [Dedup::InArchive] {
-        let e = ArchiveWriter::create(
-            SimStorage::new(),
-            Box::new(SeqIds::new(1)),
-            WriterOptions {
-                dedup,
-                ..tar_options()
-            },
-        )
-        .map(|_| ())
-        .unwrap_err();
-        assert_eq!(e.code, ErrorCode::InvalidArgument);
-    }
+    let e = ArchiveWriter::create(
+        SimStorage::new(),
+        Box::new(SeqIds::new(1)),
+        WriterOptions {
+            dedup: Dedup::InArchive,
+            ..tar_options()
+        },
+    )
+    .map(|_| ())
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::InvalidArgument);
     // Explicitly off is the same as the profile's default.
     let t = SimStorage::new();
     let mut w = create(

@@ -305,6 +305,7 @@ Each phase ends with a working, tested artifact. "Fault-matrix rows" refers to t
 - Writer mode meeting every §7.2 constraint (no reference-only representations, no MOCHI-specific fragmentation, no external dictionaries unless the documented invocation supplies them).
 - Interop tests against pinned tool versions: GNU tar, bsdtar/libarchive (also what Windows ships as `tar.exe`), and the `zstd` CLI.
 - **Exit:** the documented tool/version list, with a CI job per tool; documentation distinguishes historical stream extraction from latest-snapshot restoration.
+- **Status (2026-10-09, W5; design D19, spec Annex B.2.9).** Built: `create --tar-compatible`; one pax TAR stream per commit with a put, framing in stream-only chunks (no wire change); no dedup in the profile (`Dedup::Auto`); renames and re-puts re-emit content; `verify` parses every stream at every level and fails a mismatch with `PROFILE_VIOLATION` (exit 1); `gc plan` reports `stream_framing`; `compact`, `gc apply`, and `repair apply` keep the profile; fuzz target `tar_stream`; golden vectors `fixtures/golden/c10/`; CI job `tar interop (ubuntu-22.04, ubuntu-24.04, windows-latest)` runs the zstd CLI, GNU tar, and bsdtar over a real archive. Documentation: `docs/c10-tar-compat.md`.
 
 ### C11 — Encrypted profile *(blocked on R5)*
 - `0x184D2A59` encrypted-object envelope; compress-then-encrypt; key envelopes discoverable without decrypting metadata (§14.3).

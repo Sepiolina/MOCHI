@@ -27,13 +27,14 @@ If the spec does not answer a question, **do not invent an answer.** Stop, state
 
 ## Commands
 
-Live today (plan phases C1–C5 complete; C6, C7, C9, C13 discovery, C8 through §22 step 4, and most of C14 implemented, `docs/c14-cli.md`):
+Live today (plan phases C1–C5 complete; C6, C7, C9, C10, C13 discovery, C8 through §22 step 4, and most of C14 implemented, `docs/c14-cli.md`):
 
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ci/check-invariants.sh                       # mechanical checks for rules clippy can't express
+ci/tar-interop.sh "$PWD/target/debug/mochi" zstd tar bsdtar   # C10: real zstd, GNU tar, bsdtar over a TAR-compatible archive
 cargo run -p mochi-cli -- --help
 cargo run --release -p mochi-testkit --example c5_append_bench   # §27 append benchmark (C5)
 ```
@@ -44,7 +45,7 @@ Pinned `compile_fail` error codes are only checked on nightly (CI job `doc-night
 cargo +nightly test --doc -p mochi-format
 ```
 
-Fuzzing (nightly plus `cargo install cargo-fuzz`; targets `frame_walker`, `footer`, `envelope`, `object_decode`, `catalog_image`, `cbor_decode`, `manifest_decode`, `commit_decode`, `archive_open`):
+Fuzzing (nightly plus `cargo install cargo-fuzz`; targets `frame_walker`, `footer`, `envelope`, `object_decode`, `catalog_image`, `cbor_decode`, `manifest_decode`, `commit_decode`, `archive_open`, `descriptor_decode`, `tar_stream`):
 
 ```bash
 cd fuzz && cargo +nightly fuzz run frame_walker corpus/frame_walker ../fixtures/golden/c1 ../fixtures/golden/c2 -- -max_total_time=60
@@ -80,7 +81,7 @@ These come from the spec. Code review rejects changes that violate them, regardl
 - The file-content hash is plain BLAKE3 (O20); every other digest is domain-separated. Keep scopes in distinct, labelled fields everywhere (DDL, reports, JSON): an unseparated scope is only safe because digests are never compared across scopes.
 - Data objects must carry `Frame_Content_Size` and the frame checksum (O21).
 - Every canonical structure (recovery manifests, commit bodies, the archive descriptor) is **deterministic CBOR** in the restricted subset of spec Annex B.1 D2, through the one codec in `mochi-format`. Never serialize a canonical structure with a general-purpose CBOR library, and never accept input that does not re-encode to identical bytes. Opaque payloads (catalog images) carry the fixed binary envelope of spec Annex B.2.2 instead; both encodings enforce the same obligations (spec §8.3 amendment, D11).
-- The writer's default profile is **not** TAR-compatible (spec D4); TAR compatibility is an explicit, per-archive choice at creation.
+- The writer's default profile is **not** TAR-compatible (spec D4); TAR compatibility is an explicit, per-archive choice at creation. In that profile (Annex B.2.9 D19) stream framing lives in *stream-only chunks* (ordinary data objects no extent references): never add a frame kind or a catalog field for it, never let GC treat them as collectable (`stream_framing`), and write a rewrite through the writer so framing is regenerated. Claims about generic tools name only what `ci/tar-interop.sh` ran.
 - New dependencies must be MIT/Apache-2.0-compatible (the project is MIT OR Apache-2.0, plan O23). The one exception is UnRAR, confined to `mochi-foreign`, with its notice in `THIRD-PARTY-NOTICES.md`.
 - The catalog is in-memory SQLite; images move as bytes through `Storage` (O25). Never open SQLite on a file, `ATTACH`, or `VACUUM INTO` in `mochi-core` (`ci/check-invariants.sh` rule 8).
 - **Hash-verify a catalog image before `Catalog::open_image`.** SQLite has no page checksums; a flipped bit in a stored value yields a different, fully valid catalog.

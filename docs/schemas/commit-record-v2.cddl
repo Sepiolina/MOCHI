@@ -1,0 +1,111 @@
+; MOCHI commit record, schema version 2 (DRAFT; ratification items R3, R5).
+; Decision: spec Annex B.2.10 (D20), rules 4 and 6. Extends
+; commit-record-v1.cddl; readers accept schema 1 and schema 2.
+;
+; Schema 2 is used EXACTLY for the commits of an Encrypted-profile archive
+; (descriptor key 4 lists feature 1). Every other archive keeps schema 1 byte
+; for byte. A schema-2 commit whose required features lack 1, a schema-1
+; commit that lists 1, or a schema-2 commit under a descriptor that does not
+; list 1, is RECORD_INVALID: all three records of one archive must agree.
+;
+; Differences from v1:
+;   * key 8 (informational time) is ABSENT. Encrypted writers do not record
+;     commit times (D20 item 6), so the schema has no place for one.
+;   * key 11: the key envelopes valid at this commit, a COMPLETE list (not a
+;     delta), each a reference to a KEY_ENVELOPE frame (0x184D2A5C). A reader
+;     finds them from the footer-verified head without decrypting anything
+;     (spec 14.3). 1 to 16 entries, listed in strictly increasing order of the
+;     envelope ID each frame carries (so one commit has one encoding); the
+;     reader checks that order, and that the IDs are distinct, after it has
+;     hash-verified and read the frames.
+;   * key 12: the DATA REGION: one byte range holding exactly this commit's
+;     new data objects, as consecutive sealed-object frames of kind data
+;     (sealed-object-v0, kind 0), and the stored-object-scope hash of the
+;     whole range. null when the commit adds no data object. It lets a
+;     verifier that holds no key check every data object's stored bytes
+;     (D20 item 5), because the per-object stored hashes live in the sealed
+;     manifest.
+;   * keys 5.1, 5.2 (checkpoint image and snapshot manifest) and key 6 (delta
+;     manifest) reference ENCRYPTED_OBJECT frames (0x184D2A59), not
+;     METADATA_DELTA / RECOVERY_MANIFEST frames (D11: frame kind matches the
+;     field). Key 10 (descriptor) is unchanged.
+;
+; Everything else (commit ID, hash acyclicity, sequence 0, base rule) is as in
+; v1. The commit ID covers keys 11 and 12, so the envelope set and the data
+; region are bound by the footer chain exactly like every other reference.
+
+commit = root-commit / child-commit
+
+root-commit = {
+  0: 2,
+  1: archive-id,
+  2: 0,
+  3: txid,
+  4: null,
+  5: checkpoint,
+  6: object-ref,              ; delta manifest: ENCRYPTED_OBJECT, sealed kind 2
+  7: [1],                     ; required features: exactly [1] (Encrypted, XChaCha20-Poly1305 + Argon2id)
+  9: hash32,                  ; commit ID (excluded from the body)
+  10: object-ref,             ; archive descriptor (D12); offset MUST be 0
+  11: [+ object-ref],         ; key envelopes (1 to 16); each a KEY_ENVELOPE frame
+  12: data-region / null,
+}
+
+child-commit = {
+  0: 2,
+  1: archive-id,
+  2: uint .ge 1,
+  3: txid,
+  4: parent,
+  5: metadata,
+  6: object-ref,
+  7: [1],
+  9: hash32,
+  10: object-ref,
+  11: [+ object-ref],
+  12: data-region / null,
+}
+
+parent = {
+  0: hash32,
+  1: seq,
+  2: uint,
+}
+
+metadata = checkpoint / delta-on-base
+checkpoint = {
+  0: 0,
+  1: object-ref,              ; catalog image: ENCRYPTED_OBJECT, sealed kind 1
+  2: object-ref,              ; snapshot manifest: ENCRYPTED_OBJECT, sealed kind 3
+}
+delta-on-base = {
+  0: 1,
+  1: base-ref,
+}
+base-ref = {
+  0: hash32,
+  1: seq,
+  2: uint,
+}
+
+object-ref = {
+  0: uint,
+  1: uint,                    ; stored length including the frame header (>= 8)
+  2: hash32,                  ; stored-object hash; verified BEFORE parsing
+}
+
+; Offset and length delimit whole frames (the first byte of the first frame to
+; the last byte of the last), all ENCRYPTED_OBJECT frames of sealed kind 0,
+; back to back, ending at or before the delta manifest's offset. hash is the
+; stored-object-scope BLAKE3 of those bytes. A range that does not walk as
+; complete frames of that shape is RECORD_INVALID.
+data-region = {
+  0: uint,                    ; offset of the first frame
+  1: uint .ge 72,             ; length: at least one sealed frame (8 + 64)
+  2: hash32,
+}
+
+archive-id = bstr .size 32
+txid = bstr .size 16
+hash32 = bstr .size 32
+seq = uint

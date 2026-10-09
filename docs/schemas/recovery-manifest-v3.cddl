@@ -1,0 +1,114 @@
+; MOCHI recovery manifest, schema version 3 (DRAFT; ratification items R3, R5).
+; Decisions: spec Annex B.2.10 (D20), rule 6 and 10; Annex B D10 item 3
+; ("key-envelope references join both manifest kinds in the phases that
+; introduce them, each as a new manifest schema version"), D18.
+;
+; Schema 3 is used EXACTLY for the manifests of an Encrypted-profile archive:
+; it is schema 2 with key 13 added and required. Readers accept schemas 1, 2,
+; and 3. A schema-3 manifest in an archive whose descriptor does not list
+; feature 1, or a schema-1 or schema-2 manifest in one that does, is
+; RECORD_INVALID.
+;
+; A manifest of an Encrypted archive is stored SEALED (sealed-object-v0, kinds
+; 2 and 3): this schema describes the PLAINTEXT, which only a reader holding
+; the data key can see. Features (key 9) list 1.
+;
+; Schema 2 (docs/schemas/recovery-manifest-v2.cddl) is restated here with its
+; code-defined key 12 (provenance), which that file does not yet draw. In
+; schema 3 and 2 alike: key 11 is required (an empty array/state is allowed);
+; key 12 is allowed in delta(0) of a rewritten archive only.
+;
+; Key 13 (new):
+;   * delta: key operations, applied in order after the namespace operations
+;     and before the retention operations, atomically, each judged against the
+;     state the previous one left. add: the envelope ID must not be in the
+;     set. remove: it must be, and the set must not become empty. A commit's
+;     key 11 envelope set (commit-record-v2.cddl) MUST equal the replayed set
+;     after this delta, checked wherever a manifest is replayed with a key.
+;     Commit 0's delta lists one add per initial envelope.
+;   * snapshot: the complete set of valid envelope IDs, strictly increasing
+;     bytewise, equal to the replayed set at that commit.
+;   A rewrap (rekey --add-passphrase / --remove-passphrase) is a commit whose
+;   delta carries key operations and typically nothing else. It is the
+;   rewrap audit record (spec 14.4). It never changes the data key.
+; Key 12 provenance gains key 3 in schema 3 (the re-encryption audit record):
+;   reason 0 = collection or compaction, 1 = re-encryption (rekey --reencrypt).
+;   Every rewrite of an Encrypted archive creates a new data key (D20 item 10),
+;   so the DEK change is implied by any provenance; reason says why.
+
+manifest = delta-manifest / snapshot-manifest
+
+delta-manifest = {
+  0: 3,
+  1: archive-id,
+  2: seq,
+  3: opt-parent,
+  4: 0,                       ; kind: delta
+  5: [* chunk],
+  6: [* file-version],
+  7: [* op],
+  8: [],
+  9: [1],                     ; required features
+  10: txid,
+  11: [* retention-op],       ; required in schema 3 (may be empty)
+  ? 12: provenance,           ; delta(0) of a rewritten archive only
+  13: [* key-op],             ; required in schema 3 (may be empty)
+}
+
+snapshot-manifest = {
+  0: 3,
+  1: archive-id,
+  2: seq,
+  3: null,
+  4: 1,                       ; kind: snapshot
+  5: [* chunk],
+  6: [* file-version],
+  7: [],
+  8: [* entry],
+  9: [1],
+  10: txid,
+  11: retention-state,        ; required in schema 3 (may be empty)
+  ? 12: provenance,
+  13: key-state,              ; required, non-empty
+}
+
+key-op = add-key / remove-key
+add-key = [0, envelope-id]
+remove-key = [1, envelope-id]
+key-state = [+ envelope-id]   ; strictly increasing bytewise, at most 16
+
+provenance = {
+  0: archive-id,              ; source archive ID
+  1: [+ [seq, hash32]],       ; per new commit: source sequence, source commit ID; strictly increasing
+  2: [* seq],                 ; collected source snapshots; strictly increasing, each before the source head and not kept
+  ? 3: 0 / 1,                 ; schema 3 only: 0 collection or compaction, 1 re-encryption. Absent = 0
+}
+
+; chunk, file-version, extent, attributes, op, entry, retention-op and
+; retention-state are exactly as in recovery-manifest-v2.cddl, with ONE
+; difference for chunk: key 2 (protection) is 1 (AEAD) for every chunk of an
+; Encrypted archive, key 1 (encoding) stays 0 and describes the sealed
+; plaintext (one Zstandard frame), key 3 (stored length) is the length of the
+; whole sealed frame (8 + 64 + the zstd frame), key 4 (stored-object hash)
+; covers the whole sealed frame, and key 7 (dependencies) is EMPTY (the data
+; key is archive-wide, not per chunk; dependency kind 1 stays reserved).
+chunk = {
+  0: hash32,
+  1: 0,
+  2: 1,
+  3: uint,
+  4: hash32,
+  5: uint,
+  6: hash32,
+  7: [],
+  8: opt-offset,
+}
+opt-offset = uint / null
+opt-parent = parent / null
+parent = { 0: seq, 1: hash32 }
+
+archive-id = bstr .size 32
+envelope-id = bstr .size 16
+txid = bstr .size 16
+hash32 = bstr .size 32
+seq = uint

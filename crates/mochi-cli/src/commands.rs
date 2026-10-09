@@ -1609,6 +1609,12 @@ fn print_gc_plan(env: &mut Env<'_>, p: &GcPlan) {
         "collectable: {} file versions, {} chunks, {} stored bytes",
         p.collectable.file_versions, p.collectable.chunks, p.collectable.stored_bytes
     ));
+    if p.stream_framing.chunks > 0 {
+        env.line(format!(
+            "stream framing (TAR stream bytes, not collectable): {} chunks, {} stored bytes",
+            p.stream_framing.chunks, p.stream_framing.stored_bytes
+        ));
+    }
 }
 
 pub fn gc_plan(env: &mut Env<'_>, a: &GcPlanArgs) -> Result<u8> {

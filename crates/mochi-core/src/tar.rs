@@ -14,7 +14,8 @@
 //!   UTF-8.
 //!
 //! The parser accepts what the encoder writes and nothing else (it is not a
-//! general TAR reader): any other typeflag, a global pax header, an unknown
+//! general TAR reader; each header it reads must equal the encoding of the
+//! member it describes): any other typeflag, a global pax header, an unknown
 //! pax keyword, a bad checksum, non-zero padding, or bytes after the two end
 //! blocks is a [`ErrorCode::ProfileViolation`]. It is bounded by
 //! [`MAX_HEADER_BYTES`] and a member limit, never allocates from a size an
@@ -300,6 +301,9 @@ pub struct Parser {
     state: State,
     block: Vec<u8>,
     pax_body: Vec<u8>,
+    /// The pax header's block and body, padded: compared with the encoding
+    /// of the member it precedes.
+    pax_raw: Vec<u8>,
     pax: Option<Pax>,
     /// Padding owed after the current member's content.
     pad_after: usize,
@@ -465,6 +469,7 @@ impl Parser {
             state: State::Header,
             block: Vec::with_capacity(BLOCK),
             pax_body: Vec::new(),
+            pax_raw: Vec::new(),
             pax: None,
             pad_after: 0,
             members: 0,
@@ -561,6 +566,8 @@ impl Parser {
                     } else {
                         let size = self.pax_body.len() as u64;
                         self.pax = Some(parse_pax(&self.pax_body)?);
+                        self.pax_raw.extend_from_slice(&self.pax_body);
+                        self.pax_raw.resize(self.pax_raw.len() + padding(size), 0);
                         self.pax_body = Vec::new();
                         self.state = State::PaxPad {
                             left: padding(size),
@@ -651,6 +658,7 @@ impl Parser {
                     return Err(violation("a pax extended header has a bad size"));
                 }
                 self.pax_body = Vec::new();
+                self.pax_raw = b.to_vec();
                 self.state = State::PaxBody { left: size_field };
                 Ok(())
             }
@@ -718,6 +726,17 @@ impl Parser {
                     gid,
                     mtime,
                 };
+                // The profile writes one encoding of a member and the parser
+                // accepts only that: every field a reader might skip or
+                // read two ways (a ustar value a pax record overrides, name
+                // bytes after the first NUL, octal spellings) is pinned.
+                let mut actual = std::mem::take(&mut self.pax_raw);
+                actual.extend_from_slice(b);
+                if encode_header(&member)? != actual {
+                    return Err(violation(
+                        "a member's header is not the encoding this profile writes",
+                    ));
+                }
                 on(Event::Member(&member));
                 self.pad_after = padding(size);
                 self.state = if size > 0 {

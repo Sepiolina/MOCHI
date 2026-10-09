@@ -2370,6 +2370,9 @@ pub struct ArchiveWriter<S: Storage> {
     /// [`CheckpointTamper`]).
     #[cfg(any(test, feature = "test-controls"))]
     tamper: Option<CheckpointTamper>,
+    /// Test control: damage the TAR stream a commit writes (see [`TarTamper`]).
+    #[cfg(any(test, feature = "test-controls"))]
+    tar_tamper: Option<TarTamper>,
     needs_directory_sync: bool,
     /// The TAR-compatible profile (descriptor constraint 0): every commit
     /// with a put also writes one TAR stream (Annex B.2.9 D19).
@@ -2600,6 +2603,8 @@ impl<S: Storage> ArchiveWriter<S> {
             checkpoint_requested: false,
             #[cfg(any(test, feature = "test-controls"))]
             tamper: None,
+            #[cfg(any(test, feature = "test-controls"))]
+            tar_tamper: None,
             needs_directory_sync: true,
             tar,
             dedup,
@@ -2880,6 +2885,8 @@ impl<S: Storage> ArchiveWriter<S> {
                         checkpoint_requested: false,
                         #[cfg(any(test, feature = "test-controls"))]
                         tamper: None,
+                        #[cfg(any(test, feature = "test-controls"))]
+                        tar_tamper: None,
                         needs_directory_sync: false,
                         tar,
                         dedup,
@@ -3381,11 +3388,14 @@ impl<S: Storage> ArchiveWriter<S> {
                 } => {
                     let mut extents = Vec::new();
                     if tar {
-                        let m = member_for(
-                            path.as_stored(),
-                            EntryKind::File,
-                            content.len() as u64,
-                            attrs,
+                        let m = self.tampered_member(
+                            member_for(
+                                path.as_stored(),
+                                EntryKind::File,
+                                content.len() as u64,
+                                attrs,
+                            ),
+                            members,
                         );
                         pending.extend(encode_header(&m)?);
                         self.flush_framing(
@@ -3472,8 +3482,13 @@ impl<S: Storage> ArchiveWriter<S> {
                     attributes: attrs,
                 } => {
                     if tar {
-                        let m = member_for(path.as_stored(), EntryKind::Directory, 0, attrs);
-                        pending.extend(encode_header(&m)?);
+                        let m = self.tampered_member(
+                            member_for(path.as_stored(), EntryKind::Directory, 0, attrs),
+                            members,
+                        );
+                        if !self.drops_directory_member() {
+                            pending.extend(encode_header(&m)?);
+                        }
                         self.flush_framing(
                             &mut pending,
                             &mut cat,
@@ -3510,11 +3525,14 @@ impl<S: Storage> ArchiveWriter<S> {
                     let id = entry.version.id;
                     let held = cat.file_version(&id)?;
                     if tar {
-                        let m = member_for(
-                            path.as_stored(),
-                            entry.version.kind,
-                            entry.version.logical_len,
-                            &entry.attributes,
+                        let m = self.tampered_member(
+                            member_for(
+                                path.as_stored(),
+                                entry.version.kind,
+                                entry.version.logical_len,
+                                &entry.attributes,
+                            ),
+                            members,
                         );
                         pending.extend(encode_header(&m)?);
                         self.flush_framing(
@@ -3607,7 +3625,10 @@ impl<S: Storage> ArchiveWriter<S> {
                             )
                         })?;
                         let attrs = attributes.get(&version).copied().unwrap_or_default();
-                        let m = member_for(to.as_stored(), v.kind, v.logical_len, &attrs);
+                        let m = self.tampered_member(
+                            member_for(to.as_stored(), v.kind, v.logical_len, &attrs),
+                            members,
+                        );
                         pending.extend(encode_header(&m)?);
                         self.flush_framing(
                             &mut pending,
@@ -3639,7 +3660,7 @@ impl<S: Storage> ArchiveWriter<S> {
         // The commit's stream ends with two zero blocks (D19 rule 3); a commit
         // without a put has no stream.
         if tar && members > 0 {
-            pending.extend_from_slice(&tar::END_BLOCKS);
+            self.tamper_end(&mut pending);
             self.flush_framing(&mut pending, &mut cat, &mut chunks, &mut objects, &encode)?;
         }
 
@@ -3933,6 +3954,74 @@ impl<S: Storage> ArchiveWriter<S> {
             stored_hash: stored_object_hash(frame.view()),
         })
     }
+    #[cfg(any(test, feature = "test-controls"))]
+    fn tampered_member(&self, mut m: tar::Member, index: u64) -> tar::Member {
+        if self.tar_tamper == Some(TarTamper::ModeOff) && index == 0 {
+            m.mode ^= 1;
+        }
+        m
+    }
+
+    #[cfg(not(any(test, feature = "test-controls")))]
+    fn tampered_member(&self, m: tar::Member, _index: u64) -> tar::Member {
+        m
+    }
+
+    #[cfg(any(test, feature = "test-controls"))]
+    fn drops_directory_member(&self) -> bool {
+        self.tar_tamper == Some(TarTamper::DropDirectoryMember)
+    }
+
+    #[cfg(not(any(test, feature = "test-controls")))]
+    fn drops_directory_member(&self) -> bool {
+        false
+    }
+
+    #[cfg(any(test, feature = "test-controls"))]
+    fn tamper_end(&self, pending: &mut Vec<u8>) {
+        match self.tar_tamper {
+            Some(TarTamper::NoEndBlocks) => {}
+            Some(TarTamper::ExtraBlocks) => {
+                pending.extend_from_slice(&tar::END_BLOCKS);
+                pending.extend_from_slice(&[0; tar::BLOCK]);
+            }
+            Some(TarTamper::ExtraMember) => {
+                let m = tar::Member {
+                    path: b"extra".to_vec(),
+                    kind: tar::MemberKind::File,
+                    size: 0,
+                    mode: 0o644,
+                    uid: 0,
+                    gid: 0,
+                    mtime: (0, 0),
+                };
+                if let Ok(h) = encode_header(&m) {
+                    pending.extend_from_slice(&h);
+                }
+                pending.extend_from_slice(&tar::END_BLOCKS);
+            }
+            _ => pending.extend_from_slice(&tar::END_BLOCKS),
+        }
+    }
+
+    #[cfg(not(any(test, feature = "test-controls")))]
+    fn tamper_end(&self, pending: &mut Vec<u8>) {
+        pending.extend_from_slice(&tar::END_BLOCKS);
+    }
+
+    #[cfg(any(test, feature = "test-controls"))]
+    fn tamper_reemitted(&self, buf: &mut [u8], flipped: &mut bool) {
+        if self.tar_tamper == Some(TarTamper::ReemitFlipped) && !*flipped {
+            if let Some(b) = buf.first_mut() {
+                *b ^= 1;
+                *flipped = true;
+            }
+        }
+    }
+
+    #[cfg(not(any(test, feature = "test-controls")))]
+    fn tamper_reemitted(&self, _buf: &mut [u8], _flipped: &mut bool) {}
+
     /// TAR profile: write `pending` as one **stream-only chunk** (Annex B.2.9
     /// D19 rule 5): an ordinary data object that no extent references, in the
     /// catalog and in this commit's delta manifest like any introduced chunk.
@@ -3981,6 +4070,7 @@ impl<S: Storage> ArchiveWriter<S> {
             .unwrap_or(usize::MAX)
             .max(1);
         let mut buf: Vec<u8> = Vec::new();
+        let mut flipped = false;
         for e in extents {
             ctx.check_cancelled()?;
             let ExtentSource::Chunk {
@@ -4013,6 +4103,7 @@ impl<S: Storage> ArchiveWriter<S> {
                     MochiError::new(ErrorCode::ExtentInvalid, "an extent reads past its chunk")
                 })?;
             buf.extend_from_slice(part);
+            self.tamper_reemitted(&mut buf, &mut flipped);
             while buf.len() >= piece {
                 let rest = buf.split_off(piece);
                 let mut head = std::mem::replace(&mut buf, rest);
@@ -4305,6 +4396,11 @@ impl<S: Storage> ArchiveWriter<S> {
         self.tamper = t;
     }
 
+    /// Damage the TAR stream of the next commits. `None` turns it off.
+    pub fn set_tar_tamper(&mut self, t: Option<TarTamper>) {
+        self.tar_tamper = t;
+    }
+
     /// A catalog like the one about to be published, except that commit `seq`
     /// omits the transaction's last namespace operation.
     fn catalog_without_last_op(&self, manifest: &Manifest, seq: u64) -> Result<Catalog> {
@@ -4331,6 +4427,25 @@ impl<S: Storage> ArchiveWriter<S> {
         })?;
         Ok(c)
     }
+}
+
+/// How [`ArchiveWriter::set_tar_tamper`] damages a commit's TAR stream
+/// (test controls only). Each is a violation `verify` must name.
+#[cfg(any(test, feature = "test-controls"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TarTamper {
+    /// The first member's header carries a different mode than its version.
+    ModeOff,
+    /// The stream lacks its two end blocks.
+    NoEndBlocks,
+    /// A third zero block follows the two end blocks.
+    ExtraBlocks,
+    /// One more (empty) member than the commit has puts.
+    ExtraMember,
+    /// A re-emitted member's first byte differs from the version's.
+    ReemitFlipped,
+    /// A directory put has no member in the stream.
+    DropDirectoryMember,
 }
 
 /// How [`ArchiveWriter::set_checkpoint_tamper`] damages a checkpoint's

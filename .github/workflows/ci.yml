@@ -58,6 +58,8 @@ jobs:
           # Their own vectors: commit records (c5/*.bin), descriptors (b2).
           - { target: commit_decode,     seeds: "../fixtures/golden/c5", args: "" }
           - { target: descriptor_decode, seeds: "../fixtures/golden/b2", args: "" }
+          # C10 (D19): the TAR-compatible profile's stream parser.
+          - { target: tar_stream,        seeds: "../fixtures/golden/c10", args: "-max_len=100000" }
     steps:
       - uses: actions/checkout@v4
       - name: Install nightly toolchain
@@ -150,6 +152,50 @@ jobs:
           MOCHI_CASEFOLD_DIR: /mnt/cf/d
         run: cargo test --locked -p mochi-testkit --test c6_restore_races -- --ignored --exact c6_casefold_destination
 
+  tar-interop:
+    # Plan C10 (spec 7.2, Annex B.2.9 D19 rule 10): a TAR-compatible archive
+    # decoded by the reference zstd CLI and extracted by GNU tar and by
+    # bsdtar (libarchive). The versions printed here are the only ones the
+    # compatibility claim in docs/c10-tar-compat.md may name.
+    name: tar interop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Install zstd and bsdtar (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zstd libarchive-tools
+      - name: Install zstd (Windows, if the image lacks it)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: command -v zstd || choco install zstandard -y --no-progress
+      - name: Build mochi
+        run: cargo build --locked -p mochi-cli
+      - name: Extract with each tool
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            # Git for Windows' GNU tar first on PATH in bash; bsdtar is the
+            # system tar.exe (libarchive). Both by explicit path.
+            mochi="$PWD/target/debug/mochi.exe"
+            gnu=/usr/bin/tar
+            bsd=/c/Windows/System32/tar.exe
+          else
+            mochi="$PWD/target/debug/mochi"
+            gnu=tar
+            bsd=bsdtar
+          fi
+          # Windows may install zstd after this shell started; refresh PATH.
+          export PATH="$PATH:/c/ProgramData/chocolatey/bin"
+          bash ci/tar-interop.sh "$mochi" zstd "$gnu" "$bsd" | tee "$RUNNER_TEMP/interop.txt"
+          { echo '### tar interop (${{ matrix.os }})'; echo '```'; sed -n '/^== versions/,/^== mochi verify/p' "$RUNNER_TEMP/interop.txt" | sed '$d'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
   doc-nightly:
     # Stable rustdoc ignores the error code in `compile_fail,E0308`; nightly
     # enforces it. The C2 representation-type guarantees (repr.rs) depend on
@@ -165,6 +211,5 @@ jobs:
         run: cargo +nightly test --doc -p mochi-format
 
   # Added as their phases land (plan §5, §8.1). Not present yet, on purpose:
-  #   tar-interop  - C10: one job per pinned tool (GNU tar, bsdtar, zstd CLI)
   #   e2e          - D0+: tauri-driver + WebdriverIO on Windows and Ubuntu (all supported platforms)
   #   ui           - D0+: pnpm install --frozen-lockfile, eslint, tsc --noEmit, vitest, ts-rs types fresh

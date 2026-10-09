@@ -179,3 +179,21 @@ deliberate run at a time with
 then review `git diff --stat fixtures/golden/c1` and explain each changed file.
 Note the builders and files are generated together, so the independent check on
 them is the libzstd differential test in `crates/mochi-format/tests/framing.rs`.
+
+## C10 vectors
+
+TAR-compatible profile (spec Annex B.2.9 D19; plan C10).
+
+`c10/*.tar`: two valid streams (`valid-basic`, `valid-pax`: a directory, files, an empty
+file, a long path, a non-UTF-8 name, a time with a fraction, a large uid) and nine rejects
+with one deviation each (bad checksum, non-zero padding, missing or single end block,
+bytes after the end, a symbolic link, a global pax header, an unknown pax keyword, GNU
+magic). Valid streams are compared **byte for byte** with the encoder's output
+(`c10_golden.rs`): the encoder uses no compression library, so exactness is meaningful.
+Every reject must be refused with `PROFILE_VIOLATION`, for the reason the test lists.
+
+`c10/valid-archive-tar-4-commits.mochi`: a whole TAR-compatible archive that must keep
+verifying at every level (not compared with a fresh build: it contains zstd and SQLite
+output). Frozen when first written. Regenerate nothing blindly; if a deliberate format
+change needs new files, delete the specific file and run
+`cargo test -p mochi-testkit --test c10_golden -- --ignored write_c10_golden_files`.

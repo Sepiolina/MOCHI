@@ -78,9 +78,15 @@ and it does not cover any tool or version not listed. The list is what the CI jo
 
 | Tool | Command | Ubuntu 22.04 | Ubuntu 24.04 | Windows |
 |---|---|---|---|---|
-| zstd CLI | `zstd -dc`, `zstd -t` | _recorded from the CI run_ | _recorded from the CI run_ | _recorded from the CI run_ |
-| GNU tar | `tar -x --ignore-zeros -f -` | _recorded from the CI run_ | _recorded from the CI run_ | Git for Windows `tar` |
-| bsdtar (libarchive) | `bsdtar -x --options read_concatenated_archives -f -` | _recorded from the CI run_ | _recorded from the CI run_ | system `tar.exe` |
+| zstd CLI | `zstd -dc`, `zstd -t` | 1.5.7 | 1.5.7 | 1.5.7 |
+| GNU tar | `tar -x --ignore-zeros -f -` | 1.34 | 1.35 | 1.35 (Git for Windows `/usr/bin/tar`) |
+| bsdtar (libarchive) | `bsdtar -x --options read_concatenated_archives -f -` | 3.6.0 | 3.7.2 | 3.8.4 (system `tar.exe`) |
+
+Versions are those printed by the `tar interop` jobs of the PR that introduced the
+profile (run 37886040933, all six cells passed); the runner images move, so a later run
+may print newer ones, and only a run that prints a version supports a claim for it.
+On Windows `mochi create` exits 2 (directory entry not confirmed durable, until gate G6),
+which `ci/tar-interop.sh` accepts; everything else in the script is checked.
 
 Notes on tools:
 

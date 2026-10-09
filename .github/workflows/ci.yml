@@ -24,6 +24,10 @@ jobs:
       - name: Install pinned toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          # ubuntu-22.04 and ubuntu-24.04 share a job name and `runner.os`; without
+          # this the 22.04 job restores 24.04's build scripts (glibc 2.39).
+          key: ${{ matrix.os }}
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
@@ -109,6 +113,8 @@ jobs:
       - name: Install pinned toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
       - name: Build the power-cut helper
         run: cargo build --locked -p mochi-testkit --example g7_powercut
       - name: Load dm-flakey
@@ -138,6 +144,8 @@ jobs:
       - name: Install pinned toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
       - name: Build the test
         run: cargo test --locked -p mochi-testkit --test c6_restore_races --no-run
       - name: Mount ext4 with casefold
@@ -171,6 +179,8 @@ jobs:
       - name: Install pinned toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
       - name: Install zstd and bsdtar (Ubuntu)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y zstd libarchive-tools

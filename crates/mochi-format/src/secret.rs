@@ -21,7 +21,7 @@
 //! let _k2 = k.clone();
 //! ```
 //!
-//! ```compile_fail,E0599
+//! ```compile_fail,E0624
 //! // And its bytes cannot be read back out.
 //! use mochi_format::secret::DataKey;
 //! let k = DataKey::from_bytes([1; 32]);

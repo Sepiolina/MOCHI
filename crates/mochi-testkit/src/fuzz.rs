@@ -715,10 +715,10 @@ pub fn exercise_key_envelope(data: &[u8]) {
         ..limits
     };
     let pass = Passphrase::new("fuzz passphrase").expect("a valid passphrase");
-    match env.unwrap(&pass, &cheap) {
-        Ok(Some(_)) => panic!("random input must not unwrap under a fixed passphrase"),
-        Ok(None) | Err(_) => {}
-    }
+    assert!(
+        !matches!(env.unwrap(&pass, &cheap), Ok(Some(_))),
+        "random input must not unwrap under a fixed passphrase"
+    );
 }
 
 /// Sealed objects (C11, spec Annex B.2.10 D20 item 5). Any input either is

@@ -1028,6 +1028,68 @@ pub(crate) fn check_key_state(
     Ok(())
 }
 
+/// Encrypted profile (D20 item 10), for `verify`: for **every** commit of
+/// `history`, the envelopes it lists equal the key state its segment's
+/// manifests replay to (S(*b*), then each delta's key operations). Returns each
+/// commit that disagrees or whose manifests cannot be replayed, with the
+/// reason; a commit after a failed checkpoint is not blamed again. Opening for
+/// reading does not do this (it never reads S(*b*), D10.9); appending, baseline
+/// recovery, and [`segment_state`] do, for the commit they open. `None` if
+/// cancelled.
+pub(crate) fn check_history_key_states(
+    src: &dyn ReadStorage,
+    history: &[HistoryEntry],
+    opts: &ReadOptions,
+    cancelled: &dyn Fn() -> bool,
+) -> Option<Vec<(u64, MochiError)>> {
+    let mut problems = Vec::new();
+    let mut state: Option<SegmentState> = None;
+    for e in history {
+        if cancelled() {
+            return None;
+        }
+        let step = (|| -> Result<()> {
+            match e.commit.metadata {
+                Metadata::Checkpoint { snapshot, .. } => {
+                    let s_b = read_bound_manifest(
+                        src,
+                        &e.commit,
+                        &snapshot,
+                        e.commit_offset,
+                        ManifestKind::Snapshot,
+                        opts,
+                    );
+                    state = s_b.as_ref().ok().map(SegmentState::from_snapshot);
+                    s_b?;
+                }
+                Metadata::Delta { .. } => {
+                    let delta = read_bound_manifest(
+                        src,
+                        &e.commit,
+                        &e.commit.delta_manifest,
+                        e.commit_offset,
+                        ManifestKind::Delta,
+                        opts,
+                    )?;
+                    match state.as_mut() {
+                        Some(st) => st.apply_delta(&delta)?,
+                        // Blamed at the checkpoint that failed.
+                        None => return Ok(()),
+                    }
+                }
+            }
+            match &state {
+                Some(st) => check_key_state(src, &e.commit, e.commit_offset, &st.keys, opts),
+                None => Ok(()),
+            }
+        })();
+        if let Err(err) = step {
+            problems.push((e.commit.seq, err));
+        }
+    }
+    Some(problems)
+}
+
 /// D12: a descriptor that cannot be loaded, hash-verified, or decoded, or
 /// that names another archive, is `DESCRIPTOR_INVALID`. Refusals
 /// (`UNSUPPORTED_FEATURE`), reader limits, and I/O keep their codes.

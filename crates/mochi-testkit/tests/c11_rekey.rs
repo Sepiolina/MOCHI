@@ -198,6 +198,16 @@ fn removing_an_envelope_closes_the_head_to_that_passphrase_but_is_not_revocation
     open_head(&s, &keyed_read(&[B])).unwrap();
     assert_eq!(envelope_ids(&s).len(), 1);
     assert!(!envelope_ids(&s).contains(&a_envelope));
+    // The head's envelope set decides, even for a session that already holds
+    // the data key: A opened the earlier copy (and cached the key), and still
+    // does not open the head that no longer lists A's envelope.
+    let session = keyed_read(&[A]);
+    open_head(&copy_before, &session).unwrap();
+    assert_eq!(
+        open_head(&s, &session).unwrap_err().code,
+        ErrorCode::KeyUnavailable,
+        "a removed passphrase does not open the head through a cached key"
+    );
     // Removal is not revocation: the file's history still holds the envelope
     // frame, and the copy made before still opens with A.
     open_head(&copy_before, &keyed_read(&[A])).unwrap();

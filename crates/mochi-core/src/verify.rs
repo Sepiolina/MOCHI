@@ -92,8 +92,8 @@ use crate::error::{ErrorCode, MochiError};
 use crate::job::JobContext;
 use crate::object::{decode_verified, load_stored, verify_stored, Dependency, ObjectRecord};
 use crate::publish::{
-    commit_history, locate_head, open_at_footer, open_head, recover_baseline_at_footer, HeadSource,
-    HistoryEntry, OpenedHead, ReadOptions, TailState,
+    check_history_key_states, commit_history, locate_head, open_at_footer, open_head,
+    recover_baseline_at_footer, HeadSource, HistoryEntry, OpenedHead, ReadOptions, TailState,
 };
 use crate::read::read_version;
 use crate::report::{
@@ -678,6 +678,19 @@ fn check(
     ctx.report(phase::STRUCTURE, 3, Some(4));
     if let Err(e) = opened.catalog.verify() {
         run.error("checking the head catalog", &e);
+    }
+    // D20 item 10: every commit lists the envelopes its manifests replay to.
+    if opened.descriptor.profile().encrypted {
+        match check_history_key_states(src, &history, ro, &|| ctx.check_cancelled().is_err()) {
+            None => {
+                return cancelled_with(run, Some(verified), damage, freshness, key_availability)
+            }
+            Some(problems) => {
+                for (seq, e) in problems {
+                    run.error(&format!("the key state of commit {seq}"), &e);
+                }
+            }
+        }
     }
     ctx.report(phase::STRUCTURE, 4, Some(4));
 

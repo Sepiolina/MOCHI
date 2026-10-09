@@ -23,7 +23,7 @@ use std::path::PathBuf;
 
 use mochi_core::keys::KeyEnvelope;
 use mochi_core::object::ArchiveId;
-use mochi_core::publish::{open_head, ArchiveWriter, ReadOptions, Transaction};
+use mochi_core::publish::{open_head, ArchiveWriter, Transaction};
 use mochi_core::read::read_file;
 use mochi_core::status::{Dimension, Status, VerificationLevel};
 use mochi_core::verify::{verify, VerifyOptions};

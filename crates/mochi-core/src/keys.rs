@@ -61,6 +61,9 @@ fn invalid_envelope(msg: impl Into<String>) -> MochiError {
     MochiError::new(ErrorCode::RecordInvalid, msg)
 }
 
+/// The keys a session has opened, by the envelope that opened each.
+type OpenedKeys = Vec<([u8; 16], Arc<Unlocked>)>;
+
 /// One decoded key envelope. Nothing secret: the wrapped key is ciphertext.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyEnvelope {
@@ -349,7 +352,7 @@ impl std::fmt::Debug for Unlocked {
 /// far. Cheap to share (`Arc`); the passphrases never leave it.
 pub struct KeySession {
     passphrases: Vec<Passphrase>,
-    opened: Mutex<Vec<([u8; 16], Arc<Unlocked>)>>,
+    opened: Mutex<OpenedKeys>,
 }
 
 impl KeySession {
@@ -444,7 +447,7 @@ impl KeySession {
         ))
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Vec<([u8; 16], Arc<Unlocked>)>>> {
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, OpenedKeys>> {
         self.opened.lock().map_err(|_| {
             MochiError::new(
                 ErrorCode::InvalidArgument,
@@ -463,20 +466,6 @@ impl std::fmt::Debug for KeySession {
 }
 
 // ---- sealed records ------------------------------------------------------------------
-
-/// The data key of `archive` from `opts`, or `KEY_UNAVAILABLE`: the single
-/// place a read of a sealed object finds its key.
-pub(crate) fn require_key(opts: &ReadOptions, archive: &ArchiveId) -> Result<Arc<Unlocked>> {
-    opts.keys
-        .as_ref()
-        .and_then(|k| k.unlocked_for(archive))
-        .ok_or_else(|| {
-            MochiError::new(
-                ErrorCode::KeyUnavailable,
-                "this archive is encrypted: a passphrase is required to read it",
-            )
-        })
-}
 
 /// The data key of the archive `cat` belongs to, if `opts` carries one that
 /// opened it: how a reader that holds a catalog but no commit finds the key its

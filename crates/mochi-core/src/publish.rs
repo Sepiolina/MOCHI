@@ -131,8 +131,7 @@ use crate::error::{ErrorCode, MochiError, Result};
 use crate::image::{decode_image_payload, decode_image_record, encode_image_record, image_payload};
 use crate::job::JobContext;
 use crate::keys::{
-    open_sealed_record, read_envelopes, require_key, seal_record, unlock_commit, KeyEnvelope,
-    Unlocked,
+    open_sealed_record, read_envelopes, seal_record, unlock_commit, KeyEnvelope, Unlocked,
 };
 use crate::manifest::{
     Attributes, ChunkEntry, FileVersionEntry, KeyOp, Manifest, ManifestKind, Mtime, ParentLink,
@@ -1070,7 +1069,7 @@ pub(crate) fn read_descriptor(
 /// that it is of `kind` and carries the commit's D11 identity
 /// (`ENVELOPE_INVALID` on a mismatch, the same fault codes as the binary
 /// envelope).
-pub(crate) fn read_bound_manifest(
+pub fn read_bound_manifest(
     src: &dyn ReadStorage,
     commit: &CommitRecord,
     r: &ObjectRef,
@@ -1087,7 +1086,9 @@ pub(crate) fn read_bound_manifest(
         // D20 item 5: a manifest of an Encrypted archive is a sealed object,
         // bound to its commit's sequence and transaction ID; the plaintext is
         // exactly what a Core manifest frame would carry as its payload.
-        let key = require_key(opts, &commit.archive_id)?;
+        // Unlocks from the commit's own envelopes when the session has not
+        // opened this archive yet; a cached key (the head's) is reused.
+        let key = unlock_commit(src, commit, limit, opts, false)?;
         let target = match kind {
             ManifestKind::Delta => SealTarget::DeltaManifest {
                 sequence: commit.seq,
@@ -1446,7 +1447,7 @@ pub(crate) fn check_image(
     )?;
     let plaintext;
     let image = if cp.commit.encrypted() {
-        let key = require_key(opts, &cp.commit.archive_id)?;
+        let key = unlock_commit(src, &cp.commit, cp.commit_offset, opts, false)?;
         let target = SealTarget::Image {
             sequence: cp.commit.seq,
             transaction_id: cp.commit.transaction_id,
@@ -4763,6 +4764,7 @@ fn order_copied_chunks<'a>(
 /// rejecting hash-valid bytes the writer just produced is also a mismatch
 /// (the writer wrote something its own reader refuses). A hash failure or a
 /// failed read is a storage fault and keeps its code.
+#[allow(clippy::too_many_arguments)]
 fn adopt_checkpoint(
     storage: &dyn ReadStorage,
     source: &AuthoritativeState,

@@ -82,6 +82,7 @@ fn sealed_control_object(
 
 /// The shape of the data region and, at `hash`, its stored-object hash.
 /// Returns the number of sealed frames and the bytes hashed.
+#[allow(clippy::too_many_arguments)]
 fn data_region(
     src: &dyn ReadStorage,
     ro: &ReadOptions,

@@ -27,6 +27,12 @@ tempfile = "3"
 blake3 = { version = "1", default-features = false, features = ["std"] }
 zstd = "0.13"
 getrandom = "0.3"
+# Encrypted profile (spec Annex B.2.10, D20). All MIT or Apache-2.0.
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
+zeroize = "1"
+unicode-normalization = "0.1"
+rpassword = "7"
 ciborium = "0.2"
 rusqlite = { version = "0.40", features = ["bundled", "serialize"] }
 proptest = { version = "1", default-features = false, features = ["std"] }

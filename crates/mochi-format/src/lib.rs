@@ -19,9 +19,12 @@ pub mod envelope;
 pub mod error;
 pub mod footer;
 pub mod frame;
+pub mod kdf;
 pub mod limits;
 pub mod registry;
 pub mod repr;
+pub mod seal;
+pub mod secret;
 pub mod source;
 pub mod version;
 

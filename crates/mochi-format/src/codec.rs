@@ -5,12 +5,16 @@
 //! [`decode_object`], with every length checked against the caller's
 //! expectation and the §8.5 limits before anything is allocated or trusted.
 //!
-//! **What exists in C2.** One encoding (a single Zstandard data frame) and one
-//! protection mode (none). For an unprotected object the encoded plaintext,
-//! stored payload, and stored object are byte-identical, but they remain
-//! distinct types, and each stage still checks what it is handed. Encryption
-//! (the [`crate::registry::ENCRYPTED_OBJECT`] envelope, spec §14) is C11 and blocked on R5;
-//! dictionary resolution arrives with C8/C9.
+//! **What exists.** One encoding (a single Zstandard data frame) and two
+//! protection modes. For an unprotected object the encoded plaintext, stored
+//! payload, and stored object are byte-identical, but they remain distinct
+//! types, and each stage still checks what it is handed. A protected object
+//! is *sealed* (spec Annex B.2.10, D20): the encoded plaintext, which is the
+//! Zstandard frame, becomes the plaintext of one
+//! [`crate::registry::ENCRYPTED_OBJECT`] frame ([`crate::seal`]); only
+//! [`encode_object_sealed`] and [`decode_object_sealed`] do that, because
+//! sealing needs a key, an archive, and the object's ID. Dictionary
+//! resolution arrives with C8/C9.
 //!
 //! **Data-object profile (plan §9, O21, decided).** Every MOCHI data object is
 //! exactly one Zstandard data frame that:
@@ -38,11 +42,13 @@
 
 use std::io::Read;
 
-use crate::error::{CodecFault, FormatError, LimitKind, Result};
+use crate::error::{CodecFault, FormatError, LimitKind, Result, SealFault};
 use crate::frame::{walk_frame, DataFrameInfo, FrameDetail};
 use crate::limits::Limits;
 use crate::registry::FrameKind;
 use crate::repr::{DecodedBytes, EncodedPlaintext, StoredObject, StoredPayload};
+use crate::seal::{open_payload, seal_payload, sealed_frame_payload, SealContext, SealTarget};
+use crate::secret::Random;
 
 /// How decoded bytes become encoded plaintext.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -58,7 +64,9 @@ pub enum Encoding {
 pub enum Protection {
     /// Stored payload is the encoded plaintext.
     None,
-    /// Authenticated encryption in a [`crate::registry::ENCRYPTED_OBJECT`] envelope. C11; blocked on R5.
+    /// Authenticated encryption in a [`crate::registry::ENCRYPTED_OBJECT`]
+    /// frame (Annex B.2.10, D20). Needs a key: [`encode_object_sealed`] and
+    /// [`decode_object_sealed`]; the keyless entry points refuse it.
     Aead,
 }
 
@@ -99,14 +107,42 @@ pub fn encode(content: &DecodedBytes, params: &EncodeParams) -> Result<EncodedPl
     }
 }
 
-/// Stage 2: protect encoded plaintext. Only [`Protection::None`] exists in C2.
+/// Stage 2: protect encoded plaintext. [`Protection::Aead`] needs a key and
+/// is refused here with [`SealFault::NoKey`]; use [`protect_sealed`].
 pub fn protect(plaintext: EncodedPlaintext, protection: Protection) -> Result<StoredPayload> {
     match protection {
         Protection::None => Ok(StoredPayload::from_codec(plaintext.into_inner())),
-        Protection::Aead => Err(FormatError::Unsupported(
-            "encrypted objects (spec §14; plan C11, blocked on R5)",
-        )),
+        Protection::Aead => Err(FormatError::Seal(SealFault::NoKey)),
     }
+}
+
+/// Stage 2 for [`Protection::Aead`]: seal the encoded plaintext (the
+/// Zstandard frame) for the chunk `object_id` under `ctx`, with a fresh random
+/// nonce. The stored payload is the sealed header, ciphertext, and tag.
+pub fn protect_sealed(
+    plaintext: EncodedPlaintext,
+    ctx: &SealContext<'_>,
+    object_id: &[u8; 32],
+    rng: &mut dyn Random,
+) -> Result<StoredPayload> {
+    let bytes = plaintext.into_inner();
+    let target = SealTarget::Chunk {
+        object_id: *object_id,
+    };
+    Ok(StoredPayload::from_codec(seal_payload(
+        ctx, &target, &bytes, rng,
+    )?))
+}
+
+/// Stage 3 for [`Protection::Aead`]: frame a sealed payload as one
+/// `0x184D2A59` skippable frame within `limits`.
+pub fn frame_sealed(payload: StoredPayload, limits: &Limits) -> Result<StoredObject> {
+    let frame = crate::frame::encode_skippable_frame_within(
+        FrameKind::EncryptedObject,
+        &payload.into_inner(),
+        limits,
+    )?;
+    Ok(StoredObject::from_codec(frame))
 }
 
 /// Stage 3: frame a stored payload as stored object bytes.
@@ -125,13 +161,12 @@ pub fn frame_object(
             single_data_frame(&bytes, limits)?;
             Ok(StoredObject::from_codec(bytes))
         }
-        Protection::Aead => Err(FormatError::Unsupported(
-            "encrypted objects (spec §14; plan C11, blocked on R5)",
-        )),
+        Protection::Aead => Err(FormatError::Seal(SealFault::NoKey)),
     }
 }
 
-/// All three encode stages.
+/// All three encode stages, unprotected. [`Protection::Aead`] is refused with
+/// [`SealFault::NoKey`]: see [`encode_object_sealed`].
 pub fn encode_object(
     content: &DecodedBytes,
     params: &EncodeParams,
@@ -148,6 +183,50 @@ pub fn encode_object(
     let plaintext = encode(content, params)?;
     let payload = protect(plaintext, protection)?;
     frame_object(payload, protection, limits)
+}
+
+/// All three encode stages with [`Protection::Aead`]: compress, seal for the
+/// chunk `object_id` under `ctx`, frame (spec Annex B.2.10 item 5). The
+/// content limit and the frame limits are the same as for an unprotected
+/// object.
+pub fn encode_object_sealed(
+    content: &DecodedBytes,
+    params: &EncodeParams,
+    ctx: &SealContext<'_>,
+    object_id: &[u8; 32],
+    rng: &mut dyn Random,
+    limits: &Limits,
+) -> Result<StoredObject> {
+    if content.len() > limits.max_decoded_object_len {
+        return Err(FormatError::LimitExceeded {
+            kind: LimitKind::DecodedObjectLength,
+            limit: limits.max_decoded_object_len,
+            actual: content.len(),
+        });
+    }
+    let plaintext = encode(content, params)?;
+    let payload = protect_sealed(plaintext, ctx, object_id, rng)?;
+    frame_sealed(payload, limits)
+}
+
+/// Open a sealed chunk and hand back its Zstandard frame, without
+/// decompressing it: what a rewrite carries from one archive to another
+/// (it re-seals the same frame under the new key and archive). The sealed
+/// header, key ID, and tag are checked; the frame is checked to be one
+/// structurally valid data frame.
+pub fn unseal_object(
+    stored: &StoredObject,
+    ctx: &SealContext<'_>,
+    object_id: &[u8; 32],
+    limits: &Limits,
+) -> Result<Vec<u8>> {
+    let payload = sealed_frame_payload(stored, limits)?;
+    let target = SealTarget::Chunk {
+        object_id: *object_id,
+    };
+    let plaintext = open_payload(ctx, &target, payload)?;
+    single_data_frame(&plaintext, limits)?;
+    Ok(plaintext)
 }
 
 /// `bytes` must be exactly one Zstandard data frame, walked structurally.
@@ -177,6 +256,37 @@ pub fn decode_object(
     expected_len: u64,
     limits: &Limits,
 ) -> Result<DecodedBytes> {
+    match protection {
+        // A sealed object needs a key: see [`decode_object_sealed`].
+        Protection::Aead => Err(FormatError::Seal(SealFault::NoKey)),
+        Protection::None => decode_data_frame(stored.as_bytes(), expected_len, limits),
+    }
+}
+
+/// Decode a sealed chunk: unframe, open under `ctx` for the chunk `object_id`
+/// (a tag failure is [`SealFault::Authentication`], reported as content
+/// integrity), then the same bounded decompression as an unprotected object.
+pub fn decode_object_sealed(
+    stored: &StoredObject,
+    ctx: &SealContext<'_>,
+    object_id: &[u8; 32],
+    expected_len: u64,
+    limits: &Limits,
+) -> Result<DecodedBytes> {
+    if expected_len > limits.max_decoded_object_len {
+        return Err(FormatError::LimitExceeded {
+            kind: LimitKind::DecodedObjectLength,
+            limit: limits.max_decoded_object_len,
+            actual: expected_len,
+        });
+    }
+    let plaintext = unseal_object(stored, ctx, object_id, limits)?;
+    decode_data_frame(&plaintext, expected_len, limits)
+}
+
+/// Stages shared by both protection modes: `plaintext` must be one Zstandard
+/// data frame meeting the O21 profile, whose decoded length is `expected_len`.
+fn decode_data_frame(plaintext: &[u8], expected_len: u64, limits: &Limits) -> Result<DecodedBytes> {
     if expected_len > limits.max_decoded_object_len {
         return Err(FormatError::LimitExceeded {
             kind: LimitKind::DecodedObjectLength,
@@ -185,19 +295,7 @@ pub fn decode_object(
         });
     }
     // Stage 3⁻¹: unframe.
-    let (payload, info) = match protection {
-        Protection::None => {
-            let info = single_data_frame(stored.as_bytes(), limits)?;
-            (stored.as_bytes(), info)
-        }
-        Protection::Aead => {
-            return Err(FormatError::Unsupported(
-                "encrypted objects (spec §14; plan C11, blocked on R5)",
-            ))
-        }
-    };
-    // Stage 2⁻¹: unprotect (identity for Protection::None).
-    let plaintext = payload;
+    let info = single_data_frame(plaintext, limits)?;
 
     // Profile checks (O21), then record agreement, then bounded decompression.
     let Some(declared) = info.declared_content_size else {
@@ -320,11 +418,104 @@ mod tests {
     }
 
     #[test]
-    fn encryption_is_unsupported_not_silently_plain() {
+    fn a_protected_object_is_refused_without_a_key_never_stored_plain() {
         let limits = Limits::default();
         let d = DecodedBytes::new(b"x".to_vec());
         let e = encode_object(&d, &EncodeParams::default(), Protection::Aead, &limits).unwrap_err();
-        assert_eq!(e.class(), ErrorClass::Unsupported);
+        assert_eq!(e, FormatError::Seal(SealFault::NoKey));
+        assert_eq!(e.class(), ErrorClass::KeyUnavailable);
+        let stored =
+            encode_object(&d, &EncodeParams::default(), Protection::None, &limits).unwrap();
+        let e = decode_object(&stored, Protection::Aead, 1, &limits).unwrap_err();
+        assert_eq!(e.class(), ErrorClass::KeyUnavailable);
+    }
+
+    fn ctx(key: &crate::secret::DataKey) -> SealContext<'_> {
+        SealContext {
+            key,
+            key_id: crate::seal::KeyId::from_bytes([9; 16]),
+            archive_id: [3; 32],
+        }
+    }
+
+    #[test]
+    fn a_sealed_chunk_round_trips_and_is_bound_to_its_object_id() {
+        let limits = Limits::default();
+        let key = crate::secret::DataKey::from_bytes([5; 32]);
+        let content = DecodedBytes::new(b"sealed chunk content ".repeat(100));
+        let id = [1u8; 32];
+        let stored = encode_object_sealed(
+            &content,
+            &EncodeParams::default(),
+            &ctx(&key),
+            &id,
+            &mut crate::secret::OsRandom,
+            &limits,
+        )
+        .unwrap();
+        // One ENCRYPTED_OBJECT frame whose ciphertext is not the plain frame.
+        assert_eq!(
+            &stored.as_bytes()[..4],
+            &crate::registry::ENCRYPTED_OBJECT.to_le_bytes()
+        );
+        let plain = encode_object(
+            &content,
+            &EncodeParams::default(),
+            Protection::None,
+            &limits,
+        )
+        .unwrap();
+        assert!(!stored
+            .as_bytes()
+            .windows(plain.as_bytes().len().min(32))
+            .any(|w| w == &plain.as_bytes()[..plain.as_bytes().len().min(32)]));
+        let back = decode_object_sealed(&stored, &ctx(&key), &id, content.len(), &limits).unwrap();
+        assert_eq!(back, content);
+        // The Zstandard frame comes out unchanged, for a rewrite to re-seal.
+        assert_eq!(
+            unseal_object(&stored, &ctx(&key), &id, &limits).unwrap(),
+            plain.as_bytes()
+        );
+        // Another object ID, key, or archive fails as content integrity.
+        for bad in [
+            decode_object_sealed(&stored, &ctx(&key), &[2u8; 32], content.len(), &limits),
+            decode_object_sealed(
+                &stored,
+                &ctx(&crate::secret::DataKey::from_bytes([6; 32])),
+                &id,
+                content.len(),
+                &limits,
+            ),
+        ] {
+            assert_eq!(bad.unwrap_err().class(), ErrorClass::ContentIntegrity);
+        }
+        // The recorded decoded length is still checked after opening.
+        assert_eq!(
+            decode_object_sealed(&stored, &ctx(&key), &id, content.len() + 1, &limits)
+                .unwrap_err()
+                .class(),
+            ErrorClass::ContentIntegrity
+        );
+        // The decoded-length limit applies before anything is opened.
+        let tight = Limits {
+            max_decoded_object_len: 4,
+            ..limits
+        };
+        assert!(matches!(
+            decode_object_sealed(&stored, &ctx(&key), &id, 5, &tight),
+            Err(FormatError::LimitExceeded { .. })
+        ));
+        assert!(matches!(
+            encode_object_sealed(
+                &content,
+                &EncodeParams::default(),
+                &ctx(&key),
+                &id,
+                &mut crate::secret::OsRandom,
+                &tight
+            ),
+            Err(FormatError::LimitExceeded { .. })
+        ));
     }
 
     #[test]

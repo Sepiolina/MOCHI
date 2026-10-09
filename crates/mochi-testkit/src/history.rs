@@ -195,6 +195,7 @@ impl HistoryWriter {
             retention_ops: Vec::new(),
             retention: Default::default(),
             provenance: None,
+            keys: Default::default(),
         };
         delta.canonicalize();
         let delta_hash = self.write(&delta)?;

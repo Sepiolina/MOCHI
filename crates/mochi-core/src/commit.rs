@@ -43,6 +43,7 @@ use mochi_format::error::LimitKind;
 use mochi_format::frame::{encode_skippable_frame_within, walk_frame, FrameDetail};
 use mochi_format::registry::{FrameKind, DESCRIPTOR_OFFSET, SKIPPABLE_HEADER_LEN};
 use mochi_format::repr::{CanonicalCommitBody, StoredObject};
+use mochi_format::seal::{FEATURE_ENCRYPTED, MIN_SEALED_FRAME_LEN};
 use mochi_format::{FormatError, Limits};
 
 use crate::error::{ErrorCode, MochiError, Result};
@@ -52,15 +53,22 @@ use crate::object::ArchiveId;
 /// Schema version this build writes and reads (R3 draft).
 pub const SCHEMA_VERSION: u64 = 1;
 
+/// Schema version of an Encrypted-profile archive's commits (Annex B.2.10
+/// D20; `docs/schemas/commit-record-v2.cddl`): schema 1 without key 8, plus
+/// key 11 (the key envelopes valid at this commit) and key 12 (the data
+/// region). Used exactly when the record lists required feature 1.
+pub const ENCRYPTED_SCHEMA_VERSION: u64 = 2;
+
 /// The pre-batch draft schema. Refused, and named as legacy (§26).
 pub const LEGACY_SCHEMA_VERSION: u64 = 0;
 
 /// Map key holding the commit ID; excluded from the body (§9.2).
 const ID_KEY: u64 = 9;
 
-/// Required-feature identifiers this build understands. None are defined, so
-/// any listed feature makes the commit unsupported (fail closed).
-pub const KNOWN_REQUIRED_FEATURES: &[u64] = &[];
+/// Required-feature identifiers this build understands: the Encrypted
+/// profile's (D20 item 4). Any other listed feature makes the commit
+/// unsupported (fail closed).
+pub const KNOWN_REQUIRED_FEATURES: &[u64] = &[FEATURE_ENCRYPTED];
 
 /// Where a stored object sits in a monolithic archive, and its hash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,10 +141,21 @@ pub struct CommitRecord {
     pub delta_manifest: ObjectRef,
     /// Strictly increasing. Empty for Core.
     pub required_features: Vec<u64>,
-    /// Informational only (§12.1): never used for ordering.
+    /// Informational only (§12.1): never used for ordering. Always `None`
+    /// in the Encrypted profile (schema 2 has no key 8).
     pub time: Option<Mtime>,
     /// Key 10: the archive descriptor (D12). Offset is always 0.
     pub descriptor: ObjectRef,
+    /// Schema 2, key 11: the key envelopes valid at this commit, a complete
+    /// list in increasing order of the envelope ID each frame carries (the
+    /// frames' own IDs are checked when they are read, `keys.rs`). Empty
+    /// outside the Encrypted profile.
+    pub key_envelopes: Vec<ObjectRef>,
+    /// Schema 2, key 12: the byte range holding this commit's new data
+    /// objects, back to back, and its stored-object-scope hash (D20 item 7);
+    /// `None` when the commit adds no data object. Always `None` outside the
+    /// Encrypted profile.
+    pub data_region: Option<ObjectRef>,
 }
 
 /// Format 16 random bytes as an RFC 9562 version-4 UUID.
@@ -189,6 +208,21 @@ fn decode_link(v: &Value, what: &'static str) -> Result<CommitLink> {
 }
 
 impl CommitRecord {
+    /// 2 for an Encrypted-profile commit (it lists the D20 required feature),
+    /// else 1.
+    pub fn schema_version(&self) -> u64 {
+        if self.encrypted() {
+            ENCRYPTED_SCHEMA_VERSION
+        } else {
+            SCHEMA_VERSION
+        }
+    }
+
+    /// Whether this commit belongs to an Encrypted-profile archive.
+    pub fn encrypted(&self) -> bool {
+        self.required_features.contains(&FEATURE_ENCRYPTED)
+    }
+
     /// The D11 identity every object this commit references must carry.
     pub fn identity(&self) -> RecordIdentity {
         RecordIdentity {
@@ -207,6 +241,12 @@ impl CommitRecord {
         if let Metadata::Checkpoint { image, snapshot } = self.metadata {
             v.push(("catalog image", image));
             v.push(("snapshot manifest", snapshot));
+        }
+        for e in &self.key_envelopes {
+            v.push(("key envelope", *e));
+        }
+        if let Some(r) = self.data_region {
+            v.push(("data region", r));
         }
         v
     }
@@ -256,6 +296,46 @@ impl CommitRecord {
         // D11, shared with the binary envelope: count limit, strictly
         // increasing (ENVELOPE_INVALID), then every entry known.
         check_required_features(&self.required_features, KNOWN_REQUIRED_FEATURES, limits)?;
+        if self.encrypted() {
+            // Schema 2 (D20): exactly the one feature, no time, 1 to 16
+            // envelopes, and a data region that is sealed frames before the
+            // delta manifest.
+            if self.required_features != [FEATURE_ENCRYPTED] {
+                return Err(schema(
+                    "an Encrypted commit lists exactly the Encrypted required feature",
+                ));
+            }
+            if self.time.is_some() {
+                return Err(schema(
+                    "an Encrypted commit records no time (Annex B.2.10 D20 item 6)",
+                ));
+            }
+            let n = self.key_envelopes.len() as u64;
+            if n > limits.max_key_envelopes {
+                return Err(MochiError::from(FormatError::LimitExceeded {
+                    kind: LimitKind::KeyEnvelopes,
+                    limit: limits.max_key_envelopes,
+                    actual: n,
+                }));
+            }
+            if n == 0 {
+                return Err(schema("an Encrypted commit lists no key envelope"));
+            }
+            if let Some(r) = &self.data_region {
+                if r.stored_len < MIN_SEALED_FRAME_LEN {
+                    return Err(schema("the data region is shorter than one sealed frame"));
+                }
+                if r.end()? > self.delta_manifest.offset {
+                    return Err(schema(
+                        "the data region extends past the delta manifest it precedes",
+                    ));
+                }
+            }
+        } else if !self.key_envelopes.is_empty() || self.data_region.is_some() {
+            return Err(schema(
+                "key envelopes and a data region belong to the Encrypted profile (schema 2)",
+            ));
+        }
         Ok(())
     }
 
@@ -272,7 +352,7 @@ impl CommitRecord {
             }
         };
         let mut entries = vec![
-            (0, Value::Uint(SCHEMA_VERSION)),
+            (0, Value::Uint(self.schema_version())),
             (1, b32(self.archive_id.as_bytes())),
             (2, Value::Uint(self.seq)),
             (3, Value::Bytes(self.transaction_id.to_vec())),
@@ -298,6 +378,13 @@ impl CommitRecord {
         // Key 9 (the ID) sits between 8 and 10 in the full record; the body
         // simply omits it.
         entries.push((10, ref_value(&self.descriptor)));
+        if self.encrypted() {
+            entries.push((
+                11,
+                Value::Array(self.key_envelopes.iter().map(ref_value).collect()),
+            ));
+            entries.push((12, self.data_region.as_ref().map_or(Value::Null, ref_value)));
+        }
         entries
     }
 
@@ -363,13 +450,13 @@ impl CommitRecord {
     ) -> Result<(CommitRecord, CommitId)> {
         let root = cbor::decode(bytes, cbor_limits)?;
         let mut f = Fields::of(&root, "commit")?;
-        match f.req(0)?.uint("schema version")? {
-            SCHEMA_VERSION => {}
+        let version = match f.req(0)?.uint("schema version")? {
+            v @ (SCHEMA_VERSION | ENCRYPTED_SCHEMA_VERSION) => v,
             LEGACY_SCHEMA_VERSION => {
                 return Err(MochiError::new(
                     ErrorCode::UnsupportedFeature,
                     "commit-record schema 0 is the pre-batch draft (legacy, spec §26); \
-                     this build reads schema 1 only",
+                     this build reads schemas 1 and 2",
                 ))
             }
             v => {
@@ -378,7 +465,7 @@ impl CommitRecord {
                     format!("commit-record schema version {v} is not supported by this build"),
                 ))
             }
-        }
+        };
         let archive_id = ArchiveId::from_bytes(f.req(1)?.bytes32("archive id")?);
         let seq = f.req(2)?.uint("commit sequence")?;
         let transaction_id = <[u8; 16]>::try_from(f.req(3)?.bytes("transaction id")?)
@@ -429,6 +516,27 @@ impl CommitRecord {
         };
         let stored_id = CommitId::from_bytes(f.req(ID_KEY)?.bytes32("commit id")?);
         let descriptor = decode_ref(f.req(10)?, "archive descriptor reference")?;
+        let (mut key_envelopes, mut data_region) = (Vec::new(), None);
+        if version == ENCRYPTED_SCHEMA_VERSION {
+            // Bound the work before decoding each reference: a hostile list
+            // is cut at the reader's limit (the structural check repeats it
+            // for records built in memory).
+            let list = f.req(11)?.array("key envelopes")?;
+            if list.len() as u64 > limits.max_key_envelopes {
+                return Err(MochiError::from(FormatError::LimitExceeded {
+                    kind: LimitKind::KeyEnvelopes,
+                    limit: limits.max_key_envelopes,
+                    actual: list.len() as u64,
+                }));
+            }
+            for r in list {
+                key_envelopes.push(decode_ref(r, "key envelope reference")?);
+            }
+            let region = f.req(12)?;
+            if !region.is_null() {
+                data_region = Some(decode_ref(region, "data region")?);
+            }
+        }
         f.finish()?;
         let record = CommitRecord {
             archive_id,
@@ -440,7 +548,15 @@ impl CommitRecord {
             required_features,
             time,
             descriptor,
+            key_envelopes,
+            data_region,
         };
+        if record.schema_version() != version {
+            return Err(schema(
+                "the commit's schema version does not match its required features: \
+                 schema 2 exactly when it lists the Encrypted required feature",
+            ));
+        }
         record.check_structure(limits)?;
         let id = record.compute_id()?;
         if id != stored_id {
@@ -520,6 +636,8 @@ mod tests {
             required_features: vec![],
             time: Some(Mtime { secs: -5, nanos: 7 }),
             descriptor: r(0, 56, 6),
+            key_envelopes: Vec::new(),
+            data_region: None,
         }
     }
 
@@ -648,8 +766,9 @@ mod tests {
                 Box::new(|r| r.required_features = vec![2, 1]),
                 ErrorCode::EnvelopeInvalid,
             ),
+            // Feature 1 is the Encrypted profile (D20); 2 is not assigned.
             (
-                Box::new(|r| r.required_features = vec![1]),
+                Box::new(|r| r.required_features = vec![2]),
                 ErrorCode::UnsupportedFeature,
             ),
         ];
@@ -767,7 +886,7 @@ mod tests {
         let Value::Map(mut m) = rec.full_value(&id) else {
             unreachable!()
         };
-        m[7].1 = Value::Array(vec![Value::Uint(1)]);
+        m[7].1 = Value::Array(vec![Value::Uint(2)]);
         let bytes = cbor::encode(&Value::Map(m)).unwrap();
         assert_eq!(dec(&bytes).unwrap_err().code, ErrorCode::UnsupportedFeature);
     }
@@ -775,7 +894,7 @@ mod tests {
     #[test]
     fn legacy_and_future_schema_versions_are_refused() {
         let (bytes, _) = root().encode().unwrap();
-        for (v, legacy) in [(0u8, true), (2, false)] {
+        for (v, legacy) in [(0u8, true), (3, false)] {
             let mut b = bytes.clone();
             // map(11), key 0, value 1 → value v.
             assert_eq!(&b[..3], &[0xAB, 0x00, 0x01]);

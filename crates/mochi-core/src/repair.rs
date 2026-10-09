@@ -1239,7 +1239,7 @@ where
         let v = verify(
             out,
             &VerifyOptions {
-                read: *read,
+                read: read.clone(),
                 deep: true,
                 ..VerifyOptions::default()
             },

@@ -352,6 +352,7 @@ fn mutated_inputs_never_panic_and_spans_stay_in_bounds() {
         max_commit_frame_len: 1 << 16,
         max_decoded_object_len: 1 << 20,
         max_required_features: 64,
+        ..Limits::default()
     };
     let mut rng = Rng(0xC0FF_EE00_DEAD_BEEF);
     for _ in 0..3000 {

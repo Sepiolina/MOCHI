@@ -284,14 +284,14 @@ fn c7_an_older_archive_is_never_fresh() {
         ..VerifyOptions::default()
     };
     let seen = local(2, history[2].commit_id);
-    let r = run(&older, seen).report;
+    let r = run(&older, seen.clone()).report;
     assert_eq!(dim(&r, Dimension::Freshness), Status::Fail);
     assert_eq!(r.exit_code, exit::FAILED);
     assert_eq!(r.freshness_anchor, FreshnessAnchorKind::LocalHistory);
 
     let other = SimStorage::new();
     build(other.clone(), 99, &scripted_history()).unwrap();
-    let r = run(&other, seen).report;
+    let r = run(&other, seen.clone()).report;
     assert_eq!(dim(&r, Dimension::Freshness), Status::Fail, "substituted");
 
     let r = run(&s, seen).report;

@@ -35,6 +35,7 @@ pub mod health;
 pub mod image;
 pub mod import;
 pub mod job;
+pub mod keys;
 pub mod manifest;
 pub mod object;
 pub mod publish;

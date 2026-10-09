@@ -728,6 +728,7 @@ fn c4_root() -> Manifest {
         retention_ops: Vec::new(),
         retention: Default::default(),
         provenance: None,
+        keys: Default::default(),
     }
 }
 
@@ -762,6 +763,7 @@ fn c4_child(parent_delta_hash: StoredObjectHash) -> Manifest {
         retention_ops: Vec::new(),
         retention: Default::default(),
         provenance: None,
+        keys: Default::default(),
     }
 }
 
@@ -786,6 +788,7 @@ fn c4_snapshot() -> Manifest {
         retention_ops: Vec::new(),
         retention: Default::default(),
         provenance: None,
+        keys: Default::default(),
     }
 }
 
@@ -862,6 +865,7 @@ pub fn c4_manifest_vectors() -> Vec<ManifestVector> {
             (5, CommitId::from_bytes([0xC5; 32])),
         ],
         collected: vec![0, 1, 3, 4],
+        reason: mochi_core::manifest::RewriteReason::Collection,
     });
     let mut retention_snapshot = snapshot.clone();
     retention_snapshot.retention.expired.insert(0);
@@ -1364,6 +1368,8 @@ fn c5_root() -> CommitRecord {
             nanos: 1,
         }),
         descriptor: c5_ref(0, 56, 0x3D),
+        key_envelopes: Vec::new(),
+        data_region: None,
     }
 }
 

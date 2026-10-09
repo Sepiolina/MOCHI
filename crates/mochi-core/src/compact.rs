@@ -456,6 +456,7 @@ where
             .map(|r| Ok((*r, source_commit(*r)?.commit_id)))
             .collect::<Result<_>>()?,
         collected: (0..head_seq).filter(|s| !root_set.contains(s)).collect(),
+        reason: crate::manifest::RewriteReason::Collection,
     };
     let mut new_retention = RetentionState::default();
     for (label, s) in &retention.holds {

@@ -149,7 +149,7 @@ impl FreshnessAnchor {
 }
 
 /// What to verify and how.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct VerifyOptions {
     pub level: VerificationLevel,
     pub read: ReadOptions,
@@ -261,7 +261,10 @@ pub fn classify(code: ErrorCode) -> ErrorClass {
         | ErrorCode::DurabilityUnconfirmed
         | ErrorCode::NameCollision
         | ErrorCode::NameUnsupported
-        | ErrorCode::AttributeNotRestored => ErrorClass::Operational,
+        | ErrorCode::AttributeNotRestored
+        // A wrong or missing passphrase is not evidence about the archive
+        // (D20 item 9): the run could not look, so nothing is concluded.
+        | ErrorCode::KeyUnavailable => ErrorClass::Operational,
     }
 }
 

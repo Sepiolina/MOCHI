@@ -69,6 +69,15 @@ pub const DICTIONARY_DOMAIN: &[u8] = b"MOCHI2-DICTIONARY\0";
 /// Draft (R3). §9.2 requires this one to be domain-separated.
 pub const COMMIT_ID_DOMAIN: &[u8] = b"MOCHI2-COMMIT-ID\0";
 
+/// AEAD associated-data prefixes of the Encrypted profile (spec Annex B.2.10
+/// items 3 and 5). They are **not** BLAKE3 scopes: they prefix the associated
+/// data of a key wrap and of a sealed object, so a ciphertext made for one
+/// purpose cannot authenticate as the other. Defined here and nowhere else.
+pub const KEY_WRAP_DOMAIN: &[u8] = b"MOCHI2-KEY-WRAP\0";
+pub const OBJECT_SEAL_DOMAIN: &[u8] = b"MOCHI2-OBJECT-SEAL\0";
+/// Every AEAD prefix, for the distinctness test.
+pub const AEAD_DOMAINS: &[&[u8]] = &[KEY_WRAP_DOMAIN, OBJECT_SEAL_DOMAIN];
+
 /// Every separator in use, for tests that check the set is prefix-free.
 /// The file-content scope is unseparated and deliberately absent (O20).
 pub const ALL_DOMAINS: &[&[u8]] = &[
@@ -462,6 +471,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The AEAD prefixes (D20) follow the same convention and collide with
+    /// no BLAKE3 scope, so a separator is never a prefix of another.
+    #[test]
+    fn aead_prefixes_are_distinct_from_every_scope() {
+        for (i, a) in AEAD_DOMAINS.iter().enumerate() {
+            assert!(a.starts_with(b"MOCHI2-"), "{a:?}");
+            assert_eq!(a.last(), Some(&0), "{a:?} must end in NUL");
+            assert_eq!(a.iter().filter(|b| **b == 0).count(), 1, "{a:?}");
+            for b in ALL_DOMAINS.iter().chain(AEAD_DOMAINS.iter()) {
+                if a != b {
+                    assert!(!b.starts_with(a), "{a:?} is a prefix of {b:?}");
+                    assert!(!a.starts_with(b), "{b:?} is a prefix of {a:?}");
+                }
+            }
+            for (j, b) in AEAD_DOMAINS.iter().enumerate() {
+                assert_eq!(i == j, a == b);
+            }
+        }
+        assert_eq!(KEY_WRAP_DOMAIN.len(), 16);
+        assert_eq!(OBJECT_SEAL_DOMAIN.len(), 19);
     }
 
     #[test]

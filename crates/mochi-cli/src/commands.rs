@@ -350,7 +350,7 @@ pub fn create(env: &mut Env<'_>, a: &CreateArgs) -> Result<u8> {
         &ctx,
     )?;
     let opts = WriterOptions {
-        read: env.read,
+        read: env.read.clone(),
         chunk_size: a.chunk_size,
         zstd_level: a.compression_level,
         record_time: true,
@@ -399,7 +399,7 @@ pub fn append(env: &mut Env<'_>, a: &AppendArgs) -> Result<u8> {
         TailRepair::Refuse
     };
     let opts = WriterOptions {
-        read: env.read,
+        read: env.read.clone(),
         record_time: true,
         ..WriterOptions::default()
     };
@@ -1237,7 +1237,7 @@ pub fn verify_cmd(env: &mut Env<'_>, a: &VerifyArgs, deep: bool) -> Result<u8> {
     };
     let opts = VerifyOptions {
         level: level(a.level),
-        read: env.read,
+        read: env.read.clone(),
         anchor,
         require_freshness: a.require_freshness,
         deep,
@@ -1517,7 +1517,7 @@ fn require_confirm(confirm: bool, what: &str) -> Result<()> {
 }
 
 pub fn snapshot_retain(env: &mut Env<'_>, a: &RetainArgs) -> Result<u8> {
-    let w = open_writer(&a.archive, env.read)?;
+    let w = open_writer(&a.archive, env.read.clone())?;
     let mut tx = Transaction::new();
     tx.hold(a.label.as_bytes(), a.snapshot);
     let detail = json!({"hold": {"label": a.label, "seq": a.snapshot}});
@@ -1531,7 +1531,7 @@ pub fn snapshot_retain(env: &mut Env<'_>, a: &RetainArgs) -> Result<u8> {
 
 pub fn snapshot_expire(env: &mut Env<'_>, a: &ExpireArgs) -> Result<u8> {
     require_confirm(a.confirm, "expiring a snapshot")?;
-    let w = open_writer(&a.archive, env.read)?;
+    let w = open_writer(&a.archive, env.read.clone())?;
     let mut tx = Transaction::new();
     for s in &a.snapshots {
         tx.expire(*s);
@@ -1553,7 +1553,7 @@ pub fn snapshot_expire(env: &mut Env<'_>, a: &ExpireArgs) -> Result<u8> {
 
 pub fn snapshot_release(env: &mut Env<'_>, a: &ReleaseArgs) -> Result<u8> {
     require_confirm(a.confirm, "releasing a legal hold")?;
-    let w = open_writer(&a.archive, env.read)?;
+    let w = open_writer(&a.archive, env.read.clone())?;
     let mut tx = Transaction::new();
     tx.release(a.label.as_bytes());
     let what = format!("legal hold {} released", text(a.label.as_bytes()));
@@ -1562,7 +1562,7 @@ pub fn snapshot_release(env: &mut Env<'_>, a: &ReleaseArgs) -> Result<u8> {
 }
 
 pub fn checkpoint(env: &mut Env<'_>, a: &CheckpointArgs) -> Result<u8> {
-    let mut w = open_writer(&a.archive, env.read)?;
+    let mut w = open_writer(&a.archive, env.read.clone())?;
     w.request_checkpoint();
     commit_maintenance(
         env,
@@ -1724,7 +1724,7 @@ fn rewrite(
     let (mut out_dir, out_name) = location(output)?;
     // The source's publication lock is held from here until the new archive
     // is published, so no commit can land in between (D18).
-    let w = open_writer(archive, env.read)?;
+    let w = open_writer(archive, env.read.clone())?;
     let keep = match &saved {
         None => Keep::Every,
         Some((value, archive_id, head)) => {

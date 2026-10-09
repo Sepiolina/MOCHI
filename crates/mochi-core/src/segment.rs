@@ -334,6 +334,8 @@ mod tests {
             required_features: vec![],
             time: None,
             descriptor: r(0, 56, 6),
+            key_envelopes: Vec::new(),
+            data_region: None,
         };
         let commit_id = commit.commit_id().unwrap();
         HistoryEntry {
@@ -525,6 +527,7 @@ mod tests {
             retention_ops: Vec::new(),
             retention: Default::default(),
             provenance: None,
+            keys: Default::default(),
         }
     }
 

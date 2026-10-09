@@ -41,6 +41,7 @@ use mochi_format::envelope::{check_required_features, encode_cbor_record};
 use mochi_format::frame::{walk_frame, FrameDetail};
 use mochi_format::registry::{FrameKind, DESCRIPTOR_OFFSET, SKIPPABLE_HEADER_LEN};
 use mochi_format::repr::StoredObject;
+use mochi_format::seal::FEATURE_ENCRYPTED;
 use mochi_format::version::WIRE_GENERATION;
 use mochi_format::Limits;
 
@@ -54,8 +55,9 @@ pub const SCHEMA_VERSION: u64 = 0;
 /// wire batch. A ratified archive carries null.
 pub const DRAFT_ID: u64 = 1;
 
-/// Required features this build understands. None; fail closed.
-pub const KNOWN_REQUIRED_FEATURES: &[u64] = &[];
+/// Required features this build understands: the Encrypted profile's
+/// identifier (Annex B.2.10 D20 item 4, suite 1). Anything else fails closed.
+pub const KNOWN_REQUIRED_FEATURES: &[u64] = &[FEATURE_ENCRYPTED];
 
 /// Limits a writer declared on opting out of the defaults (key 6; B.2.3).
 /// Advisory only: readers never raise their own limits from these.
@@ -116,15 +118,29 @@ impl Descriptor {
         }
     }
 
-    /// The profile this archive was created with. `encrypted` is always
-    /// false here: the Encrypted profile's required-feature identifier is
-    /// not assigned yet (the cryptographic ratification item, §28), so a
-    /// descriptor that declares any required feature is refused at decode
-    /// and never reaches this point.
+    /// A descriptor for a new Encrypted-profile archive (D20): required
+    /// feature 1, not TAR-compatible. It never locates key envelopes (D12);
+    /// commits do.
+    pub fn new_encrypted(archive_id: ArchiveId) -> Self {
+        Descriptor {
+            archive_id,
+            required_features: vec![FEATURE_ENCRYPTED],
+            tar_compatible: false,
+            declared_limits: None,
+        }
+    }
+
+    /// Whether the archive was created in the Encrypted profile: the
+    /// required-feature identifier of D20 is listed.
+    pub fn encrypted(&self) -> bool {
+        self.required_features.contains(&FEATURE_ENCRYPTED)
+    }
+
+    /// The profile this archive was created with.
     pub fn profile(&self) -> Profile {
         Profile {
             tar_compatible: self.tar_compatible,
-            encrypted: false,
+            encrypted: self.encrypted(),
         }
     }
 
@@ -253,6 +269,13 @@ impl Descriptor {
             }
         };
         f.finish()?;
+        // D20 item 4: an Encrypted archive cannot be TAR-compatible, whatever
+        // the two fields were each written as.
+        if required_features.contains(&FEATURE_ENCRYPTED) && tar_compatible {
+            return Err(invalid(
+                "the descriptor declares both the Encrypted profile and the TAR-compatible                  constraint, which cannot be combined (Annex B.2.10 D20 item 4)",
+            ));
+        }
         Ok(Descriptor {
             archive_id,
             required_features,
@@ -367,13 +390,47 @@ mod tests {
 
     #[test]
     fn writer_refuses_unknown_or_unsorted_features() {
+        // Feature 1 is the Encrypted profile (D20); 2 is not assigned.
         let mut x = d();
-        x.required_features = vec![1];
+        x.required_features = vec![2];
         assert_eq!(
             x.to_stored().unwrap_err().code,
             ErrorCode::UnsupportedFeature
         );
         x.required_features = vec![2, 1];
         assert_eq!(x.to_stored().unwrap_err().code, ErrorCode::EnvelopeInvalid);
+    }
+
+    /// D20 item 4: feature 1 makes an Encrypted descriptor, with no schema
+    /// change; combined with the TAR constraint it is `DESCRIPTOR_INVALID`.
+    #[test]
+    fn the_encrypted_feature_makes_an_encrypted_descriptor() {
+        let e = Descriptor::new_encrypted(ArchiveId::from_bytes([7; 32]));
+        assert!(e.encrypted() && !e.tar_compatible);
+        assert_eq!(
+            e.profile(),
+            Profile {
+                tar_compatible: false,
+                encrypted: true
+            }
+        );
+        assert_eq!(rt(&e).unwrap(), e);
+        assert!(!d().encrypted());
+        // Same wire shape as Core except key 4 lists 1.
+        let want = [0x04, 0x81, 0x01, 0x05, 0xA1, 0x00, 0xF4];
+        let s = e.to_stored().unwrap();
+        assert!(s.as_bytes().windows(want.len()).any(|w| w == want));
+
+        let mut both = e.clone();
+        both.tar_compatible = true;
+        let stored = both.to_stored().unwrap();
+        let err = Descriptor::from_stored(
+            stored.as_bytes(),
+            0,
+            &Limits::default(),
+            &CborLimits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::DescriptorInvalid);
     }
 }

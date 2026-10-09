@@ -26,6 +26,7 @@ pub fn fuzz_limits() -> Limits {
         max_commit_frame_len: 1 << 16,
         max_decoded_object_len: 1 << 20,
         max_required_features: 64,
+        ..Limits::default()
     }
 }
 
@@ -520,7 +521,7 @@ fn deep_verify_is_sound(storage: &crate::SimStorage, opts: &mochi_core::publish:
     };
     let o = VerifyOptions {
         level: VerificationLevel::Structural,
-        read: *opts,
+        read: opts.clone(),
         deep: true,
         ..VerifyOptions::default()
     };

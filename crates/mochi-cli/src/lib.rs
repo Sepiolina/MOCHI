@@ -85,7 +85,8 @@ pub fn exit_code_for(code: ErrorCode) -> u8 {
         | ErrorCode::DurabilityUnconfirmed
         | ErrorCode::NameCollision
         | ErrorCode::NameUnsupported
-        | ErrorCode::AttributeNotRestored => exit::ERROR,
+        | ErrorCode::AttributeNotRestored
+        | ErrorCode::KeyUnavailable => exit::ERROR,
     }
 }
 

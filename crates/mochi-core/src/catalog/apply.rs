@@ -441,6 +441,7 @@ mod tests {
             retention_ops: Vec::new(),
             retention: Default::default(),
             provenance: None,
+            keys: Default::default(),
         };
         m.canonicalize();
         m

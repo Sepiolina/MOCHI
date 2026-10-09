@@ -160,18 +160,22 @@ pub const DEFAULT_CHUNK_SIZE: u64 = 8 << 20;
 // ---- options -------------------------------------------------------------------
 
 /// Limits for reading untrusted archives (spec §8.5).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ReadOptions {
     pub limits: Limits,
     pub catalog: CatalogLimits,
     pub cbor: CborLimits,
+    /// The passphrases of an Encrypted-profile archive and the data keys they
+    /// have opened (Annex B.2.10 D20). `None` reads such an archive keylessly:
+    /// structure, hashes, and key envelopes, never names or content.
+    pub keys: Option<std::sync::Arc<crate::keys::KeySession>>,
 }
 
 /// Writer configuration. `None` parameters mean "the archive's recorded
 /// value" when appending, and the product default when creating. A value
 /// that differs from what the archive recorded at creation is refused rather
 /// than silently ignored or silently changed.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct WriterOptions {
     pub read: ReadOptions,
     pub chunk_size: Option<u64>,
@@ -741,7 +745,7 @@ pub fn read_commit(
 /// Load a referenced object and check its stored-object hash **before**
 /// anything parses it. The range must end at or before `limit` (the commit
 /// frame's offset: a commit references only bytes its footer publishes).
-fn load_verified(
+pub(crate) fn load_verified(
     src: &dyn ReadStorage,
     r: &ObjectRef,
     limit: u64,
@@ -3706,6 +3710,7 @@ impl<S: Storage> ArchiveWriter<S> {
             retention_ops: tx.retention.clone(),
             retention: Default::default(),
             provenance: tx.provenance.clone(),
+            keys: Default::default(),
         };
         manifest.canonicalize();
         let delta_manifest = self.append_object(&manifest.to_stored()?)?;
@@ -3830,6 +3835,8 @@ impl<S: Storage> ArchiveWriter<S> {
             required_features: Vec::new(),
             time,
             descriptor,
+            key_envelopes: Vec::new(),
+            data_region: None,
         };
         let (commit_frame, commit_id) = record.to_stored()?;
         if commit_frame.len() > self.read.limits.max_commit_frame_len {

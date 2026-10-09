@@ -155,6 +155,13 @@ pub enum ErrorCode {
     /// (path, type, size, attributes, or content) (Annex B.2.9 D19). Exit 1.
     /// Added in C10.
     ProfileViolation,
+    /// The archive is encrypted and the operation needs its data key, but no
+    /// passphrase was supplied or none of the supplied passphrases opens a
+    /// key envelope (Annex B.2.10 D20 item 9). A wrong passphrase is not
+    /// evidence that the archive is damaged, so this is operational (exit 3)
+    /// and never a `verify` finding. Messages and reports never contain the
+    /// passphrase. Added in C11.
+    KeyUnavailable,
 }
 
 impl ErrorCode {
@@ -200,6 +207,7 @@ impl ErrorCode {
         ErrorCode::ReferenceInvalid,
         ErrorCode::FreshnessFailed,
         ErrorCode::ProfileViolation,
+        ErrorCode::KeyUnavailable,
     ];
 
     /// The stable string form. Independent of serde so it cannot drift silently;
@@ -246,6 +254,7 @@ impl ErrorCode {
             ErrorCode::ReferenceInvalid => "REFERENCE_INVALID",
             ErrorCode::FreshnessFailed => "FRESHNESS_FAILED",
             ErrorCode::ProfileViolation => "PROFILE_VIOLATION",
+            ErrorCode::KeyUnavailable => "KEY_UNAVAILABLE",
         }
     }
 }
@@ -312,6 +321,7 @@ impl From<FormatError> for MochiError {
             ErrorClass::ContentIntegrity => ErrorCode::ContentIntegrityFailed,
             ErrorClass::Record => ErrorCode::RecordInvalid,
             ErrorClass::CapacityExceeded => ErrorCode::CapacityExceeded,
+            ErrorClass::KeyUnavailable => ErrorCode::KeyUnavailable,
         };
         MochiError::new(code, err.to_string())
     }
@@ -376,6 +386,8 @@ mod tests {
         "FRESHNESS_FAILED",
         // Appended in C10.
         "PROFILE_VIOLATION",
+        // Appended in C11.
+        "KEY_UNAVAILABLE",
     ];
 
     #[test]
@@ -459,6 +471,28 @@ mod tests {
             (
                 FormatError::UnsupportedRequiredFeature { feature: 1 },
                 ErrorCode::UnsupportedFeature,
+            ),
+            // D20: the sealed-object faults map to the registered codes the
+            // spec names (B.2.10 item 9).
+            (
+                FormatError::Seal(mochi_format::error::SealFault::NoKey),
+                ErrorCode::KeyUnavailable,
+            ),
+            (
+                FormatError::Seal(mochi_format::error::SealFault::Authentication),
+                ErrorCode::ContentIntegrityFailed,
+            ),
+            (
+                FormatError::Seal(mochi_format::error::SealFault::KeyIdMismatch),
+                ErrorCode::RecordInvalid,
+            ),
+            (
+                FormatError::Seal(mochi_format::error::SealFault::UnknownSuite { suite: 9 }),
+                ErrorCode::UnsupportedFeature,
+            ),
+            (
+                FormatError::Seal(mochi_format::error::SealFault::BadKdfParameters),
+                ErrorCode::RecordInvalid,
             ),
         ];
         for (err, code) in cases {

@@ -51,7 +51,25 @@ pub const MAX_BINARY_ENVELOPE_HEADER: u64 = 80 + 8 * DEFAULT_REQUIRED_FEATURES;
 /// bytes, so the largest header plus the image fits one skippable frame.
 pub const DEFAULT_IMAGE_PAYLOAD: u64 = DEFAULT_SKIPPABLE_PAYLOAD - MAX_BINARY_ENVELOPE_HEADER;
 
+/// Bytes sealing adds to a payload (spec Annex B.2.10 item 5): the 48-byte
+/// sealed header and the 16-byte tag.
+pub const SEAL_OVERHEAD: u64 = 64;
+
+/// Catalog-image payload budget of an Encrypted archive (B.2.10 item 5): the
+/// binary envelope header (at most 592 bytes) and the 64 bytes of sealing
+/// both come out of *S*, so *S* − 656 = 268,434,800.
+pub const DEFAULT_SEALED_IMAGE_PAYLOAD: u64 = DEFAULT_IMAGE_PAYLOAD - SEAL_OVERHEAD;
+
+/// Reader defaults for the Encrypted profile's key derivation (B.2.10 item 1):
+/// at most 1 GiB of Argon2id memory, 16 passes, 16 lanes, and 16 key
+/// envelopes per commit.
+pub const DEFAULT_KDF_MEMORY_KIB: u64 = 1 << 20;
+pub const DEFAULT_KDF_ITERATIONS: u64 = 16;
+pub const DEFAULT_KDF_LANES: u64 = 16;
+pub const DEFAULT_KEY_ENVELOPES: u64 = 16;
+
 // The figures B.2.3 states, pinned at compile time.
+const _: () = assert!(DEFAULT_SEALED_IMAGE_PAYLOAD == 268_434_800);
 const _: () = assert!(DEFAULT_FRAME_LEN == 269_484_032);
 const _: () = assert!(DEFAULT_IMAGE_PAYLOAD == 268_434_864);
 const _: () = assert!(DEFAULT_COMMIT_FRAME_LEN == 65_544);
@@ -76,6 +94,15 @@ pub struct Limits {
     /// Most required features one record may list (B.2.3). Applies to both
     /// envelope encodings (D11).
     pub max_required_features: u64,
+    /// Most Argon2id memory (KiB) a key envelope may declare (B.2.10 item 1).
+    /// Checked before any memory is allocated.
+    pub max_kdf_memory_kib: u64,
+    /// Most Argon2id passes a key envelope may declare.
+    pub max_kdf_iterations: u64,
+    /// Most Argon2id lanes a key envelope may declare.
+    pub max_kdf_lanes: u64,
+    /// Most key envelopes one commit may list.
+    pub max_key_envelopes: u64,
 }
 
 impl Limits {
@@ -89,6 +116,10 @@ impl Limits {
         max_commit_frame_len: DEFAULT_COMMIT_FRAME_LEN,
         max_decoded_object_len: DEFAULT_DECODED_OBJECT,
         max_required_features: DEFAULT_REQUIRED_FEATURES,
+        max_kdf_memory_kib: DEFAULT_KDF_MEMORY_KIB,
+        max_kdf_iterations: DEFAULT_KDF_ITERATIONS,
+        max_kdf_lanes: DEFAULT_KDF_LANES,
+        max_key_envelopes: DEFAULT_KEY_ENVELOPES,
     };
 }
 
@@ -110,6 +141,11 @@ mod tests {
         assert_eq!(l.max_commit_frame_len, 8 + 65_536);
         assert_eq!(l.max_decoded_object_len, 268_435_456);
         assert_eq!(l.max_required_features, 64);
+        assert_eq!(l.max_kdf_memory_kib, 1_048_576);
+        assert_eq!(l.max_kdf_iterations, 16);
+        assert_eq!(l.max_kdf_lanes, 16);
+        assert_eq!(l.max_key_envelopes, 16);
+        assert_eq!(DEFAULT_SEALED_IMAGE_PAYLOAD, 268_434_800);
         assert_eq!(DEFAULT_IMAGE_PAYLOAD, 268_434_864);
     }
 

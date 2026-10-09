@@ -269,6 +269,8 @@ The compatibility claim MUST identify supported tools and tested versions. It MU
 
 Adds authenticated encryption and key-envelope handling.
 
+**[Amendment, Annex B.2.10 D20: decided as a design for review; implementation pending (B.2.6, G10)]** The profile seals data chunks, catalog images, and manifests with XChaCha20-Poly1305 under one data key per archive, wrapped per passphrase with Argon2id in key envelopes that every commit record lists. Required-feature identifier 1.
+
 Generic Zstandard decoding does not constitute decryption or meaningful file extraction.
 
 ### 7.4 Redundancy profile
@@ -735,6 +737,8 @@ The cryptographic profile MUST define:
 AES-256-GCM and ChaCha20-Poly1305 remain candidate suites. They MUST NOT be treated as interchangeable implementations of an unspecified profile.
 
 Ciphertext MUST NOT be mislabeled as an ordinary compressed-content frame. This design proposes a dedicated skippable encrypted-object envelope.
+
+**[Amendment, Annex B.2.10 D20]** The cryptographic profile is defined there: suite, key derivation, envelope formats, nonces, associated data, key identifiers, ciphertext framing, errors, and `docs/ratification/R5-crypto-draft.md` with vectors. Of §14.1's two candidate suites, 1.0 uses neither: it uses XChaCha20-Poly1305 (D3).
 
 **[1.0 integration]** *Change from v1.2.* v1.2 placed ciphertext inside `0xFD2FB528` data frames and claimed generic tools could "skip cleanly." They cannot: a Zstandard decoder would attempt to decode the ciphertext and fail. Encrypted objects now use the `0x184D2A59` envelope (Section 8.2), which generic decoders do skip. Candidate primitives carried from v1.2, pending ratification: AES-256-GCM or ChaCha20-Poly1305 (one suite per profile identifier, not interchangeable), Argon2id for passphrase derivation, HKDF-SHA256 for key-file or public-key material.
 
@@ -1480,6 +1484,7 @@ Each decision blocks the listed work until recorded in this annex. D1–D9 are r
 | D18 | **Decided by the owner on 2026-10-07 (plan C9); wire format: recovery-manifest schema 2.** Retention is expiry plus legal holds; collection and compaction write a new archive with a new archive ID and provenance; the source is never removed automatically. See B.2.8 | — | C9; D4 (desktop retention UI); C14 `snapshot`, `gc`, `compact` |
 
 | D19 | **Decided [delegated 2026-10-08]; no wire change.** The TAR-stream compatibility profile (spec 7.2) is written by emitting, per commit with at least one put, one complete POSIX pax TAR stream whose non-content bytes live in ordinary data chunks that no extent references (*stream-only chunks*). See B.2.9 | — | C10; C9 (GC accounting, rewrites keep the profile); C7 (`PROFILE_VIOLATION`); desktop "create" dialog (D4) |
+| D20 | **Decided [delegated 2026-10-09]; wire format: key envelope v0, sealed object v0, commit record schema 2, recovery-manifest schema 3, required feature 1.** The Encrypted profile (spec 7.3, 14) seals data chunks, catalog images, and manifests with XChaCha20-Poly1305 under one random data key per archive, wrapped per passphrase (Argon2id) in key envelopes that every commit record lists. See B.2.10 | — | C11 and `rekey`; R5; desktop passphrase flows |
 
 Status of the open questions from the original v1.2 review: chunk-hash ordering — resolved (9.2); concurrent writers — resolved for Core (12.5); `content_index` schema — superseded, DDL is a ratification artifact (10.1); version-byte mapping — reframed by Section 26 and D1; Windows attribute defaults — D6.
 
@@ -1645,6 +1650,8 @@ No object contains the ID of the commit that references it. The commit ID covers
 | Commit record v1 | `0x184D2A51` | `docs/schemas/commit-record-v1.cddl` |
 | Recovery manifest v1 (delta / snapshot) | `0x184D2A58` | `docs/schemas/recovery-manifest-v1.cddl` |
 | Archive descriptor v0 | `0x184D2A57`, offset 0 | `docs/schemas/archive-descriptor-v0.cddl` |
+| Commit record v2, manifest v3, key envelope v0 (Encrypted profile only; D20) | `0x184D2A51`, `0x184D2A58`, `0x184D2A5C` | `commit-record-v2.cddl`, `recovery-manifest-v3.cddl`, `key-envelope-v0.cddl` |
+| Sealed object v0 (Encrypted profile only; D20) | `0x184D2A59` | Binary layout in B.2.10 item 5 |
 | Catalog image | `0x184D2A50` | Binary envelope v0 (below) + SQLite image |
 | Tail-quarantine sidecar v0 | Not in the archive | `docs/schemas/tail-quarantine-v0.cddl` |
 
@@ -1788,6 +1795,7 @@ Every mandatory checkpoint must fit within all of the limits above, so archive s
 - **D10.4** (2026-10-04). Introduction versus reference during replay, and its relation to §10.2 (Q18, Q26); unknown required feature versus unknown operation kind (Q19).
 - **D10.6** (2026-10-03 and 2026-10-04). Parent traversal offset versus base footer hint (Q17, Q23); one descriptor per segment (Q16).
 - **D12** (2026-10-04). Placement note tying the single descriptor to D10.6.
+- **§7.3, §14.1** (2026-10-09). Pointers to D20 (B.2.10), the cryptographic profile this section required. B.2.2's wire-layout table lists the Encrypted-profile structures.
 - **B.2.3, B.2.4** (2026-10-05, from the T32 measurements). Storage-bound terms defined (ΣΔ, *B*₀, *B*_forced); α and *F* defaults confirmed; measured catalog and decoded-CBOR memory; B.2.4's estimates replaced by measurements.
 
 #### B.2.6 Evidence and release gates
@@ -1828,7 +1836,13 @@ These are pending. None is satisfied by this text. Every gate's tests must pass 
   - First-sight `UNKNOWN` freshness gives exit 0.
   - The mixed outcomes each give their expected exit code: `FAIL` with an I/O error, 1; a `FAIL` in a dimension that is not required, 1; a required `UNSUPPORTED` with an I/O error, 3; a required `UNSUPPORTED` with a required `UNKNOWN`, 4; an `UNSUPPORTED` that is not required with a required `DEGRADED`, 2.
   - The timestamp property test passes.
-
+- **G10 Encrypted profile (D20, B.2.10 item 15).**
+  - The R5 vectors pass in the implementation: XChaCha20-Poly1305 (CFRG draft), HChaCha20, Argon2id (RFC 9106), the NFC rule, and the key-envelope, sealed-object, and commit layouts.
+  - A wrong passphrase fails closed with no partial output (`KEY_UNAVAILABLE`, exit 3); a tag failure on a hash-verified object is `CONTENT_INTEGRITY_FAILED`.
+  - A property test over many writes, retries, crash and reopen, rewraps, and re-encryption finds all nonces distinct.
+  - Without a key, stored-integrity verification passes while content levels, Recoverability, and Key availability are `UNKNOWN`; with the key, everything passes.
+  - The dedup-equality leak exists and is asserted. Secrets never appear in `Debug` output or errors.
+  - Hostile KDF parameters are refused before any allocation. Fuzz targets cover the key-envelope and sealed-object decoders.
 
 #### B.2.7 Writer lock (D17; decided by the owner 2026-10-06, plan Q54)
 
@@ -1877,6 +1891,80 @@ The profile is writer-side only. It adds no frame kind, no schema, no record fie
 10. **Documented invocation and claim** (spec 7.2). `zstd -dc ARCHIVE.mochi | tar -x --ignore-zeros -f - -C DIR`, with GNU tar and with bsdtar (libarchive, Windows `tar.exe`); a tool that needs another flag (for example bsdtar's `--options read_concatenated_archives`) gets its exact command in `docs/c10-tar-compat.md`. The claim names only the tools and versions that CI ran (`tar interop` job); it is never "POSIX compatible" and never covers an untested tool.
 
 **Open items recorded here.** (a) Default `Dedup` was `InArchive` with no way to tell a request from the default, so the writer option gained an `Auto` default (rule 2). (b) Sparse files (holes) are not stored by the Core writer either; the rule is a guard for future writers. (c) Whether the desktop app offers the profile at creation is D4's UI question and is unchanged.
+
+#### B.2.10 Encrypted profile (D20; decided by delegation 2026-10-09, plan C11)
+
+**Status: design for review.** Nothing here is implemented. The layouts below are permanent once archives exist, so the implementation PR does not merge before this text, `docs/schemas/key-envelope-v0.cddl`, `docs/schemas/commit-record-v2.cddl`, `docs/schemas/recovery-manifest-v3.cddl`, and `docs/ratification/R5-crypto-draft.md` (with `R5-vectors/`) have been reviewed. It fills the gaps §14.1 lists (suite, key derivation, envelope formats, nonces, associated data, key identifiers, ciphertext framing, errors, vectors) and keeps D3 and D12.
+
+1. **Suite and parameters (D3).**
+   - **AEAD.** XChaCha20-Poly1305 (draft-irtf-cfrg-xchacha) with a 32-byte key, a **fresh random 24-byte nonce for every encryption** from the operating system's CSPRNG, and a 16-byte tag. There is no counter, no nonce derived from content or position, and no deterministic encryption anywhere (§14.2). Suite identifier **1**.
+   - **Key derivation.** Argon2id (RFC 9106), version 0x13, 32-byte output, a 16-byte random salt per key envelope. Writer defaults: **m = 65,536 KiB, t = 3, p = 4** (RFC 9106 §4, second recommended option). Writers expose no other parameters in 1.0.
+   - **Reader limits**, checked before any Argon2 memory is allocated: m > 1 GiB (1,048,576 KiB), t > 16, or p > 16 is `LIMIT_EXCEEDED`, naming the declared value; a reader raises these only by an explicit `--limit`. m < 8·p, t < 1, p < 1, or a salt that is not 16 bytes is `RECORD_INVALID`. An unknown KDF identifier or Argon2 version is `UNSUPPORTED_FEATURE`. Readers enforce no *minimum* cost (item 14, open item c).
+2. **Passphrase.** The UTF-8 bytes of the passphrase after Unicode **NFC** normalization, so the same passphrase typed through a Windows or an Ubuntu input method derives the same key. An empty passphrase, or one longer than 4,096 bytes after normalization, is `INVALID_ARGUMENT`. Passphrases and every key live in `zeroize` types, are never `Debug`-printed, logged, or put in an error message, and cross the desktop IPC once.
+3. **Keys and key envelopes.**
+   - **Data key (DEK).** One random 256-bit key per archive, drawn at creation, with a random 128-bit **key ID** that names it. Every data chunk, catalog image, and manifest is sealed under it (item 5).
+   - **Key envelope.** Each passphrase yields a KEK by item 1, and the KEK wraps the DEK in a **key envelope**: one skippable frame, kind `0x184D2A5C`, deterministic CBOR (D2), schema `key-envelope-v0.cddl`. Fields: the D11 identity (archive ID, the writing commit's sequence and transaction ID, required features `[1]`), a random 128-bit **envelope ID**, the key ID, the suite, the KDF identifier and parameters and salt, a random 24-byte wrap nonce, and the wrapped DEK with its tag (48 bytes).
+   - **Wrap associated data**, fixed-width fields in this order, the last of variable length: the 16 bytes `MOCHI2-KEY-WRAP` 0x00 (defined once, in `mochi-format/src/digest.rs`), the 32-byte archive ID, the 16-byte envelope ID, the 16-byte key ID, the suite as a u16 little-endian, and the exact bytes of the envelope's KDF-parameter map (its canonical CBOR). A parameter altered in the file therefore fails the unwrap instead of weakening the key.
+   - **Several envelopes may wrap the same DEK** (several passphrases); every envelope of one archive carries the same key ID (else `RECORD_INVALID`). A reader tries a commit's envelopes in listed order and stops at the first that opens. At most **16** envelopes per commit.
+   - **Envelope identity (D11).** An envelope belongs to the commit that wrote it; later commits reference it without rewriting it. A reader checks the archive ID against the referencing commit and that the sequence is not after the referencing commit.
+4. **Discovery and the required feature (§14.3, D12).**
+   - **Commit record schema 2** (`commit-record-v2.cddl`) adds key 11, the **complete** list of the key envelopes valid at that commit (references with stored-object hashes, listed in increasing envelope-ID order), so a reader finds them from the footer-verified head **without decrypting anything**. The descriptor never locates envelopes (D12). A commit's envelope set is bound by the commit ID and the footer chain like any other reference.
+   - **The Encrypted profile's required-feature identifier is 1** (the first unassigned value; suite 1, XChaCha20-Poly1305 with Argon2id). Descriptor key 4 lists it, as do every commit record's key 7, every manifest's key 9, and every catalog image's envelope; `KNOWN_REQUIRED_FEATURES` of this version of the format is `[1]` in all four. A reader that does not know it refuses the archive: `UNSUPPORTED_FEATURE`, exit 4. **The descriptor schema does not change**, and a feature identifier of 1 that earlier test code used as an "unknown feature" must be replaced by an unassigned value (for example 2).
+   - **One profile per archive, agreed by every record.** Schema 2 commits and schema 3 manifests occur exactly in archives whose descriptor lists feature 1; any disagreement is `RECORD_INVALID`. An Encrypted archive cannot be TAR-compatible (descriptor constraint 0 must be false: `DESCRIPTOR_INVALID`; `create` refuses the combination with `INVALID_ARGUMENT`).
+5. **Sealed objects.** Data chunks, catalog images, and recovery manifests (delta and snapshot) are **compress-then-encrypt**: the plaintext is exactly the skippable payload (images, manifests) or the whole Zstandard frame (chunks) that the same object has in a Core archive, sealed and stored in one `0x184D2A59` frame. The frame replaces `0x184D2A50` (image), `0x184D2A58` (manifest), and the bare data frame; D11's rule that the frame kind match the referencing field is read accordingly (commit keys 5.1, 5.2, and 6 reference `0x184D2A59`; key 10 stays `0x184D2A57`). Layout (integers little-endian; every byte defined):
+
+   | Offset | Size | Field | Rule |
+   |---|---|---|---|
+   | 0 | 2 | Sealed-object version | = 0; other values `UNSUPPORTED_FEATURE` |
+   | 2 | 2 | Suite | = 1; other values `UNSUPPORTED_FEATURE` |
+   | 4 | 4 | Object kind | 0 data chunk, 1 catalog image, 2 delta manifest, 3 snapshot manifest; other values `UNSUPPORTED_FEATURE` |
+   | 8 | 16 | Key ID | equals the key ID of the commit's envelopes (else `RECORD_INVALID`) |
+   | 24 | 24 | Nonce | fresh per encryption |
+   | 48 | n | Ciphertext | n = frame payload length − 64 ≥ 1 |
+   | 48 + n | 16 | Tag | |
+
+   - **Object associated data**, fixed width: the 19 bytes `MOCHI2-OBJECT-SEAL` 0x00 (defined once, in `digest.rs`), the 32-byte archive ID, header bytes 0 to 23 (version, suite, kind, key ID; the nonce is the AEAD's own input), then the **binding**: for a data chunk, the 32-byte object ID; for an image or manifest, the commit sequence (u64) and the 16-byte transaction ID (the D11 identity). A sealed frame therefore opens only in its own archive, at its own object, or its own commit.
+   - **Stored-object hash.** It covers the whole stored frame (header, ciphertext, tag), so **stored integrity needs no key**. Content integrity needs the key. The hash is checked before the header is parsed, as everywhere.
+   - **Sizes.** Sealing adds 64 bytes to a payload (header 48, tag 16), and 72 to a data chunk, which has no skippable header in Core. A writer enforces the B.2.3 limits on the sealed frame, so in an Encrypted archive a manifest's plaintext is at most *S* − 64 and the image payload budget is *S* − 656 = 268,434,800 bytes (the binary envelope header, at most 592, and the 64 bytes of sealing both come out of *S*).
+   - **Chunk entries in manifests.** Key 2 (protection) is 1 for every chunk, key 3 and 4 describe the whole sealed frame, key 7 (dependencies) is empty (the DEK is archive-wide), and dependency kind 1 stays reserved. `recovery-manifest-v3.cddl`.
+6. **What is plaintext, and what is visible.**
+   - **Plaintext:** the descriptor, commit records, footers, key envelopes (except the wrapped DEK, which is ciphertext), and every frame header and sealed-object header.
+   - **Visible without a key:** the archive ID; the wire generation and draft identifier; the commit count and sequence; each commit's parent link and footer offsets; the number, kinds, and sizes of objects (so the number of chunks and their compressed sizes, and roughly how many files a commit changed); envelope IDs, the key ID, KDF parameters, and salts; whether a commit added data.
+   - **Not visible without the key:** file names and paths, attributes, directory structure, file sizes and content hashes, the dedup relation, and content.
+   - **No commit times.** Writers of the Encrypted profile do not record commit times: the commit schema has no key 8. Anything that knows only the file learns no wall-clock time from it.
+   - **Compression lengths are visible.** Compress-then-encrypt leaks each chunk's compressed size, and a party who can inject chosen content into a chunk and observe sizes could learn about the rest of it (the CRIME and BREACH class). 1.0 does not compress across files, which limits but does not remove this. It is documented, not mitigated.
+7. **Data region (new commit key 12).** A commit's new data objects are written back to back, and key 12 names that byte range and its stored-object-scope hash (`null` when the commit adds no data). This is what lets a verifier that has no key hash every data object's stored bytes: the per-object hashes are in the sealed manifest. The range must walk as complete `0x184D2A59` frames of kind 0, end at or before the delta manifest's offset, and hash to the recorded value; otherwise `RECORD_INVALID` (shape) or `STORED_INTEGRITY_FAILED` (hash). With the key, `verify` additionally checks each object's own stored hash from the manifest and localizes damage to the object.
+8. **Deduplication under encryption** keeps working: the writer deduplicates by plaintext chunk hash, which lives in the sealed catalog, and a duplicate reuses the existing sealed chunk. **The equality leak exists and is documented** (plan C11 exit): a party who can compare the file before and after an append learns whether the appended content was already stored (no new data region); a party who can make the owner add chosen content, and sees the file grow or not, confirms whether that content is already in the archive. A test asserts the leak exists. TAR-compatible archives, which do not deduplicate, cannot be Encrypted (item 4).
+9. **Errors.**
+   - A key envelope whose stored hash verified but whose AEAD open fails, or no envelope opened with the supplied passphrase, or no passphrase was supplied for a command that needs one: new code **`KEY_UNAVAILABLE`**, **exit 3**: a wrong passphrase is not evidence that the archive is damaged. It is added to both exhaustive matches (`exit_code_for`, `verify::classify`, where it is operational). No command that needs the key creates any output before the key is unwrapped.
+   - A tag failure on a sealed object whose stored hash verified is `CONTENT_INTEGRITY_FAILED` (exit 1): the bytes are as written, and the object is not what it should be. A stored-hash mismatch is `STORED_INTEGRITY_FAILED`.
+   - Hostile KDF parameters: `LIMIT_EXCEEDED` (item 1). A malformed envelope or sealed header: `RECORD_INVALID`. An unknown suite, KDF, version, kind, or feature: `UNSUPPORTED_FEATURE`.
+   - **No partial output** in any of these: `get`, `restore`, and `restore-test` open the key before they create anything, and an object that fails mid-restore follows the existing restore rule (no half-written file is left).
+10. **Fixed at creation; rewrites; `rekey`.**
+    - **Profile fixed at creation** (D12): no in-place conversion to or from Encrypted; a request exits 4 (`PROFILE_CHANGE_UNSUPPORTED`). A rewrite does not convert either: `compact`, `gc apply`, and `repair apply` write a new archive **in the source's profile**.
+    - **Rewrites re-seal.** The associated data binds the archive ID, and a rewrite creates a new archive ID, so every sealed object is opened and sealed again. Each rewrite of an Encrypted archive therefore **needs a passphrase**, creates a **new DEK and key ID**, and writes new envelopes for the passphrases given (a passphrase not given again does not carry over). Without a passphrase, `compact`, `gc plan`, `gc apply`, `repair plan`, and `repair apply` fail with `KEY_UNAVAILABLE`: retention state and chunk references are sealed, so even a plan needs the key. What `verify` finds without a key is the keyless view (item 12). The new archive's delta(0) carries provenance (manifest key 12).
+    - **`rekey --add-passphrase` and `--remove-passphrase ENVELOPE_ID` are rewraps.** A rewrap writes one ordinary commit: no namespace operations, a new envelope frame for an addition, the new complete envelope set in commit key 11, and the **key operations** (manifest key 13: `[0, envelope ID]` add, `[1, envelope ID]` remove) as the rewrap's **audit record**. The DEK and key ID do not change and no data is rewritten. The set must never become empty; a commit's key 11 must equal the key state replayed from the manifests (checked wherever manifests are replayed with a key). Authentication: any passphrase of the head's set.
+    - **Removal is not revocation.** The removed envelope's frame stays in the file's history, and any earlier copy of the archive still opens with it. Output and documentation say so, and never say "revoked" or "secure".
+    - **`rekey --reencrypt` writes a new archive** through the rewrite path (never in place): new archive ID, new DEK, new key ID, one envelope per new passphrase, every snapshot kept. Its audit record is the provenance key 12 with `reason` 1 (manifest schema 3, key 3 of the provenance map); a collection or compaction carries reason 0. **Rewrap and re-encryption have separate audit records** (§14.4). Re-encryption does not recall copies already made.
+    - **`rekey --list`** shows the head's envelope IDs, creation sequence, and KDF parameters. It needs no key.
+11. **Passphrase entry (CLI).** An interactive prompt without echo (the `rpassword` crate), asked twice when a passphrase is created, or `--passphrase-file PATH` (the first line, line ending removed; read once; a warning if it is readable by others on Unix). **Never as an argument value.** The environment variable `MOCHI_PASSPHRASE` is read only behind `--passphrase-env-for-automation`, whose name and help say so. The desktop app follows AGENTS.md (a passphrase crosses IPC once and is not persisted unless the user opts into the OS credential store).
+12. **Reports and verification (§20).**
+    - **Without a passphrase**, `verify` runs the structural, referential, and `stored_integrity` levels. At `stored_integrity` it hashes the descriptor, every key envelope, every manifest and image, and every commit's data region: every stored byte a commit references. Integrity can be `PASS` at that level, and the report's scope says the content was not checked. Content-level checks (`content_integrity`, `restoration`) and Recoverability are `UNKNOWN`, and **Key availability is `UNKNOWN`**, each with a `skipped` item naming the reason (no key supplied). The overall status is therefore never `PASS`.
+    - **With the passphrase**, every level runs as for Core, and Key availability is `PASS` once an envelope unwrapped the DEK and each sealed object that level opens verified; a passphrase that opens nothing is `KEY_UNAVAILABLE` (exit 3), not a report.
+    - `mochi health` keeps reporting Key availability `UNKNOWN` from local evidence (never `PASS` in 1.0).
+13. **What the profile does not claim.** It protects the confidentiality of content, names, sizes of files, and structure beneath the visible set (item 6), and the integrity of every sealed object against modification **by a party without the key**. It does **not** authenticate the commit graph: commit records, footers, and the descriptor are plaintext and hash-chained, not signed (D12; signatures are post-1.0), so a party who can rewrite the whole file can roll it back, truncate it, or withhold commits (freshness, D8, still applies). It does not protect against a compromised endpoint, a weak passphrase (item 14), or traffic and size analysis. No wording in the CLI or the desktop app calls the result "safe", "secure", or "backed up" (§23.3).
+14. **Limits (B.2.3 additions).** The reader limits `max-kdf-memory-kib` (1,048,576), `max-kdf-iterations` (16), `max-kdf-lanes` (16), and `max-key-envelopes` (16) are reader limits like the others, raised only by `--limit`; the sealed budgets of item 5 apply to writers. No limit bounds the *total* time of a hostile archive's envelopes (up to 16 at the limits); the derivation is a cancellable job with progress, and the CLI prints the declared cost before it starts a derivation above the writer defaults. Readers enforce no minimum cost: an archive written with weak parameters is the writer's choice and is reported as a finding, not refused.
+15. **Evidence (gate G10).** The vectors in `docs/ratification/R5-vectors/vectors.json` pass (XChaCha20-Poly1305 from the CFRG draft; HChaCha20; Argon2id from RFC 9106; the NFC rule; the envelope and sealed-object layouts; the commit layout). Wrong key fails closed with no partial output. A property test over many writes, retries, crash and reopen, rewraps, and re-encryption finds every nonce distinct. Stored-integrity verify without a key passes while content levels and Key availability are `UNKNOWN`; with the key, everything passes. The dedup-equality leak is asserted to exist. Secrets never appear in `Debug` output or errors (the test output is searched). Hostile KDF parameters are refused before allocation. Fuzz targets cover the key-envelope and sealed-object decoders. Golden vectors are added deliberately, with the diff explained.
+
+**Open items recorded here.**
+(a) Item 7 (the data region) is a design choice beyond the plan's list: without it, a verifier with no key cannot check data objects at all, and the plan's claim that stored integrity verifies without keys would hold only for metadata. The alternative is to accept the weaker claim and report integrity `UNKNOWN` without a key.
+(b) The associated data binds the archive ID (item 5), so every rewrite re-seals and needs the passphrase (item 10). Binding the key ID alone would let `compact` copy sealed chunks, at the cost of letting a sealed frame move between archives that share a DEK, which D20 never creates.
+(c) No minimum Argon2id cost is enforced on readers. A reader-side floor would refuse archives written elsewhere; a warning is a finding.
+(d) NFC depends on a Unicode version; unassigned code points pass through unchanged. The pinned crate version is part of the compatibility claim and is recorded in R5.
+(e) Removing a passphrase does not revoke anything (item 10). Retiring a key while retained snapshots depend on it (§14.4) is therefore not a 1.0 operation.
+(f) If every envelope is damaged the archive is unreadable; 1.0 has no key recovery beyond the passphrase, and the Redundancy profile (C12) is the only repair for envelope damage.
+(g) `recovery-manifest-v2.cddl` does not yet draw key 12 (provenance), which the code defines and B.2.8 describes; `recovery-manifest-v3.cddl` restates it. The v2 file should be corrected when R3 is frozen.
+(h) Converting an archive to or from the Encrypted profile by rewrite is not offered (D12).
 
 ## Annex C. Document Lineage **[1.0 integration]**
 

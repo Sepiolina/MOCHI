@@ -1,0 +1,62 @@
+; MOCHI key envelope, schema version 0 (DRAFT; ratification item R5).
+; Decision: spec Annex B.2.10 (D20), rule 3 and 4.
+;
+; Stored as the payload of one skippable frame of kind KEY_ENVELOPE
+; (0x184D2A5C). Encoding: the deterministic-CBOR subset of Annex B.1 D2. A
+; reader MUST reject input that does not re-encode to identical bytes and
+; MUST reject unknown keys. The CBOR-native envelope (D11) is keys 0 to 4,
+; plus the frame kind and frame length.
+;
+; An envelope wraps the archive's one data key (DEK) under a key-encryption
+; key (KEK) derived from one passphrase. Several envelopes may wrap the same
+; DEK (several passphrases). Commits locate envelopes (commit-record-v2.cddl,
+; key 11); the descriptor never does (D12).
+;
+; Identity (D11): keys 1 to 3 name the commit that WROTE the envelope. Later
+; commits reference it without rewriting it, so a reader checks the archive
+; ID against the referencing commit, and the sequence against "not after the
+; referencing commit"; the introducing commit's transaction ID is recorded,
+; not checked against anything else.
+;
+; Wrapping (all byte layouts are fixed width except the last item):
+;   KEK   = Argon2id(NFC-UTF-8 passphrase, salt, m, t, p, version 0x13, 32 bytes)
+;   wrap  = XChaCha20-Poly1305(KEK, nonce = key 9, plaintext = DEK, AAD = wrap-aad)
+;   wrap-aad = "MOCHI2-KEY-WRAP" 0x00      ; 16 bytes (digest.rs)
+;           || archive ID                  ; 32 bytes
+;           || envelope ID (key 5)         ; 16 bytes
+;           || key ID (key 6)              ; 16 bytes
+;           || suite (key 7), u16 LE       ; 2 bytes
+;           || the exact bytes of key 8    ; the canonical CBOR of the kdf map, to the end
+; A failed AEAD open on an envelope whose stored-object hash verified is
+; KEY_UNAVAILABLE (a wrong passphrase), never a damage finding.
+
+key-envelope = {
+  0: 0,                       ; schema version
+  1: archive-id,              ; D11: archive identity
+  2: seq,                     ; D11: sequence of the commit that wrote this envelope
+  3: txid,                    ; D11: that commit's transaction ID
+  4: [1],                     ; required features: exactly the Encrypted profile's identifier (D20 item 4)
+  5: envelope-id,             ; random 128-bit; names this envelope in commit key 11 and in manifest key 13
+  6: key-id,                  ; random 128-bit; names the DEK; equal in every envelope of one archive
+  7: 1,                       ; suite: 1 = XChaCha20-Poly1305 with Argon2id (D3)
+  8: kdf,
+  9: bstr .size 24,           ; wrap nonce: fresh from the OS CSPRNG for every wrap, never derived
+  10: bstr .size 48,          ; wrapped DEK: 32 bytes of ciphertext, 16 bytes of tag
+}
+
+kdf = {
+  0: 1,                       ; 1 = Argon2id; other values are UNSUPPORTED_FEATURE
+  1: 19,                      ; Argon2 version 0x13; other values are UNSUPPORTED_FEATURE
+  2: uint .ge 8,              ; memory in KiB. m < 8*p is RECORD_INVALID; m > the reader's limit (default 1 GiB = 1048576) is LIMIT_EXCEEDED
+  3: uint .ge 1,              ; iterations t. t > the reader's limit (default 16) is LIMIT_EXCEEDED
+  4: uint .ge 1,              ; lanes p. p > the reader's limit (default 16) is LIMIT_EXCEEDED
+  5: bstr .size 16,           ; salt, fresh from the OS CSPRNG for every envelope
+}
+; The reader checks 2 to 4 against its limits BEFORE it allocates any Argon2
+; memory (D20 item 1). Output length is fixed at 32 bytes and not recorded.
+
+archive-id = bstr .size 32
+envelope-id = bstr .size 16
+key-id = bstr .size 16
+txid = bstr .size 16
+seq = uint

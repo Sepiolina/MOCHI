@@ -580,12 +580,21 @@ pub fn read_envelopes(
 }
 
 /// Open the data key for `commit`. `KEY_UNAVAILABLE` when the caller supplied
-/// no passphrase or none opens one of the commit's envelopes.
+/// no passphrase or none opens the key.
+///
+/// `strict` is for the **head**: the passphrase must open one of the head's
+/// own key envelopes, so that a passphrase removed by `rekey
+/// --remove-passphrase` does not open the head (B.2.10 item 10). A historical
+/// commit (`strict` false) is opened with the archive's data key if the
+/// session already holds it: the key is archive-wide, and whoever can open the
+/// head can read the history it contains. Otherwise the commit's own envelope
+/// set decides, as for the head.
 pub fn unlock_commit(
     src: &dyn ReadStorage,
     commit: &CommitRecord,
     limit: u64,
     opts: &ReadOptions,
+    strict: bool,
 ) -> Result<Arc<Unlocked>> {
     let Some(session) = &opts.keys else {
         return Err(MochiError::new(
@@ -593,6 +602,11 @@ pub fn unlock_commit(
             "this archive is encrypted: a passphrase is required",
         ));
     };
+    if !strict {
+        if let Some(u) = session.unlocked_for(&commit.archive_id) {
+            return Ok(u);
+        }
+    }
     let envelopes = read_envelopes(src, commit, limit, opts)?;
     let list: Vec<KeyEnvelope> = envelopes.into_iter().map(|(_, e)| e).collect();
     session.unlock(&list, &opts.limits)

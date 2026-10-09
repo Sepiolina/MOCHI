@@ -7,11 +7,15 @@
 //! was given.
 
 use mochi_core::commit::CommitRecord;
+use mochi_core::exit;
 use mochi_core::keys::read_envelopes;
 use mochi_core::publish::{
     open_head, ArchiveWriter, ReadOptions, TailPolicy, Transaction, WriterOptions,
 };
 use mochi_core::read::{list, read_file};
+use mochi_core::report::Report;
+use mochi_core::status::{Dimension, Status, VerificationLevel};
+use mochi_core::verify::{verify, VerifyOptions};
 use mochi_core::ErrorCode;
 use mochi_format::digest::stored_object_hash;
 use mochi_format::repr::StoredObject;
@@ -232,4 +236,177 @@ fn the_unencrypted_descriptor_cannot_be_combined_with_encryption_flags() {
     opts.read = ReadOptions::default();
     let e = ArchiveWriter::create(SimStorage::new(), Box::new(SeqIds::new(1)), opts).unwrap_err();
     assert_eq!(e.code, ErrorCode::InvalidArgument);
+}
+
+// ---- verification ----------------------------------------------------------------
+
+const LEVELS: [VerificationLevel; 5] = [
+    VerificationLevel::Structural,
+    VerificationLevel::Referential,
+    VerificationLevel::StoredIntegrity,
+    VerificationLevel::ContentIntegrity,
+    VerificationLevel::Restoration,
+];
+
+fn two_commit_archive() -> SimStorage {
+    let s = SimStorage::new();
+    let mut w = create(&s, encrypted_options(&[PASS]));
+    let mut tx = Transaction::new();
+    tx.put_dir(path("secret"), attrs(0o755, 0));
+    put(&mut tx, "secret/plans.txt", &content(21));
+    w.commit(tx, &Job::new().ctx()).unwrap();
+    let mut tx = Transaction::new();
+    put(&mut tx, "secret/more.txt", &content(22));
+    w.commit(tx, &Job::new().ctx()).unwrap();
+    w.close().unwrap();
+    s
+}
+
+fn run_verify(s: &SimStorage, level: VerificationLevel, read: ReadOptions) -> Report {
+    let v = verify(
+        s,
+        &VerifyOptions {
+            level,
+            read,
+            ..VerifyOptions::default()
+        },
+        &Job::new().ctx(),
+    );
+    v.report
+        .validate()
+        .unwrap_or_else(|e| panic!("report breaks the invariants: {e:?}"));
+    v.report
+}
+
+fn flipped(s: &SimStorage, at: u64) -> SimStorage {
+    let mut b = s.contents();
+    mochi_testkit::replay::flip(&mut b, at);
+    SimStorage::from_bytes(b)
+}
+
+fn dim(r: &Report, d: Dimension) -> Status {
+    r.dimensions[&d]
+}
+
+#[test]
+fn verify_with_the_passphrase_passes_every_level_and_key_availability() {
+    let s = two_commit_archive();
+    for level in LEVELS {
+        let r = run_verify(&s, level, reader(PASS));
+        assert!(!r.operational_error, "{level:?}: {:?}", r.findings);
+        assert!(r.findings.is_empty(), "{level:?}: {:?}", r.findings);
+        assert_eq!(dim(&r, Dimension::KeyAvailability), Status::Pass);
+        let deep = !matches!(
+            level,
+            VerificationLevel::Structural | VerificationLevel::Referential
+        );
+        assert_eq!(
+            dim(&r, Dimension::Integrity),
+            if deep { Status::Pass } else { Status::Unknown },
+            "{level:?}"
+        );
+        assert_eq!(
+            dim(&r, Dimension::Recoverability),
+            if deep { Status::Pass } else { Status::Unknown },
+            "{level:?}"
+        );
+    }
+}
+
+#[test]
+fn verify_without_a_passphrase_checks_stored_integrity_and_says_what_it_did_not_check() {
+    let s = two_commit_archive();
+    let before = s.contents();
+    let r = run_verify(
+        &s,
+        VerificationLevel::StoredIntegrity,
+        ReadOptions::default(),
+    );
+    assert_eq!(s.contents(), before, "read-only");
+    assert_eq!(dim(&r, Dimension::Integrity), Status::Pass);
+    assert_eq!(dim(&r, Dimension::Recoverability), Status::Unknown);
+    assert_eq!(dim(&r, Dimension::KeyAvailability), Status::Unknown);
+    assert_ne!(r.overall_status, Status::Pass);
+    assert!(!r.operational_error);
+    let scope = r.scope.as_deref().unwrap();
+    assert!(scope.contains("WITHOUT a key"), "{scope}");
+    assert!(r
+        .skipped
+        .iter()
+        .any(|k| k.reason.contains("no key supplied")));
+    // The data region of both commits was hashed: four chunks each.
+    assert_eq!(r.coverage.checked_objects, Some(8));
+    // The report holds no name and no content from the sealed records.
+    let json = serde_json::to_string(&r).unwrap();
+    assert!(!json.contains("plans.txt") && !json.contains("secret"));
+
+    // Asked for more than stored integrity, a keyless run is incomplete.
+    for level in [
+        VerificationLevel::ContentIntegrity,
+        VerificationLevel::Restoration,
+    ] {
+        let r = run_verify(&s, level, ReadOptions::default());
+        assert_eq!(dim(&r, Dimension::Integrity), Status::Unknown, "{level:?}");
+        assert!(r
+            .skipped
+            .iter()
+            .any(|k| k.item == "content integrity" || k.item == "file versions"));
+    }
+    // Structural and referential never claim integrity.
+    for level in [
+        VerificationLevel::Structural,
+        VerificationLevel::Referential,
+    ] {
+        let r = run_verify(&s, level, ReadOptions::default());
+        assert_eq!(dim(&r, Dimension::Integrity), Status::Unknown);
+    }
+}
+
+#[test]
+fn a_flipped_byte_in_a_data_region_fails_integrity_with_and_without_the_key() {
+    let s = two_commit_archive();
+    let (rec, _) = head_commit(&s, &ReadOptions::default());
+    let region = rec.data_region.expect("the head commit adds data");
+    let bad = flipped(&s, region.offset + region.stored_len / 2);
+    for read in [ReadOptions::default(), reader(PASS)] {
+        let keyed = read.keys.is_some();
+        let r = run_verify(&bad, VerificationLevel::StoredIntegrity, read);
+        assert_eq!(dim(&r, Dimension::Integrity), Status::Fail, "keyed={keyed}");
+        assert_eq!(r.exit_code, exit::FAILED, "keyed={keyed}");
+        assert!(
+            r.findings
+                .iter()
+                .any(|f| f.code == ErrorCode::StoredIntegrityFailed),
+            "keyed={keyed}: {:?}",
+            r.findings
+        );
+    }
+}
+
+#[test]
+fn a_flipped_byte_in_a_sealed_manifest_fails_keyless_integrity_at_every_level() {
+    let s = two_commit_archive();
+    let (rec, _) = head_commit(&s, &ReadOptions::default());
+    let m = rec.delta_manifest;
+    let bad = flipped(&s, m.offset + m.stored_len / 2);
+    for level in LEVELS {
+        let r = run_verify(&bad, level, ReadOptions::default());
+        assert_eq!(dim(&r, Dimension::Integrity), Status::Fail, "{level:?}");
+    }
+}
+
+#[test]
+fn a_wrong_passphrase_is_an_operational_error_not_a_verdict() {
+    let s = two_commit_archive();
+    let r = run_verify(&s, VerificationLevel::Restoration, reader("wrong"));
+    assert!(r.operational_error);
+    assert_eq!(r.exit_code, exit::ERROR);
+    assert!(r
+        .findings
+        .iter()
+        .any(|f| f.code == ErrorCode::KeyUnavailable));
+    assert_ne!(dim(&r, Dimension::Integrity), Status::Pass);
+    assert_ne!(dim(&r, Dimension::Integrity), Status::Fail);
+    let json = serde_json::to_string(&r).unwrap();
+    assert!(!json.contains("wrong"));
 }

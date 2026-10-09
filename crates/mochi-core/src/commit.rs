@@ -551,6 +551,9 @@ impl CommitRecord {
             key_envelopes,
             data_region,
         };
+        // D11 first (count, increasing order, known), so a fault in the feature
+        // list itself keeps its own code before the profile comparison below.
+        check_required_features(&record.required_features, KNOWN_REQUIRED_FEATURES, limits)?;
         if record.schema_version() != version {
             return Err(schema(
                 "the commit's schema version does not match its required features: \

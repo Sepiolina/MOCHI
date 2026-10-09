@@ -193,6 +193,19 @@ pub fn check_segment(entries: &[HistoryEntry]) -> Result<SegmentInfo> {
         }
     }
 
+    // One profile per segment (Annex B.2.10 D20 item 4): the commits share a
+    // descriptor, so they agree about the Encrypted profile; a commit that
+    // does not is an invalid record, found before any of its objects is read.
+    for e in &entries[1..] {
+        if e.commit.encrypted() != first.commit.encrypted() {
+            return Err(invalid(format!(
+                "commit {} and its base checkpoint {b} disagree about the Encrypted profile \
+                 (D20 item 4)",
+                e.commit.seq
+            )));
+        }
+    }
+
     let (delta_bytes, base_bytes) = segment_accounting(entries);
     Ok(SegmentInfo {
         delta_bytes,

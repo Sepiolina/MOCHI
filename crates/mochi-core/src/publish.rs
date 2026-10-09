@@ -985,7 +985,48 @@ pub fn segment_state(
         check_delta_parent_link(&delta, &prev.commit)?;
         state.apply_delta(&delta)?;
     }
-    state.complete(&head.catalog.replay(None)?)
+    let state = state.complete(&head.catalog.replay(None)?)?;
+    check_key_state(
+        src,
+        &head.commit,
+        head.location.footer.fields.commit_offset,
+        &state.keys,
+        opts,
+    )?;
+    Ok(state)
+}
+
+/// D20 item 10: the key envelopes a commit lists are the key state replayed
+/// from S(*b*) and the segment's key operations. A commit that lists others
+/// disagrees with its own manifests (`RECORD_INVALID`). Checks nothing outside
+/// the Encrypted profile.
+pub(crate) fn check_key_state(
+    src: &dyn ReadStorage,
+    commit: &CommitRecord,
+    commit_offset: u64,
+    replayed: &[[u8; 16]],
+    opts: &ReadOptions,
+) -> Result<()> {
+    if !commit.encrypted() {
+        return Ok(());
+    }
+    let listed: Vec<[u8; 16]> = read_envelopes(src, commit, commit_offset, opts)?
+        .into_iter()
+        .map(|(_, e)| e.envelope_id)
+        .collect();
+    if listed != replayed {
+        return Err(MochiError::new(
+            ErrorCode::RecordInvalid,
+            format!(
+                "commit {} lists {} key envelope(s) that differ from the key state its \
+                 manifests replay to ({} envelope(s)) (D20 item 10)",
+                commit.seq,
+                listed.len(),
+                replayed.len()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// D12: a descriptor that cannot be loaded, hash-verified, or decoded, or
@@ -1139,6 +1180,10 @@ pub struct SegmentState {
     /// reaches.
     pub attributes: BTreeMap<FileVersionId, Attributes>,
     pub retention: RetentionState,
+    /// Encrypted profile (D20 item 10): the IDs of the key envelopes valid at
+    /// the commit, replayed from S(*b*) and the segment's key operations. Empty
+    /// outside the profile. The commit's own key list must equal it.
+    pub keys: Vec<[u8; 16]>,
 }
 
 impl SegmentState {
@@ -1150,6 +1195,7 @@ impl SegmentState {
                 .map(|v| (v.version.id, v.attributes))
                 .collect(),
             retention: s_b.retention.clone(),
+            keys: s_b.keys.state.clone(),
         }
     }
 
@@ -1172,10 +1218,13 @@ impl SegmentState {
         }
         let mut retention = self.retention.clone();
         retention.apply(&delta.retention_ops, delta.commit_seq)?;
+        let mut keys = self.keys.clone();
+        crate::manifest::ManifestKeys::apply(&mut keys, &delta.keys.ops)?;
         for v in &delta.file_versions {
             self.attributes.insert(v.version.id, v.attributes);
         }
         self.retention = retention;
+        self.keys = keys;
         Ok(())
     }
 
@@ -1185,6 +1234,7 @@ impl SegmentState {
         Ok(SegmentState {
             attributes: reachable_attributes(reachable, self.attributes)?,
             retention: self.retention,
+            keys: self.keys,
         })
     }
 }
@@ -1216,7 +1266,10 @@ fn open_at(
         ));
     }
     let unlocked = if commit.encrypted() {
-        Some(unlock_commit(src, &commit, limit, opts)?)
+        // The head needs one of its own envelopes opened; a historical commit
+        // may reuse the archive's data key (see `unlock_commit`).
+        let strict = location.source != HeadSource::Explicit;
+        Some(unlock_commit(src, &commit, limit, opts, strict)?)
     } else {
         None
     };
@@ -1318,6 +1371,9 @@ fn open_at(
             ErrorCode::RecordInvalid,
             "the catalog does not materialize the commit being opened (§10.6)",
         ));
+    }
+    if let Some(st) = &state {
+        check_key_state(src, &commit, limit, &st.keys, opts)?;
     }
     Ok(Opened {
         head: OpenedHead {
@@ -1835,6 +1891,7 @@ fn recover_baseline(
     let SegmentState {
         attributes,
         retention,
+        keys,
     } = state.complete(applier.namespace()).map_err(|e| {
         MochiError::new(
             e.code,
@@ -1845,6 +1902,7 @@ fn recover_baseline(
             ),
         )
     })?;
+    check_key_state(src, &last.commit, last.commit_offset, &keys, opts)?;
     let catalog = applier.into_catalog();
     catalog.make_query_only()?;
     Ok(BaselineRecovery {

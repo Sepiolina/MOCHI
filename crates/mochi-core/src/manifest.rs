@@ -1316,6 +1316,7 @@ impl Manifest {
             provenance,
             keys,
         };
+        check_required_features(&m.required_features, KNOWN_REQUIRED_FEATURES, limits)?;
         if m.schema_version() != version {
             return Err(schema(
                 "the manifest's schema version does not match its content: schema 3 exactly \

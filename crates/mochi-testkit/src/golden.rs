@@ -1113,8 +1113,8 @@ pub fn c4_manifest_vectors() -> Vec<ManifestVector> {
     ));
     v.push(reject(
         "reject-manifest-schema-version",
-        "schema version 3 (schema 2 adds retention, C9)",
-        c4_edit(&root, |r| *c4_field(r, 0) = Value::Uint(3)),
+        "schema version 4 (schema 2 adds retention, C9; schema 3 the Encrypted profile, C11)",
+        c4_edit(&root, |r| *c4_field(r, 0) = Value::Uint(4)),
         "UNSUPPORTED_FEATURE",
     ));
     v.push(reject(

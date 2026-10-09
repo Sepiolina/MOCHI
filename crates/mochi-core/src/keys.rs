@@ -4,7 +4,7 @@
 //!
 //! An archive of the Encrypted profile has one random data key (DEK). Each
 //! passphrase derives a key-encryption key (Argon2id) that wraps the DEK in a
-//! **key envelope**, a plaintext deterministic-CBOR frame (`0x184D2A5C`).
+//! **key envelope**, a plaintext deterministic-CBOR frame (`KEY_ENVELOPE`).
 //! Every commit record lists the envelopes valid at that commit (commit schema
 //! 2, key 11), so a reader finds them from the footer-verified head **without
 //! decrypting anything** (spec §14.3); the descriptor never locates them (D12).
@@ -122,7 +122,7 @@ impl KeyEnvelope {
         )?)
     }
 
-    /// The stored form: one `0x184D2A5C` frame within the writer defaults.
+    /// The stored form: one `KEY_ENVELOPE` frame within the writer defaults.
     pub fn to_stored(&self) -> Result<StoredObject> {
         let frame = encode_skippable_frame_within(
             FrameKind::KeyEnvelope,
@@ -202,7 +202,7 @@ impl KeyEnvelope {
         })
     }
 
-    /// Parse a stored envelope: exactly one `0x184D2A5C` frame whose payload
+    /// Parse a stored envelope: exactly one `KEY_ENVELOPE` frame whose payload
     /// decodes. The caller has verified the stored-object hash.
     pub fn from_stored(
         stored: &StoredObject,
@@ -483,7 +483,7 @@ pub(crate) fn catalog_key(
 
 /// Open a sealed record (a manifest or an image) that was read from `stored`
 /// and whose stored-object hash has been verified: exactly one
-/// `0x184D2A59` frame, authenticated for `target`. A tag failure is
+/// `ENCRYPTED_OBJECT` frame, authenticated for `target`. A tag failure is
 /// `CONTENT_INTEGRITY_FAILED` (the bytes are as written; they are not what
 /// should be sealed there).
 pub(crate) fn open_sealed_record(

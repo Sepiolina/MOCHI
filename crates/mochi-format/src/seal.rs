@@ -9,7 +9,7 @@
 //!   the key, the suite, and the exact KDF-parameter bytes, so an envelope
 //!   edited in the file fails to unwrap instead of weakening the key.
 //! * **Sealed object.** A data chunk, catalog image, or manifest is sealed
-//!   under the data key and stored as the payload of one `0x184D2A59` frame:
+//!   under the data key and stored as the payload of one `ENCRYPTED_OBJECT` frame:
 //!   a 48-byte header (version, suite, kind, key ID, nonce), the ciphertext,
 //!   and the 16-byte tag. The associated data binds the archive ID, the
 //!   header, and what the object *is*: its object ID for a chunk, its commit's
@@ -273,7 +273,7 @@ pub fn seal_payload(
     Ok(out)
 }
 
-/// [`seal_payload`], framed as one `0x184D2A59` skippable frame within
+/// [`seal_payload`], framed as one `ENCRYPTED_OBJECT` skippable frame within
 /// `limits` (the writer default rule, B.2.3).
 pub fn seal_frame(
     ctx: &SealContext<'_>,
@@ -313,7 +313,7 @@ pub fn open_payload(ctx: &SealContext<'_>, target: &SealTarget, payload: &[u8]) 
         .map_err(|_| FormatError::Seal(SealFault::Authentication))
 }
 
-/// The payload of `stored`, which must be exactly one `0x184D2A59` frame.
+/// The payload of `stored`, which must be exactly one `ENCRYPTED_OBJECT` frame.
 pub fn sealed_frame_payload<'a>(stored: &'a StoredObject, limits: &Limits) -> Result<&'a [u8]> {
     let bytes = stored.as_bytes();
     let span = walk_frame(bytes, 0, limits)?;

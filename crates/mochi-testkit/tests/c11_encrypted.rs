@@ -196,7 +196,7 @@ fn the_commit_record_is_schema_2_with_no_time_and_a_hash_checked_data_region() {
     assert_eq!(rec.required_features, vec![1]);
     assert_eq!(rec.key_envelopes.len(), 1);
 
-    // The data region: whole frames of kind 0x184D2A59, ending before the
+    // The data region: whole frames of kind ENCRYPTED_OBJECT, ending before the
     // delta manifest, and the hash is BLAKE3 over exactly those bytes.
     let region = rec.data_region.expect("the commit adds data");
     assert!(region.offset + region.stored_len <= rec.delta_manifest.offset);
@@ -211,7 +211,10 @@ fn the_commit_record_is_schema_2_with_no_time_and_a_hash_checked_data_region() {
     // chunk size of 64 is four data objects.
     let (mut at, mut frames) = (0usize, 0);
     while at < bytes.len() {
-        assert_eq!(&bytes[at..at + 4], &0x184D_2A59u32.to_le_bytes());
+        assert_eq!(
+            &bytes[at..at + 4],
+            &mochi_format::registry::ENCRYPTED_OBJECT.to_le_bytes()
+        );
         let len = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
         // sealed header: version 0, suite 1, kind 0 (a data chunk)
         assert_eq!(&bytes[at + 8..at + 16], &[0, 0, 1, 0, 0, 0, 0, 0]);

@@ -135,7 +135,7 @@ pub fn protect_sealed(
 }
 
 /// Stage 3 for [`Protection::Aead`]: frame a sealed payload as one
-/// `0x184D2A59` skippable frame within `limits`.
+/// `ENCRYPTED_OBJECT` skippable frame within `limits`.
 pub fn frame_sealed(payload: StoredPayload, limits: &Limits) -> Result<StoredObject> {
     let frame = crate::frame::encode_skippable_frame_within(
         FrameKind::EncryptedObject,

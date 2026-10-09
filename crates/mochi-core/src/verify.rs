@@ -1113,7 +1113,7 @@ fn referential(
         let e = MochiError::from(e);
         bad(format!("no valid frame at {at}: {}", e.message))
     })?;
-    // A sealed object (Encrypted profile, D20) is one `0x184D2A59` skippable
+    // A sealed object (Encrypted profile, D20) is one `ENCRYPTED_OBJECT` skippable
     // frame; every other object is one Zstandard data frame (§5.1).
     let shaped = if record.protection == Protection::Aead {
         span.kind == FrameKind::EncryptedObject

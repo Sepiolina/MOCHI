@@ -108,7 +108,7 @@ fn key_of(s: &SimStorage) -> ([u8; 16], usize) {
     (*envs[0].1.key_id.as_bytes(), envs.len())
 }
 
-/// Every sealed frame (magic `0x184D2A59`) of the file, by its bytes: the
+/// Every sealed frame (magic `ENCRYPTED_OBJECT`) of the file, by its bytes: the
 /// frames are found through the commit records' data regions and manifests,
 /// so the walk is independent of the catalog.
 fn sealed_frames(s: &SimStorage) -> BTreeSet<Vec<u8>> {

@@ -39,10 +39,10 @@ fn enabling_encryption_in_place_exits_4() {
     assert_eq!(s.contents(), before, "a refused append writes nothing");
 }
 
-/// Creating an encrypted archive is a different case: no change, but a
-/// profile this build cannot write. Also exit 4.
+/// Creating an Encrypted archive needs a passphrase (C11, D20 item 9): without
+/// one the core refuses before a byte is written, an operational error.
 #[test]
-fn creating_an_encrypted_archive_in_this_build_exits_4() {
+fn creating_an_encrypted_archive_without_a_passphrase_is_refused() {
     let opts = WriterOptions {
         profile: Some(Profile {
             tar_compatible: false,
@@ -50,9 +50,11 @@ fn creating_an_encrypted_archive_in_this_build_exits_4() {
         }),
         ..test_options()
     };
-    let e = ArchiveWriter::create(SimStorage::new(), Box::new(SeqIds::new(1)), opts)
+    let s = SimStorage::new();
+    let e = ArchiveWriter::create(s.clone(), Box::new(SeqIds::new(1)), opts)
         .map(|_| ())
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::UnsupportedFeature);
-    assert_eq!(exit_code_for(e.code), exit::UNSUPPORTED);
+    assert_eq!(e.code, ErrorCode::InvalidArgument);
+    assert_eq!(exit_code_for(e.code), exit::ERROR);
+    assert!(s.contents().is_empty(), "nothing was written");
 }

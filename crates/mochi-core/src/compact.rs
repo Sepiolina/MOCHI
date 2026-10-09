@@ -164,6 +164,9 @@ pub struct CompactReport {
     pub durability_unconfirmed: Option<String>,
     /// Always true: the source is never written or removed.
     pub source_kept: bool,
+    /// The chunks were opened and sealed again under the new archive's own
+    /// key (Encrypted profile, D20 item 10) instead of copied as they were.
+    pub resealed: bool,
 }
 
 type Namespace = BTreeMap<ArchivePath, FileVersionId>;
@@ -690,6 +693,7 @@ where
             _ => None,
         },
         source_kept: true,
+        resealed: head.commit.encrypted(),
     })
 }
 

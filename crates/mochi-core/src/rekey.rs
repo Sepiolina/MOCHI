@@ -87,17 +87,9 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Add `add` as new key envelopes and take `remove` out of the set, in one
-/// commit on the open writer (a rewrap). Authentication was the writer's
-/// opening with a passphrase of the head's set. `INVALID_ARGUMENT` if the
-/// request changes nothing, names an envelope that is not valid at the head,
-/// or would leave the set empty.
-pub fn rewrap<S: Storage>(
-    w: &mut ArchiveWriter<S>,
-    add: Vec<Passphrase>,
-    remove: Vec<[u8; 16]>,
-    ctx: &JobContext<'_>,
-) -> Result<CommitOutcome> {
+/// The transaction of a rewrap: `add` as new key envelopes, `remove` taken out
+/// of the set. `INVALID_ARGUMENT` if it would change nothing.
+pub fn rewrap_transaction(add: Vec<Passphrase>, remove: Vec<[u8; 16]>) -> Result<Transaction> {
     if add.is_empty() && remove.is_empty() {
         return Err(MochiError::new(
             ErrorCode::InvalidArgument,
@@ -111,7 +103,21 @@ pub fn rewrap<S: Storage>(
     for id in remove {
         tx.remove_envelope(id);
     }
-    w.commit(tx, ctx)
+    Ok(tx)
+}
+
+/// Add `add` as new key envelopes and take `remove` out of the set, in one
+/// commit on the open writer (a rewrap). Authentication was the writer's
+/// opening with a passphrase of the head's set. `INVALID_ARGUMENT` if the
+/// request changes nothing, names an envelope that is not valid at the head,
+/// or would leave the set empty.
+pub fn rewrap<S: Storage>(
+    w: &mut ArchiveWriter<S>,
+    add: Vec<Passphrase>,
+    remove: Vec<[u8; 16]>,
+    ctx: &JobContext<'_>,
+) -> Result<CommitOutcome> {
+    w.commit(rewrap_transaction(add, remove)?, ctx)
 }
 
 /// Write a new archive `name` in `dir` from the open source writer: every

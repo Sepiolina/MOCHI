@@ -20,6 +20,8 @@ mochi-core.workspace = true
 mochi-format.workspace = true
 clap.workspace = true
 serde_json.workspace = true
+rpassword.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 mochi-testkit.workspace = true

@@ -501,4 +501,65 @@ mod tests {
         let e = load_stored(&Never, u64::MAX - 3, &o.record, &Limits::default()).unwrap_err();
         assert_eq!(e.code, ErrorCode::OutOfBounds);
     }
+
+    /// D20 item 9: a sealed object whose stored hash verifies but whose tag
+    /// does not is `CONTENT_INTEGRITY_FAILED` (the bytes are as written; they
+    /// are not what should be sealed there), never `STORED_INTEGRITY_FAILED`
+    /// and never a partial result. Opening needs the key; a keyless decode
+    /// reports `KEY_UNAVAILABLE` after the stored check.
+    #[test]
+    fn a_sealed_object_with_a_good_hash_and_a_bad_tag_is_a_content_failure() {
+        use mochi_format::seal::{KeyId, SealContext};
+        use mochi_format::secret::{DataKey, OsRandom};
+        struct Ids;
+        impl IdSource for Ids {
+            fn next_id(&mut self) -> Result<[u8; 32]> {
+                Ok([4; 32])
+            }
+        }
+        let key = DataKey::from_bytes([1; 32]);
+        let ctx = SealContext {
+            key: &key,
+            key_id: KeyId::from_bytes([2; 16]),
+            archive_id: [3; 32],
+        };
+        let content = DecodedBytes::new(b"sealed content ".repeat(8));
+        let o = build_object_sealed(
+            &content,
+            &EncodeParams::default(),
+            &ctx,
+            &mut Ids,
+            &mut OsRandom,
+            &Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(o.record.protection, Protection::Aead);
+        // Intact: opens, and a keyless decode is refused after the stored check.
+        let d = decode_verified(&o.record, &o.stored, &Limits::default(), Some(&ctx)).unwrap();
+        assert_eq!(d.as_bytes(), content.as_bytes());
+        let e = decode_verified(&o.record, &o.stored, &Limits::default(), None).unwrap_err();
+        assert_eq!(e.code, ErrorCode::KeyUnavailable);
+
+        // A flipped ciphertext byte with the record's hash made to match: the
+        // stored check passes, the tag does not.
+        let mut bytes = o.stored.as_bytes().to_vec();
+        let at = bytes.len() - 20;
+        bytes[at] ^= 1;
+        let tampered = StoredObject::from_loaded(bytes);
+        let mut record = o.record.clone();
+        record.stored_hash = stored_object_hash(tampered.view());
+        let e = decode_verified(&record, &tampered, &Limits::default(), Some(&ctx)).unwrap_err();
+        assert_eq!(e.code, ErrorCode::ContentIntegrityFailed, "{e}");
+        // Without the fixed-up hash it is the stored check that fails.
+        let e = decode_verified(&o.record, &tampered, &Limits::default(), Some(&ctx)).unwrap_err();
+        assert_eq!(e.code, ErrorCode::StoredIntegrityFailed);
+        // The wrong archive (a different associated data) is the same failure.
+        let other = SealContext {
+            archive_id: [9; 32],
+            ..ctx
+        };
+        let e =
+            decode_verified(&o.record, &o.stored, &Limits::default(), Some(&other)).unwrap_err();
+        assert_eq!(e.code, ErrorCode::ContentIntegrityFailed);
+    }
 }

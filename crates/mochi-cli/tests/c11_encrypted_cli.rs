@@ -169,9 +169,10 @@ fn no_passphrase_or_a_wrong_one_is_key_unavailable_exit_3_and_nothing_is_written
     assert!(out.contains("KEY_UNAVAILABLE"), "{out}");
 
     let before = fs::read(&archive).unwrap();
+    let never = a.s("never-created");
     for cmd in [
         vec!["list", &archive],
-        vec!["get", &archive, "-C", "/nonexistent-never-created"],
+        vec!["get", &archive, "-C", &never],
         vec!["append", &archive, "src"],
         vec!["checkpoint", &archive],
     ] {
@@ -184,7 +185,10 @@ fn no_passphrase_or_a_wrong_one_is_key_unavailable_exit_3_and_nothing_is_written
         assert!(!out.contains("wrong one") && !err.contains("wrong one"));
     }
     assert_eq!(fs::read(&archive).unwrap(), before);
-    assert!(!a.p("/nonexistent-never-created").exists());
+    assert!(
+        !a.p("never-created").exists(),
+        "no destination before the key"
+    );
 }
 
 #[test]

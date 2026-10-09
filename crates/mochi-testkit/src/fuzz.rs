@@ -690,6 +690,82 @@ pub fn exercise_tar_stream(data: &[u8]) {
     }
 }
 
+/// Key envelopes (C11, spec Annex B.2.10 D20 item 1). Any input either is
+/// refused or decodes to an envelope whose cost parameters are checked against
+/// the reader's limits **before** a derivation could allocate, and which
+/// re-encodes to the bytes it came from (one encoding per envelope). An
+/// unwrap with a fixed passphrase never panics and never succeeds for random
+/// input.
+pub fn exercise_key_envelope(data: &[u8]) {
+    use mochi_core::keys::KeyEnvelope;
+    use mochi_format::secret::Passphrase;
+    let limits = fuzz_limits();
+    let stored = StoredObject::from_loaded(data.to_vec());
+    let Ok(env) = KeyEnvelope::from_stored(&stored, &limits, &CborLimits::default()) else {
+        return;
+    };
+    let again = env.to_stored().expect("a decoded envelope re-encodes");
+    assert_eq!(again.as_bytes(), data, "one encoding per envelope");
+    // The cost check refuses hostile parameters before any allocation; with a
+    // small budget, so a fuzzed envelope never makes the run slow.
+    let cheap = Limits {
+        max_kdf_memory_kib: 1024,
+        max_kdf_iterations: 2,
+        max_kdf_lanes: 2,
+        ..limits
+    };
+    let pass = Passphrase::new("fuzz passphrase").expect("a valid passphrase");
+    match env.unwrap(&pass, &cheap) {
+        Ok(Some(_)) => panic!("random input must not unwrap under a fixed passphrase"),
+        Ok(None) | Err(_) => {}
+    }
+}
+
+/// Sealed objects (C11, spec Annex B.2.10 D20 item 5). Any input either is
+/// refused at the framing or header layer, or reaches the AEAD, which refuses
+/// it: random bytes never open under a fixed key for any binding. Never a
+/// panic, and no output on failure.
+pub fn exercise_sealed_object(data: &[u8]) {
+    use mochi_format::seal::{
+        open_payload, parse_sealed, sealed_frame_payload, KeyId, SealContext, SealTarget,
+    };
+    use mochi_format::secret::DataKey;
+    let limits = fuzz_limits();
+    let stored = StoredObject::from_loaded(data.to_vec());
+    let Ok(payload) = sealed_frame_payload(&stored, &limits) else {
+        // Not exactly one sealed frame; also try the bare payload.
+        let _ = parse_sealed(data);
+        return;
+    };
+    let _ = parse_sealed(payload);
+    let key = DataKey::from_bytes([7; 32]);
+    let ctx = SealContext {
+        key: &key,
+        key_id: KeyId::from_bytes([1; 16]),
+        archive_id: [2; 32],
+    };
+    for target in [
+        SealTarget::Chunk { object_id: [3; 32] },
+        SealTarget::Image {
+            sequence: 0,
+            transaction_id: [4; 16],
+        },
+        SealTarget::DeltaManifest {
+            sequence: 1,
+            transaction_id: [5; 16],
+        },
+        SealTarget::SnapshotManifest {
+            sequence: 2,
+            transaction_id: [6; 16],
+        },
+    ] {
+        assert!(
+            open_payload(&ctx, &target, payload).is_err(),
+            "a fuzzed object must not authenticate under a fixed key"
+        );
+    }
+}
+
 pub fn exercise_all(data: &[u8]) {
     exercise_walker(data);
     exercise_footer(data);
@@ -701,4 +777,6 @@ pub fn exercise_all(data: &[u8]) {
     exercise_descriptor(data);
     exercise_archive_open(data);
     exercise_tar_stream(data);
+    exercise_key_envelope(data);
+    exercise_sealed_object(data);
 }

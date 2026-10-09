@@ -413,3 +413,69 @@ fn a_wrong_passphrase_is_an_operational_error_not_a_verdict() {
     let json = serde_json::to_string(&r).unwrap();
     assert!(!json.contains("wrong"));
 }
+
+// ---- confidentiality limits and failing closed -----------------------------------
+
+/// **The dedup-equality leak exists, and is documented** (D20 item 6):
+/// deduplication works under encryption, so a party who sees only the file
+/// can tell that a second put of identical content added no data at all. The
+/// test pins the behaviour so a change to it is a decision, not an accident.
+#[test]
+fn deduplication_leaks_that_two_files_are_equal_to_someone_without_the_key() {
+    let s = SimStorage::new();
+    let opts = WriterOptions {
+        dedup: mochi_core::publish::Dedup::InArchive,
+        ..encrypted_options(&[PASS])
+    };
+    let mut w = create(&s, opts);
+    let same = content(40);
+    let mut tx = Transaction::new();
+    put(&mut tx, "first", &same);
+    w.commit(tx, &Job::new().ctx()).unwrap();
+    let mut tx = Transaction::new();
+    put(&mut tx, "second-with-another-name", &same);
+    w.commit(tx, &Job::new().ctx()).unwrap();
+    drop(w);
+
+    // Keyless, from the commit records alone: commit 0 added four sealed
+    // chunks; commit 1, which put the same bytes again, added no data region.
+    let o = ReadOptions::default();
+    let history = mochi_core::publish::commit_history(&s, &o).unwrap();
+    assert!(history[0].commit.data_region.is_some());
+    assert!(
+        history[1].commit.data_region.is_none(),
+        "equal content was stored once: the leak"
+    );
+    // And the content still reads back, under either name.
+    let o = reader(PASS);
+    let head = open_head(&s, &o).unwrap();
+    for name in ["first", "second-with-another-name"] {
+        let mut got = Vec::new();
+        read_file(&s, &head, &path(name), &mut got, &o, &Job::new().ctx()).unwrap();
+        assert_eq!(got, same);
+    }
+}
+
+/// Fail closed: a damaged sealed object is an error and no byte of it is
+/// written to the sink.
+#[test]
+fn a_damaged_data_object_fails_a_read_with_stored_integrity_and_writes_nothing() {
+    let s = SimStorage::new();
+    let mut w = create(&s, encrypted_options(&[PASS]));
+    let mut tx = Transaction::new();
+    put(&mut tx, "f", &content(50));
+    w.commit(tx, &Job::new().ctx()).unwrap();
+    drop(w);
+    let (rec, _) = head_commit(&s, &ReadOptions::default());
+    let r = rec.data_region.unwrap();
+    let mut raw = s.contents();
+    mochi_testkit::replay::flip(&mut raw, r.offset + 8 + 60);
+    let bad = SimStorage::from_bytes(raw);
+
+    let o = reader(PASS);
+    let head = open_head(&bad, &o).unwrap();
+    let mut got = Vec::new();
+    let e = read_file(&bad, &head, &path("f"), &mut got, &o, &Job::new().ctx()).unwrap_err();
+    assert_eq!(e.code, ErrorCode::StoredIntegrityFailed, "{e}");
+    assert!(got.is_empty(), "no partial output");
+}

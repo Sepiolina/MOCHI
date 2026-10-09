@@ -54,12 +54,15 @@ jobs:
           # delta-segment vectors whose heads exercise the segment
           # assertions. Archives reach ~150 KB, above libFuzzer's default
           # max_len.
-          - { target: archive_open,      seeds: "../fixtures/golden/c5", args: "-max_len=400000" }
+          - { target: archive_open,      seeds: "../fixtures/golden/c5 ../fixtures/golden/c11", args: "-max_len=400000" }
           # Their own vectors: commit records (c5/*.bin), descriptors (b2).
           - { target: commit_decode,     seeds: "../fixtures/golden/c5", args: "" }
           - { target: descriptor_decode, seeds: "../fixtures/golden/b2", args: "" }
           # C10 (D19): the TAR-compatible profile's stream parser.
           - { target: tar_stream,        seeds: "../fixtures/golden/c10", args: "-max_len=100000" }
+          # C11 (D20): key envelopes and sealed objects.
+          - { target: key_envelope,      seeds: "../fixtures/golden/c11", args: "" }
+          - { target: sealed_object,     seeds: "../fixtures/golden/c11", args: "" }
     steps:
       - uses: actions/checkout@v4
       - name: Install nightly toolchain

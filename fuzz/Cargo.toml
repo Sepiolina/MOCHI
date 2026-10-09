@@ -90,3 +90,17 @@ path = "fuzz_targets/tar_stream.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "key_envelope"
+path = "fuzz_targets/key_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sealed_object"
+path = "fuzz_targets/sealed_object.rs"
+test = false
+doc = false
+bench = false

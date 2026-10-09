@@ -7,7 +7,7 @@ Spec §20.5 lists what a machine-readable report must contain; this file is the 
 - `schema_version` is `1`.
 - New field `freshness_anchor` (spec Annex B.1 D8: "the report names the anchor used").
 - `started_at` / `completed_at` are filled, in the D15 form `YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ`.
-- New error codes `REFERENCE_INVALID` and `FRESHNESS_FAILED` (both exit 1).
+- New error codes `REFERENCE_INVALID` and `FRESHNESS_FAILED` (both exit 1). `PROFILE_VIOLATION` (exit 1) is added by the TAR-compatibility profile (Annex B.2.9 D19).
 
 ## Fields
 

@@ -227,7 +227,8 @@ pub fn classify(code: ErrorCode) -> ErrorClass {
         | ErrorCode::CheckpointMismatch
         | ErrorCode::RetentionUnresolved
         | ErrorCode::ReferenceInvalid
-        | ErrorCode::FreshnessFailed => ErrorClass::Violation,
+        | ErrorCode::FreshnessFailed
+        | ErrorCode::ProfileViolation => ErrorClass::Violation,
         ErrorCode::UnsupportedFeature | ErrorCode::ProfileChangeUnsupported => {
             ErrorClass::Unsupported
         }
@@ -1215,6 +1216,7 @@ mod tests {
             ErrorClass::Violation
         );
         assert_eq!(classify(ErrorCode::FreshnessFailed), ErrorClass::Violation);
+        assert_eq!(classify(ErrorCode::ProfileViolation), ErrorClass::Violation);
         assert_eq!(
             classify(ErrorCode::UnsupportedFeature),
             ErrorClass::Unsupported

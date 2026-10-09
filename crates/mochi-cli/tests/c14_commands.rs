@@ -520,15 +520,16 @@ fn c14_append_truncates_an_eligible_tail_only_on_request() {
     assert_eq!(code, exit::ERROR, "a waiver needs --truncate-tail: {err}");
 }
 
-/// Options this build refuses: TAR compatibility (exit 4), a bad reader
-/// limit (exit 3), an unknown level (usage, exit 3). A lowered reader
-/// limit applies and makes the archive unreadable to that reader.
+/// Options this build limits: a bad reader limit (exit 3), an unknown level
+/// (usage, exit 3). `--tar-compatible` creates a TAR-compatible archive
+/// (D19). A lowered reader limit applies and makes the archive unreadable to
+/// that reader.
 #[test]
 fn c14_refused_and_limited_options() {
     let a = Area::new();
     let (code, v) = a.json(&["create", &a.s("t.mochi"), &a.s("src"), "--tar-compatible"]);
-    assert_eq!(code, exit::UNSUPPORTED, "{v}");
-    assert!(!a.p("t.mochi").exists(), "nothing was created");
+    assert_eq!(code, exit::OK, "{v}");
+    assert!(a.p("t.mochi").exists());
 
     let archive = a.create();
     let (code, v) = a.json(&["list", &archive, "--limit", "max-frame-len"]);

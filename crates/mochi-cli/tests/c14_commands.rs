@@ -528,7 +528,7 @@ fn c14_append_truncates_an_eligible_tail_only_on_request() {
 fn c14_refused_and_limited_options() {
     let a = Area::new();
     let (code, v) = a.json(&["create", &a.s("t.mochi"), &a.s("src"), "--tar-compatible"]);
-    assert_eq!(code, exit::OK, "{v}");
+    assert_eq!(code, CREATED, "{v}");
     assert!(a.p("t.mochi").exists());
 
     let archive = a.create();

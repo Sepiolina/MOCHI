@@ -128,7 +128,7 @@ back or withhold commits; freshness (D8) still applies. It leaks, and documents:
 
 Nothing in the CLI or the desktop app calls the result "safe", "secure", or "backed up".
 
-## Decisions made in the implementation (for review)
+## Decisions made in the implementation (accepted at the R5 freeze, 2026-10-11)
 
 1. **Self-unlocking low-level reads.** `read_bound_manifest` and `check_image` unlock
    from the commit's own envelopes when the session has not opened the archive yet, so

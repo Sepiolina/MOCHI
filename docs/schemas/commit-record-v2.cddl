@@ -1,4 +1,6 @@
-; MOCHI commit record, schema version 2 (DRAFT; ratification items R3, R5).
+; MOCHI commit record, schema version 2 (ratification items R3, R5). Keys 11 and 12
+; are FROZEN with R5 (2026-10-11); the rest is restated from R3's draft and
+; freezes with R3.
 ; Decision: spec Annex B.2.10 (D20), rules 4 and 6. Extends
 ; commit-record-v1.cddl; readers accept schema 1 and schema 2.
 ;

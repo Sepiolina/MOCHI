@@ -1,13 +1,23 @@
-# R5 — Cryptographic profile (DRAFT, not frozen)
+# R5 — Cryptographic profile (FROZEN 2026-10-11)
 
-> **Status 2026-10-09.** Implemented (plan C11, `docs/c11-encrypted.md`); the vectors below are checked in `mochi-format`'s tests and the golden set `fixtures/golden/c11/` adds byte-exact envelope and sealed-object vectors and sixteen rejects. Still a draft until gate G10: the owner's read of this file has not happened.
+> **Status 2026-10-11: frozen** (owner-approved). Implemented (plan C11, `docs/c11-encrypted.md`); the vectors below are checked in `mochi-format`'s tests and the golden set `fixtures/golden/c11/` adds byte-exact envelope and sealed-object vectors and sixteen rejects. Gate G10's evidence is complete, and the review pass the gate asks for ran on 2026-10-11; §12 records what it checked, what it found, and the call on each open item, and the owner approved the freeze. The file keeps its name so that existing links hold.
 
-Ratification artifact R5 for the Encrypted profile. **Draft for review**: written
-with the design (spec Annex B.2.10, D20) before the code, because a crypto layout
-mistake is permanent once archives exist. It becomes frozen only after the
-implementation (plan C11) passes gate G10 and the owner (or a dedicated review pass)
-has read it. Where this file and the spec text of B.2.10 disagree, that is a defect
-in one of them: raise it, do not pick.
+Ratification artifact R5 for the Encrypted profile. Written with the design (spec
+Annex B.2.10, D20) before the code, because a crypto layout mistake is permanent once
+archives exist, and frozen after the implementation passed gate G10 and the review.
+Where this file and the spec text of B.2.10 disagree, that is a defect in one of
+them: raise it, do not pick.
+
+**What frozen means.** The byte layouts, identifiers, and algorithms of §1 to §4 and
+§6 are fixed for suite 1, key-envelope schema 0, sealed-object version 0, commit
+record schema 2 keys 11 and 12, and recovery-manifest schema 3 key 13 and the
+provenance `reason`. A change to any of them is a **new** identifier (suite 2,
+envelope schema 1, sealed version 1, a new required feature) with its own vectors,
+never an edit of this file. The reader limits of §1 are reader policy, not wire
+format, and may change through `--limit` or a later default. The rest of commit
+schema 2 and manifest schema 3 is restated from R3's schemas and freezes with R3.
+The format as a whole stays "experimental / draft-compatible" until 1.0 (spec §28):
+freezing R5 means no draft-era change to this topic, not that 1.0 has shipped.
 
 Sources: `docs/spec.md` §7.3, §14, Annex B D3, D10, D11, D12, **B.2.10 (D20)**;
 `docs/schemas/key-envelope-v0.cddl`, `commit-record-v2.cddl`,
@@ -114,6 +124,18 @@ decoder that Core uses, with its D11 obligations unchanged (features `[1]`, iden
 | Read file names, sizes, content, chunk hashes; replay manifests; restore; compact; gc; repair; `rekey` (except `--list`) | Yes |
 | `verify` content levels, Recoverability, Key availability = `PASS` | Yes |
 
+**Which passphrases reach the key.** Every passphrase whose envelope is anywhere in
+the file reaches the data key, including one removed by a rewrap: its envelope frame
+stays in the file, and a rewrap keeps the data key. That key opens every sealed object
+under the key ID, **including those written after the removal**. The implementation
+refuses a removed passphrase at the head (`open_head` is strict), but that is the
+tool's policy, not a cryptographic barrier: another reader, or this library through a
+historical commit, gets the same key. Only a rewrite (`rekey --reencrypt`, `compact`,
+`gc apply`, `repair apply`) seals content under a new data key, in a new file, that a
+passphrase not given again cannot reach. Copies of the old file keep the old key.
+`c11_rekey.rs` asserts this
+(`a_removed_passphrase_still_reads_content_appended_after_the_removal`).
+
 ## 6. Nonce discipline
 
 Every encryption (each sealed object, each key wrap) draws 24 fresh bytes from the OS
@@ -185,12 +207,28 @@ one reject vector (the implementation's reject fixtures and fuzz targets cover t
 
 * Crates (MIT or Apache-2.0): `chacha20poly1305` (the `XChaCha20Poly1305` type),
   `argon2`, `zeroize`, `unicode-normalization`, and `rpassword` in the CLI. Versions
-  are pinned by `Cargo.lock`, and the implementation PR records each crate's version
-  and the Unicode version in this file's table before it merges.
+  are pinned by `Cargo.lock`. The versions the vectors and the G10 evidence ran with
+  (recorded at the freeze, 2026-10-11):
+
+  | Crate | Version | Role |
+  |---|---|---|
+  | `chacha20poly1305` | 0.11.0 (`chacha20` 0.10.2, `poly1305` 0.9.1) | AEAD |
+  | `argon2` | 0.6.0 | KDF |
+  | `unicode-normalization` | 0.1.25, **Unicode 17.0.0** | NFC of passphrases (open item d) |
+  | `zeroize` | 1.9.1 | wiping secrets |
+  | `getrandom` | 0.3.4 | the OS CSPRNG |
+  | `blake3` | 1.8.7 | stored-object hashes |
+  | `rpassword` | 7.5.4 | prompt without echo (CLI only) |
+
+  An update of any of these needs the R5 vectors to pass unchanged. An update of
+  `unicode-normalization` that changes its Unicode version also updates this table.
 * `#![forbid(unsafe_code)]` stays in `mochi-format` and `mochi-core`.
-* Secret types (passphrase, KEK, DEK) have no `Debug`, `Display`, `Clone`-by-default, or
-  serialization; they zeroize on drop. `compile_fail` doctests guard the missing impls.
-  The test log is searched for the test passphrase and key bytes.
+* Secret types (passphrase, KEK, DEK) have no `Display`, `Clone`, byte accessor
+  outside `mochi-format`, or serialization; they zeroize on drop. Their `Debug` prints
+  a fixed placeholder (`DataKey(redacted)`) and never the bytes, so a struct holding
+  one can still derive `Debug` (accepted at the freeze; the draft said "no `Debug`").
+  `compile_fail` doctests guard the missing `Clone` and byte accessor; a unit test
+  checks the placeholder. The test log is searched for the test passphrase and key bytes.
 * Randomness: one function in `mochi-core`, used for every draw above; a test double
   exists only behind `test-controls` and cannot be built into the shipped binary.
 * The sealing pipeline is stage 2 of the existing object codec (`Protection::Aead`,
@@ -206,3 +244,67 @@ on a machine with fewer cores gets the same bytes, only slower (lanes, not threa
 determine the result). (j) The key-envelope identity fields (sequence and transaction
 ID of the writing commit) are informational beyond the archive-ID check; a later
 version may bind them.
+
+Each item was decided at the freeze; §12 gives the calls.
+
+## 12. Freeze review (2026-10-11)
+
+The review pass gate G10 asks for. It read this file, spec B.2.10, the three schemas,
+`docs/c11-encrypted.md`, and the code in `mochi-format` (`seal.rs`, `kdf.rs`,
+`secret.rs`, `digest.rs`) and `mochi-core` (`keys.rs`, `rekey.rs`). The owner
+approved the freeze and the calls below.
+
+**Checked.**
+
+* **The vectors reproduce.** `gen_vectors.py` run in a clean environment (PyNaCl 1.6.2,
+  argon2-cffi 25.1.0, cryptography 50.0.2, blake3 1.0.11, zstandard 0.25.0, cbor2
+  6.1.5) gives a `vectors.json` byte-identical to the committed one, and every oracle
+  agreement it asserts holds.
+* **The code is the layout.** The domain strings, the wrap and object associated data
+  (field order, widths, little-endian integers), the 48-byte sealed header, the
+  header-before-open order (version, suite, kind, key ID, then the AEAD), the KDF
+  checks before allocation, and the error mapping match §2 to §4 and §7.
+* **The construction.** XChaCha20-Poly1305 with 192-bit random nonces under a key that
+  is never shared between archives; Argon2id at RFC 9106's second recommended option;
+  the stored hash checked before any header is parsed; a tag failure after a verified
+  hash reported as content, not stored, damage; a wrong passphrase operational, not
+  damage. The associated data binds archive, kind, key ID, and object or commit, so a
+  sealed frame cannot be moved, re-kinded, or replayed across commits without the
+  open failing. No objection.
+* **Gate G10's evidence**, item by item: present, with the gap below now closed.
+
+**Found and fixed at the freeze** (immerh8/MOCHI#21; no stored byte changed).
+
+1. **Removal was worded too weakly** (B.2.10 item 10, the CLI's `rekey` output and
+   help, `docs/c11-encrypted.md`). They said a copy made *before* the removal still
+   opens. In fact the removed passphrase still reaches the data key from the *same*
+   file, and the key opens content appended *after* the removal (§5). The wording now
+   says so and points to `--reencrypt`; a test asserts it.
+2. **The nonce property test had no crash.** G10 names "retries, crash and reopen";
+   the test covered reopen only. It now has a step that tears a commit before its
+   footer, truncates the tail on reopen, and writes the same content again, and it
+   checks the lost attempt's nonces too.
+3. **§10 named no versions** although it said the implementation would record them.
+   The table in §10 records them, with the Unicode version.
+4. **§10 said "no `Debug`"** for secrets; the code prints a fixed placeholder. The text
+   now describes the code, which is the better choice.
+5. **Stale status text** ("Nothing here is implemented") in spec B.2.10 and §7.3, in
+   `docs/ratification/README.md`, and in the schema headers is updated.
+
+**Calls on the open items** (B.2.10 a to h, this file i and j). None changes a byte.
+
+| Item | Call | Why |
+|---|---|---|
+| (a) data region, commit key 12 | **Keep.** | Without it, keyless verification would cover metadata only, and "stored integrity needs no key" would be false for most of the bytes. Its cost is one hash per commit and a contiguity rule the writer already follows. |
+| (b) the archive ID in the associated data | **Keep.** | A rewrite needing the passphrase is the right cost: it is also what gives every rewrite a new data key, the only way a removed passphrase is actually cut off (§5). Binding the key ID alone would let sealed frames move between archives. |
+| (c) no minimum KDF cost on readers | **Keep: no reader floor.** The finding B.2.10 item 14 promises is defined now and is not wire format: `verify` (keyless or keyed) reports, for each envelope of the head whose `m` < 65,536 KiB or `t` < 3 (below the writer defaults), one informational item naming the declared and the default values. It changes no dimension's status and no exit code, and says "below the MOCHI writer default", never "weak" or "insecure". | A floor would refuse archives other writers made legitimately, and the writer defaults are the only threshold this project can defend without inventing one. Implementing the item is a C11 follow-up (plan), not a freeze blocker: no stored byte depends on it. |
+| (d) NFC and the Unicode version | **Keep NFC; the version is recorded** (§10, Unicode 17.0.0). | Unicode's normalization stability policy fixes NFC for every assigned code point, so a later Unicode version can change only passphrases that use code points unassigned in 17.0.0, which pass through unchanged today. |
+| (e) no key retirement in 1.0 | **Keep.** | Removal is a rewrap and re-encryption is a rewrite; a retirement that keeps retained snapshots under another key needs per-snapshot keys, a post-1.0 design. |
+| (f) every envelope damaged | **Keep.** | Several passphrases mean several envelope frames, and an older commit's envelopes still yield the key (§5). The Redundancy profile (C12) covers the rest. |
+| (g) the v2 manifest schema lacks key 12 | **Keep for R3**, as written. | It is R3's file; the v3 schema draws the key. |
+| (h) no profile conversion by rewrite | **Keep.** | D12; `--reencrypt` stays Encrypted to Encrypted. |
+| (i) threads = lanes | **Accepted as written.** | Lanes, not threads, determine the output. |
+| (j) envelope sequence and transaction ID unbound | **Keep.** | An envelope can only move within its own archive, where every envelope wraps the same key; binding them gains nothing a later envelope schema could not add. |
+
+**Implementation decisions** (`docs/c11-encrypted.md`, 1 to 6): all six accepted, with
+decision 1 read as §5 says (the strict head open is policy).

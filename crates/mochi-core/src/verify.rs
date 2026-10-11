@@ -269,7 +269,10 @@ pub fn classify(code: ErrorCode) -> ErrorClass {
         | ErrorCode::AttributeNotRestored
         // A wrong or missing passphrase is not evidence about the archive
         // (D20 item 9): the run could not look, so nothing is concluded.
-        | ErrorCode::KeyUnavailable => ErrorClass::Operational,
+        | ErrorCode::KeyUnavailable
+        // Only ever an informational finding (D20 item 14), never raised as
+        // an error; if one were, it would conclude nothing about the archive.
+        | ErrorCode::KdfCostBelowDefault => ErrorClass::Operational,
     }
 }
 

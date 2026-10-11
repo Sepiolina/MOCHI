@@ -82,6 +82,17 @@ equal the key state its segment's manifests replay to (`RECORD_INVALID` otherwis
 Opening for reading does not replay S(*b*) (D10.9), so a reader does not make that
 check; `verify`, appending, baseline recovery, and `fsck` do.
 
+With or without the passphrase, each key envelope in the file whose Argon2id cost is
+below the writer default (m < 64 MiB or t < 3) gets one finding,
+`KDF_COST_BELOW_DEFAULT`, severity `info`, with the declared and the default cost in
+`observed` and `expected` (D20 item 14). Readers accept any cost within the limits, so
+it changes no dimension and no exit code; it tells you a guess at that passphrase costs
+less than MOCHI's own writer would make it. Envelopes the head no longer lists are
+reported too, and the message says so: a removed envelope stays in the file and still
+yields the data key, so `--remove-passphrase` does not take it out of reach. Only
+`rekey --reencrypt` raises the cost: it writes a new file whose envelopes use the
+writer default; copies of the old file keep the cheap envelope.
+
 ## `rekey`
 
 * `rekey ARCHIVE --list` shows the head's envelope IDs, the commit that wrote each, and

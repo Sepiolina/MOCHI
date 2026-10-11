@@ -300,6 +300,62 @@ fn a_removed_passphrase_still_reads_content_appended_after_the_removal() {
     );
 }
 
+/// D20 item 14 with item 10: the KDF-cost finding judges every envelope in the
+/// file, not only the head's. A cheap envelope removed by a rewrap stays in
+/// the file and still yields the data key, so it is still reported, and the
+/// finding says the head no longer lists it.
+#[test]
+fn a_removed_envelope_below_the_kdf_default_is_still_reported() {
+    use mochi_core::report::Severity;
+    use mochi_core::status::VerificationLevel;
+    use mochi_core::verify::{verify, VerifyOptions};
+
+    let s = archive(&[A]);
+    let a_envelope = envelope_ids(&s).pop().unwrap();
+    let mut w = lock(&s, &[A], 5);
+    rewrap(
+        &mut w,
+        vec![pass(B)],
+        vec![parse_envelope_id(&a_envelope).unwrap()],
+        &Job::new().ctx(),
+    )
+    .unwrap();
+    w.close().unwrap();
+    let b_envelope = envelope_ids(&s).pop().unwrap();
+    assert_ne!(a_envelope, b_envelope);
+
+    for read in [keyed_read(&[B]), ReadOptions::default()] {
+        let r = verify(
+            &s,
+            &VerifyOptions {
+                level: VerificationLevel::StoredIntegrity,
+                read,
+                ..VerifyOptions::default()
+            },
+            &Job::new().ctx(),
+        )
+        .report;
+        let found: Vec<_> = r
+            .findings
+            .iter()
+            .filter(|f| f.code == ErrorCode::KdfCostBelowDefault)
+            .collect();
+        assert_eq!(found.len(), 2, "{:?}", r.findings);
+        assert!(found.iter().all(|f| f.severity == Severity::Info));
+        let about = |id: &str| {
+            found
+                .iter()
+                .find(|f| f.message.as_deref().unwrap().contains(id))
+                .unwrap_or_else(|| panic!("no finding names {id}: {found:?}"))
+                .message
+                .clone()
+                .unwrap()
+        };
+        assert!(about(&a_envelope).contains("no longer lists it"));
+        assert!(!about(&b_envelope).contains("no longer lists it"));
+    }
+}
+
 #[test]
 fn a_rewrap_that_would_leave_nothing_or_names_nothing_writes_nothing() {
     let s = archive(&[A]);

@@ -8,6 +8,7 @@ Spec §20.5 lists what a machine-readable report must contain; this file is the 
 - New field `freshness_anchor` (spec Annex B.1 D8: "the report names the anchor used").
 - `started_at` / `completed_at` are filled, in the D15 form `YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ`.
 - New error codes `REFERENCE_INVALID` and `FRESHNESS_FAILED` (both exit 1). `PROFILE_VIOLATION` (exit 1) is added by the TAR-compatibility profile (Annex B.2.9 D19).
+- The Encrypted profile (Annex B.2.10 D20) adds `KEY_UNAVAILABLE` (an operational error, exit 3, never a finding) and `KDF_COST_BELOW_DEFAULT`, which only ever appears as a finding with severity `info`: a key envelope in the file (any commit's, removed ones included, since they still yield the data key) declares an Argon2id cost below the writer default (m < 65,536 KiB or t < 3); the message says when the head no longer lists it. `expected` and `observed` give the two costs; it changes no dimension and no exit code (D20 item 14).
 
 ## Fields
 

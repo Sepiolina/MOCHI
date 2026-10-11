@@ -146,6 +146,16 @@ fn verified(s: &mochi_testkit::SimStorage) -> mochi_core::report::Report {
     .report
 }
 
+/// Every finding except the informational `KDF_COST_BELOW_DEFAULT`, which
+/// the test KDF earns for each envelope (D20 item 14) and which says nothing
+/// about the forgery.
+fn problems(r: &mochi_core::report::Report) -> Vec<&mochi_core::report::Finding> {
+    r.findings
+        .iter()
+        .filter(|f| f.code != ErrorCode::KdfCostBelowDefault)
+        .collect()
+}
+
 fn record_invalid(s: &mochi_testkit::SimStorage) -> bool {
     let r = verified(s);
     r.dimensions[&Dimension::Integrity] == Status::Fail
@@ -159,7 +169,7 @@ fn the_control_forgery_is_well_formed() {
     let s = forge(Plan::default());
     assert_eq!(open(&s).unwrap(), 2);
     let r = verified(&s);
-    assert!(r.findings.is_empty(), "{:?}", r.findings);
+    assert!(problems(&r).is_empty(), "{:?}", r.findings);
 }
 
 #[test]
@@ -197,7 +207,7 @@ fn a_commit_whose_envelope_list_disagrees_with_the_replayed_key_state_is_refused
     });
     assert_eq!(open(&s).unwrap(), 2);
     let r = verified(&s);
-    assert!(r.findings.is_empty(), "{:?}", r.findings);
+    assert!(problems(&r).is_empty(), "{:?}", r.findings);
 }
 
 #[test]

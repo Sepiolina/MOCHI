@@ -20,9 +20,18 @@
 //! Whatever needs the key is skipped with the reason "no key supplied", and
 //! the dimensions that depend on it stay `UNKNOWN`: nothing here is a claim
 //! about content, names, or the catalog.
+//!
+//! The same walk runs with a key, before the keyed checks. In both, each
+//! distinct key envelope any commit lists whose Argon2id cost is below the
+//! writer default gets one informational `KDF_COST_BELOW_DEFAULT` finding (D20
+//! item 14): readers enforce no minimum, so it changes no status and no exit
+//! code.
+
+use std::collections::BTreeSet;
 
 use mochi_format::digest::{StoredBytesHasher, StoredObjectHash};
 use mochi_format::frame::walk_frame;
+use mochi_format::kdf::KdfParams;
 use mochi_format::registry::FrameKind;
 use mochi_format::repr::StoredObjectBytes;
 use mochi_format::seal::{parse_sealed, sealed_frame_payload, KeyId, SealKind};
@@ -32,6 +41,7 @@ use crate::error::{ErrorCode, MochiError, Result};
 use crate::job::JobContext;
 use crate::keys::read_envelopes;
 use crate::publish::{load_verified, read_descriptor, HistoryEntry, ReadOptions};
+use crate::report::{Finding, Severity};
 use crate::storage::{ReadStorage, StorageReader};
 
 use super::{classify, phase, ErrorClass, Run};
@@ -43,6 +53,57 @@ pub(super) const NO_KEY: &str = "no key supplied";
 
 fn invalid(msg: impl Into<String>) -> MochiError {
     MochiError::new(ErrorCode::RecordInvalid, msg)
+}
+
+fn cost(k: &KdfParams) -> String {
+    format!(
+        "m = {} KiB, t = {}, p = {}",
+        k.memory_kib, k.iterations, k.lanes
+    )
+}
+
+/// An envelope's ID, its KDF cost, and whether the head lists it.
+type Envelope = ([u8; 16], KdfParams, bool);
+
+fn below_default(k: &KdfParams) -> bool {
+    let d = KdfParams::WRITER_DEFAULT;
+    k.memory_kib < d.memory_kib || k.iterations < d.iterations
+}
+
+/// One informational finding per distinct key envelope in the file whose
+/// Argon2id memory or pass count is below the writer default (D20 item 14;
+/// R5 §12, open item c). Every envelope any commit lists counts, not only the
+/// head's: a removed envelope stays in the file and still yields the data key
+/// (removal is not revocation, item 10), so a guess against it is as good as
+/// one against the head's. `in_head` says whether the head still lists it.
+/// Lanes do not enter: they change parallelism, not the cost per guess. The
+/// wording says "below the MOCHI writer default", never "weak".
+fn kdf_cost_findings(run: &mut Run, envelopes: impl IntoIterator<Item = Envelope>) {
+    let default = KdfParams::WRITER_DEFAULT;
+    for (envelope_id, kdf, in_head) in envelopes {
+        if !below_default(&kdf) {
+            continue;
+        }
+        let id: String = envelope_id.iter().map(|b| format!("{b:02x}")).collect();
+        let listed = if in_head {
+            String::new()
+        } else {
+            " (the head no longer lists it, but it is still in the file and still opens \
+             the data key)"
+                .to_owned()
+        };
+        run.report.findings.push(Finding {
+            code: ErrorCode::KdfCostBelowDefault,
+            severity: Severity::Info,
+            message: Some(format!(
+                "key envelope {id}{listed} declares an Argon2id cost below the MOCHI writer \
+                 default; readers accept it, and a passphrase guess against it costs less"
+            )),
+            expected: Some(format!("at least {}", cost(&default))),
+            observed: Some(cost(&kdf)),
+            affected: None,
+        });
+    }
 }
 
 /// A walk error that is evidence about the archive is a shape fault of the
@@ -182,6 +243,11 @@ pub(super) fn check(
     let total = history.len() as u64;
     ctx.report(phase::KEYLESS, 0, Some(total));
     let (mut region_bytes, mut hashed_bytes, mut frames_seen) = (0u64, 0u64, 0u64);
+    // For the KDF-cost finding: every distinct envelope ID of the file, the
+    // below-default ones in order of first listing, and the head's.
+    let mut seen: BTreeSet<[u8; 16]> = BTreeSet::new();
+    let mut cheap: Vec<([u8; 16], KdfParams)> = Vec::new();
+    let mut head_ids: Vec<[u8; 16]> = Vec::new();
     for (i, e) in history.iter().enumerate() {
         if ctx.check_cancelled().is_err() {
             return false;
@@ -193,7 +259,17 @@ pub(super) fn check(
             run.error(&format!("{what}: its archive descriptor"), &err);
         }
         let key_id = match read_envelopes(src, c, at, ro) {
-            Ok(envs) => envs.first().map(|(_, env)| env.key_id),
+            Ok(envs) => {
+                for (_, env) in &envs {
+                    if seen.insert(env.envelope_id) && below_default(&env.kdf) {
+                        cheap.push((env.envelope_id, env.kdf));
+                    }
+                }
+                if i + 1 == history.len() {
+                    head_ids = envs.iter().map(|(_, env)| env.envelope_id).collect();
+                }
+                envs.first().map(|(_, env)| env.key_id)
+            }
             Err(err) => {
                 run.error(&format!("{what}: its key envelopes"), &err);
                 None
@@ -227,6 +303,12 @@ pub(super) fn check(
         }
         ctx.report(phase::KEYLESS, i as u64 + 1, Some(total));
     }
+    kdf_cost_findings(
+        run,
+        cheap
+            .into_iter()
+            .map(|(id, kdf)| (id, kdf, head_ids.contains(&id))),
+    );
     if !keyless {
         return true;
     }
@@ -250,4 +332,76 @@ pub(super) fn check(
     }
     run.skip("recoverability", NO_KEY);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::report::Report;
+    use crate::status::VerificationLevel;
+
+    fn run() -> Run {
+        Run {
+            report: Report::new(VerificationLevel::StoredIntegrity),
+            violation: false,
+            unsupported: false,
+            operational: false,
+            data_complete: false,
+            data_failed: false,
+            recovery_failed: false,
+            tar_streams: false,
+            keyless: false,
+        }
+    }
+
+    /// The threshold is the writer default, inclusive: exactly the default
+    /// (or more) is silent; one KiB or one pass less is one finding per
+    /// envelope; lanes never matter. The finding sets no run flag.
+    #[test]
+    fn below_default_cost_is_one_informational_finding_per_envelope() {
+        let d = KdfParams::WRITER_DEFAULT;
+        let with = |m: u64, t: u64, p: u64| KdfParams {
+            memory_kib: m,
+            iterations: t,
+            lanes: p,
+        };
+        let cases = [
+            (d, false),
+            (with(d.memory_kib, d.iterations, 1), false),
+            (with(d.memory_kib * 4, d.iterations + 1, 16), false),
+            (with(d.memory_kib - 1, d.iterations, d.lanes), true),
+            (with(d.memory_kib, d.iterations - 1, d.lanes), true),
+            (with(64, 2, 1), true),
+        ];
+        for (i, (kdf, flagged)) in cases.into_iter().enumerate() {
+            let mut r = run();
+            kdf_cost_findings(&mut r, [([i as u8; 16], kdf, true)]);
+            assert_eq!(r.report.findings.len(), usize::from(flagged), "{kdf:?}");
+            assert!(!r.violation && !r.unsupported && !r.operational);
+            if let Some(f) = r.report.findings.first() {
+                assert_eq!(f.code, ErrorCode::KdfCostBelowDefault);
+                assert_eq!(f.severity, Severity::Info);
+                assert!(f
+                    .message
+                    .as_deref()
+                    .unwrap()
+                    .contains(&format!("{:02x}", i)));
+            }
+        }
+        let mut r = run();
+        kdf_cost_findings(
+            &mut r,
+            [
+                ([1; 16], with(64, 2, 1), true),
+                ([2; 16], d, true),
+                ([3; 16], with(1024, 3, 1), false),
+            ],
+        );
+        assert_eq!(r.report.findings.len(), 2);
+        // An envelope the head no longer lists is still judged, and says so.
+        let msg = r.report.findings[1].message.as_deref().unwrap();
+        assert!(msg.contains("no longer lists it"), "{msg}");
+        let msg = r.report.findings[0].message.as_deref().unwrap();
+        assert!(!msg.contains("no longer lists it"), "{msg}");
+    }
 }

@@ -9,7 +9,7 @@ reject-envelope-wrong-frame-kind rejects Envelope(KindHasNoEnvelope)
 reject-envelope-version rejects UnsupportedEnvelopeVersion { version: 1 }
 reject-envelope-schema-unknown rejects UnsupportedSchema { version: 1 }
 reject-envelope-schema-user-version rejects Envelope(SchemaVersionMismatch)
-reject-envelope-unknown-feature rejects UnsupportedRequiredFeature { feature: 1 }
+reject-envelope-unknown-feature rejects UnsupportedRequiredFeature { feature: 2 }
 reject-envelope-features-not-increasing rejects Envelope(FeaturesNotIncreasing)
 reject-envelope-feature-count rejects Envelope(FeatureCountOutOfRange)
 reject-envelope-header-length rejects Envelope(HeaderLengthMismatch)

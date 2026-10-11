@@ -3,7 +3,7 @@
 //! * Built: `create`, `append`, `list`, `get`, `snapshot list`, `snapshot
 //!   retain`/`expire`/`release`, `search`, `verify`, `fsck`, `restore-test`,
 //!   `checkpoint`, `compact`, `gc plan`, `gc apply`, `repair plan`,
-//!   `repair apply`.
+//!   `repair apply`, `rekey`.
 //! * In 1.0 scope but not built yet: exit 3 with `NOT_IMPLEMENTED` (a
 //!   development-build condition, never a success). Their arguments are
 //!   accepted and ignored, so the refusal names the command.
@@ -46,6 +46,20 @@ pub struct Cli {
     #[arg(long = "limit", global = true, value_name = "NAME=VALUE")]
     pub limits: Vec<String>,
 
+    /// A file whose first line is a passphrase for an Encrypted archive
+    /// (read once), repeatable. A passphrase is never an argument value. For
+    /// `create --encrypted` and the rewrites, each file adds one key
+    /// envelope to the new archive. Without a file or the environment
+    /// switch, commands that need a passphrase ask for it on the terminal.
+    #[arg(long = "passphrase-file", global = true, value_name = "PATH")]
+    pub passphrase_files: Vec<PathBuf>,
+
+    /// Read the passphrase from the environment variable MOCHI_PASSPHRASE.
+    /// For automation only: a process environment is readable by more than
+    /// its owner, so prefer --passphrase-file or the prompt.
+    #[arg(long, global = true)]
+    pub passphrase_env_for_automation: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -75,8 +89,16 @@ pub struct CreateArgs {
     /// commit also writes a TAR stream, so `zstd -dc` of the file yields the
     /// commits' streams. The choice is fixed for the archive's life, turns
     /// deduplication off, and costs space (see docs/c10-tar-compat.md).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "encrypted")]
     pub tar_compatible: bool,
+    /// Create an Encrypted archive (spec Annex B.2.10 D20): names, content,
+    /// sizes, and structure are sealed under a random data key that each
+    /// passphrase wraps. The choice is fixed for the archive's life. The
+    /// passphrase comes from --passphrase-file (repeatable), the environment
+    /// switch, or a prompt asked twice. Losing every passphrase loses the
+    /// archive: there is no recovery.
+    #[arg(long)]
+    pub encrypted: bool,
     /// Most content bytes one commit may hold in memory.
     #[arg(long, value_name = "BYTES")]
     pub max_memory: Option<u64>,
@@ -280,6 +302,12 @@ pub struct VerifyArgs {
     /// Require freshness evidence even without an anchor (then exit 2).
     #[arg(long)]
     pub require_freshness: bool,
+    /// Ask for the passphrase of an Encrypted archive. Without a passphrase
+    /// source (this, --passphrase-file, or the environment switch) an
+    /// Encrypted archive is verified without a key: stored integrity only,
+    /// with content, recoverability, and key availability `UNKNOWN`.
+    #[arg(long)]
+    pub ask_passphrase: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -376,6 +404,38 @@ pub struct GcApplyArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct RekeyArgs {
+    pub archive: PathBuf,
+    /// Show the head's key envelopes (ID, the commit that wrote it, KDF
+    /// cost). Needs no passphrase.
+    #[arg(long, conflicts_with_all = ["add_passphrase", "remove_passphrase", "reencrypt"])]
+    pub list: bool,
+    /// Add a passphrase (a rewrap): one new commit holding a new key
+    /// envelope. The data key does not change and no data is rewritten. The
+    /// new passphrase comes from --new-passphrase-file or a prompt asked
+    /// twice; the passphrase that opens the archive is the global one.
+    #[arg(long, conflicts_with = "reencrypt")]
+    pub add_passphrase: bool,
+    /// Remove the key envelope with this ID (a rewrap; see --list). This is
+    /// NOT revocation: the envelope stays in the file's history and any copy
+    /// made before still opens with that passphrase. Repeatable.
+    #[arg(long, value_name = "ENVELOPE_ID", conflicts_with = "reencrypt")]
+    pub remove_passphrase: Vec<String>,
+    /// Write a new archive (`--output`) under a new data key and the new
+    /// passphrases, every snapshot kept. Never in place. Does not recall
+    /// copies already made.
+    #[arg(long, requires = "output")]
+    pub reencrypt: bool,
+    /// The new archive for --reencrypt. It must not exist.
+    #[arg(long, short = 'o', value_name = "NEW_ARCHIVE")]
+    pub output: Option<PathBuf>,
+    /// A file whose first line is a new passphrase for --add-passphrase or
+    /// --reencrypt, repeatable.
+    #[arg(long, value_name = "PATH")]
+    pub new_passphrase_file: Vec<PathBuf>,
+}
+
+#[derive(Debug, Args)]
 pub struct SnapshotListArgs {
     pub archive: PathBuf,
 }
@@ -458,8 +518,9 @@ pub enum Command {
     /// Plan or apply garbage collection.
     #[command(subcommand)]
     Gc(GcCommand),
-    /// Rotate or rewrap keys (Encrypted profile).
-    Rekey(PendingArgs),
+    /// List, add, or remove passphrases of an Encrypted archive, or re-encrypt
+    /// it into a new archive.
+    Rekey(RekeyArgs),
     /// Dump the catalog of a commit, table by table (read-only).
     DumpIndex(DumpIndexArgs),
 
@@ -519,11 +580,9 @@ impl Command {
     /// The catch-all arguments of a command that is not built.
     pub fn pending_args(&self) -> &[String] {
         match self {
-            Command::Rekey(a)
-            | Command::Inventory(a)
-            | Command::Split(a)
-            | Command::Join(a)
-            | Command::Mount(a) => &a.args,
+            Command::Inventory(a) | Command::Split(a) | Command::Join(a) | Command::Mount(a) => {
+                &a.args
+            }
             _ => &[],
         }
     }
@@ -547,8 +606,8 @@ impl Command {
             | Command::Checkpoint(_)
             | Command::Compact(_)
             | Command::Gc(_)
+            | Command::Rekey(_)
             | Command::Repair(_) => Scope::Built,
-            _ => Scope::InScope,
         }
     }
 }

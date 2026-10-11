@@ -308,7 +308,7 @@ fn commit_stream(
             }
         }
         let stored = load_stored(src, at, record, &ro.limits)?;
-        let decoded = decode_verified(record, &stored, &ro.limits)?;
+        let decoded = decode_verified(record, &stored, &ro.limits, None)?;
         parser.feed(decoded.as_bytes(), &mut |ev| match ev {
             Event::Member(m) => st.on_member(m),
             Event::Content(b) => st.on_content(b),

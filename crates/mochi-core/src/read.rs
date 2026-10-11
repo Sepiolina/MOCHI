@@ -207,6 +207,9 @@ fn stream_version(
         MochiError::new(ErrorCode::IoError, format!("writing the file failed: {e}"))
     };
     let mut hasher = FileContentHasher::new();
+    // An Encrypted archive's chunks are sealed under its data key (D20).
+    let key = crate::keys::catalog_key(opts, cat);
+    let seal = key.as_deref().map(crate::keys::Unlocked::context);
     let mut cached: Option<(ObjectId, mochi_format::repr::DecodedBytes)> = None;
     let mut chunks_loaded = 0u64;
     let mut hole_bytes = 0u64;
@@ -239,7 +242,7 @@ fn stream_version(
                         .object_location(&chunk)?
                         .ok_or_else(|| missing("a chunk has no location"))?;
                     let stored = load_stored(src, at, &record, &opts.limits)?;
-                    let decoded = decode_verified(&record, &stored, &opts.limits)?;
+                    let decoded = decode_verified(&record, &stored, &opts.limits, seal.as_ref())?;
                     chunks_loaded += 1;
                     cached = Some((chunk, decoded));
                 }

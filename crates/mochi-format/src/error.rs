@@ -39,6 +39,10 @@ pub enum ErrorClass {
     /// (spec Annex B.2.3 writer default rule; B.2.2 `CAPACITY_EXCEEDED`).
     /// Never raised while reading: readers report [`ErrorClass::LimitExceeded`].
     CapacityExceeded,
+    /// An operation needs the archive's data key and none was supplied, or
+    /// none of the supplied passphrases opens a key envelope (spec Annex
+    /// B.2.10 item 9). Not evidence of damage.
+    KeyUnavailable,
 }
 
 /// Which configurable limit was hit.
@@ -56,6 +60,14 @@ pub enum LimitKind {
     /// Payload of a binary-enveloped record, e.g. a catalog image (B.2.3:
     /// *S* − 592).
     ImagePayload,
+    /// Argon2id memory a key envelope declares, in KiB (D20 item 1).
+    KdfMemory,
+    /// Argon2id passes (iterations) a key envelope declares.
+    KdfIterations,
+    /// Argon2id lanes a key envelope declares.
+    KdfLanes,
+    /// Key envelopes one commit lists (D20 item 3).
+    KeyEnvelopes,
 }
 
 /// Which bound a writer would have exceeded (spec Annex B.2.3).
@@ -151,6 +163,38 @@ pub enum CodecFault {
     EncoderFailed,
 }
 
+/// Why sealing, opening, or wrapping failed (spec Annex B.2.10, D20).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SealFault {
+    /// A sealed-object payload shorter than header plus tag.
+    TooShort,
+    /// The authentication tag did not verify: the bytes are not what was
+    /// sealed under this key, archive, and binding. Whether that means a wrong
+    /// key or a modified object is decided by the caller, which knows whether
+    /// the stored-object hash already verified.
+    Authentication,
+    /// The sealed header names a key other than the one in use.
+    KeyIdMismatch,
+    /// A sealed-object version this build does not know.
+    UnknownVersion { version: u16 },
+    /// A suite this build does not know.
+    UnknownSuite { suite: u16 },
+    /// An object kind this build does not know.
+    UnknownKind { kind: u32 },
+    /// A KDF or Argon2 version this build does not know.
+    UnknownKdf,
+    /// KDF parameters below Argon2's own minimums (m < 8·p, t < 1, p < 1).
+    BadKdfParameters,
+    /// A sealed object of a kind other than the one the reader expected.
+    KindMismatch,
+    /// The operation needs the data key and the caller supplied none.
+    NoKey,
+    /// The operating-system random source failed.
+    RandomFailed,
+    /// The AEAD or KDF primitive failed for a reason not archive-derived.
+    PrimitiveFailed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FormatError {
     /// The input ended at `offset`, where more bytes were required.
@@ -232,6 +276,8 @@ pub enum FormatError {
     /// A caller asked for something the encoder must refuse (not
     /// archive-derived), e.g. an unsorted map.
     InvalidArgument(&'static str),
+    /// Sealing, opening, or key wrapping failed (D20).
+    Seal(SealFault),
 }
 
 impl FormatError {
@@ -278,6 +324,20 @@ impl FormatError {
             FormatError::CannotWrite(_) | FormatError::PayloadTooLarge { .. } => {
                 ErrorClass::InvalidArgument
             }
+            FormatError::Seal(fault) => match fault {
+                SealFault::TooShort => ErrorClass::Malformed,
+                SealFault::Authentication => ErrorClass::ContentIntegrity,
+                SealFault::KeyIdMismatch
+                | SealFault::KindMismatch
+                | SealFault::BadKdfParameters => ErrorClass::Record,
+                SealFault::NoKey => ErrorClass::KeyUnavailable,
+                SealFault::UnknownVersion { .. }
+                | SealFault::UnknownSuite { .. }
+                | SealFault::UnknownKind { .. }
+                | SealFault::UnknownKdf => ErrorClass::Unsupported,
+                SealFault::RandomFailed => ErrorClass::Source,
+                SealFault::PrimitiveFailed => ErrorClass::InvalidArgument,
+            },
         }
     }
 }
@@ -345,6 +405,7 @@ impl fmt::Display for FormatError {
             FormatError::Cbor(fault) => write!(f, "not canonical MOCHI CBOR: {fault:?}"),
             FormatError::Schema(msg) => write!(f, "schema violation: {msg}"),
             FormatError::InvalidArgument(msg) => write!(f, "invalid argument: {msg}"),
+            FormatError::Seal(fault) => write!(f, "sealed object or key envelope: {fault:?}"),
         }
     }
 }

@@ -61,7 +61,7 @@ fn image_budget_boundary_with_synthetic_image_bytes() {
 
     // Exactly the budget: written, and read back by a default reader.
     let mut payload = sqlite_shaped(DEFAULT_IMAGE_PAYLOAD);
-    let stored = encode_image_record(&payload, identity()).unwrap();
+    let stored = encode_image_record(&payload, identity(), false).unwrap();
     assert_eq!(
         stored.len(),
         SKIPPABLE_HEADER_LEN as u64 + 80 + DEFAULT_IMAGE_PAYLOAD
@@ -72,7 +72,7 @@ fn image_budget_boundary_with_synthetic_image_bytes() {
 
     // One byte over: the writer refuses; nothing is emitted.
     payload.push(0);
-    let e = encode_image_record(&payload, identity()).unwrap_err();
+    let e = encode_image_record(&payload, identity(), false).unwrap_err();
     assert_eq!(e.code, ErrorCode::CapacityExceeded, "{e}");
 
     // One byte over, written by a writer with raised limits: the frame

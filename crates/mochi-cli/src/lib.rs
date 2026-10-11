@@ -9,6 +9,7 @@
 pub mod cli;
 pub mod commands;
 pub mod exit;
+pub mod passphrase;
 pub mod render;
 pub mod state;
 
@@ -85,7 +86,8 @@ pub fn exit_code_for(code: ErrorCode) -> u8 {
         | ErrorCode::DurabilityUnconfirmed
         | ErrorCode::NameCollision
         | ErrorCode::NameUnsupported
-        | ErrorCode::AttributeNotRestored => exit::ERROR,
+        | ErrorCode::AttributeNotRestored
+        | ErrorCode::KeyUnavailable => exit::ERROR,
     }
 }
 
@@ -184,6 +186,10 @@ where
         err: errw,
         read,
         store,
+        pass: passphrase::Sources {
+            files: cli.passphrase_files.clone(),
+            env: cli.passphrase_env_for_automation,
+        },
     };
     let result = match &cli.command {
         Command::Create(a) => commands::create(&mut env, a),
@@ -198,6 +204,7 @@ where
         Command::Snapshot(SnapshotCommand::Expire(a)) => commands::snapshot_expire(&mut env, a),
         Command::Snapshot(SnapshotCommand::Release(a)) => commands::snapshot_release(&mut env, a),
         Command::Checkpoint(a) => commands::checkpoint(&mut env, a),
+        Command::Rekey(a) => commands::rekey(&mut env, a),
         Command::Compact(a) => commands::compact_cmd(&mut env, a),
         Command::Gc(GcCommand::Plan(a)) => commands::gc_plan(&mut env, a),
         Command::Gc(GcCommand::Apply(a)) => commands::gc_apply(&mut env, a),

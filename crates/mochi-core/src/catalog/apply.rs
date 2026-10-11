@@ -253,7 +253,11 @@ impl SegmentApplier {
         }
         // The decoder already refuses unknown features; refuse again rather
         // than apply something this build cannot interpret (D10.4).
-        if !delta.required_features.is_empty() {
+        if delta
+            .required_features
+            .iter()
+            .any(|f| !crate::manifest::KNOWN_REQUIRED_FEATURES.contains(f))
+        {
             return Err(MochiError::new(
                 ErrorCode::UnsupportedFeature,
                 format!(
@@ -441,6 +445,7 @@ mod tests {
             retention_ops: Vec::new(),
             retention: Default::default(),
             provenance: None,
+            keys: Default::default(),
         };
         m.canonicalize();
         m
@@ -697,7 +702,7 @@ mod tests {
         assert_eq!(a.apply(&m).unwrap_err().code, ErrorCode::RecordInvalid);
 
         let mut m = delta(1, vec![], vec![], vec![]);
-        m.required_features = vec![1];
+        m.required_features = vec![2];
         assert_eq!(a.apply(&m).unwrap_err().code, ErrorCode::UnsupportedFeature);
         assert_eq!(state(&a), before);
     }

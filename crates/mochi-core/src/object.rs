@@ -31,6 +31,8 @@ use mochi_format::digest::{
     chunk_content_hash, stored_object_hash, ChunkContentHash, StoredObjectHash,
 };
 use mochi_format::repr::{DecodedBytes, StoredObject};
+use mochi_format::seal::SealContext;
+use mochi_format::secret::Random;
 use mochi_format::Limits;
 
 use crate::error::{ErrorCode, MochiError, Result};
@@ -177,6 +179,97 @@ pub fn build_object(
     Ok(EncodedObject { record, stored })
 }
 
+/// [`build_object`] for the Encrypted profile (Annex B.2.10 D20): the object
+/// is sealed under `ctx` for the ID it is given **first**, because the ID is
+/// part of the associated data. The record is [`Protection::Aead`]; its stored
+/// length and hash describe the whole sealed frame (spec §9.2: the stored-object
+/// hash covers the stored bytes), and its decoded length and content hash are
+/// those of `content`, so dedup and verification compare plaintext hashes
+/// exactly as in Core.
+pub fn build_object_sealed(
+    content: &DecodedBytes,
+    params: &EncodeParams,
+    ctx: &SealContext<'_>,
+    ids: &mut dyn IdSource,
+    rng: &mut dyn Random,
+    limits: &Limits,
+) -> Result<EncodedObject> {
+    let id = ObjectId(ids.next_id()?);
+    let stored = codec::encode_object_sealed(content, params, ctx, id.as_bytes(), rng, limits)?;
+    let record = ObjectRecord {
+        id,
+        encoding: params.encoding,
+        protection: Protection::Aead,
+        stored_len: stored.len(),
+        stored_hash: stored_object_hash(stored.view()),
+        decoded_len: content.len(),
+        content_hash: chunk_content_hash(content),
+        dependencies: Vec::new(),
+    };
+    Ok(EncodedObject { record, stored })
+}
+
+/// A rewrite's step from a sealed source: open the chunk and describe the
+/// Zstandard frame inside as an **unprotected** record of the same object (same
+/// ID, same decoded length and content hash), ready for a writer of any
+/// profile to store as it is or to seal anew. The stored hash is checked first.
+pub fn unseal_object(
+    record: &ObjectRecord,
+    stored: &StoredObject,
+    ctx: &SealContext<'_>,
+    limits: &Limits,
+) -> Result<(ObjectRecord, StoredObject)> {
+    if record.protection != Protection::Aead {
+        return Err(MochiError::new(
+            ErrorCode::InvalidArgument,
+            "internal: unsealing an object that is not sealed",
+        ));
+    }
+    verify_stored(record, stored)?;
+    let frame = codec::unseal_object(stored, ctx, record.id.as_bytes(), limits).map_err(|e| {
+        let err = MochiError::from(e);
+        MochiError::new(
+            err.code,
+            format!("object {}: {}", record.id.to_hex(), err.message),
+        )
+    })?;
+    let plain = StoredObject::from_loaded(frame);
+    let plain_record = ObjectRecord {
+        protection: Protection::None,
+        stored_len: plain.len(),
+        stored_hash: stored_object_hash(plain.view()),
+        ..record.clone()
+    };
+    Ok((plain_record, plain))
+}
+
+/// The other half of a rewrite: seal the Zstandard frame of an unprotected
+/// record for the new archive. Same ID, decoded length, and content hash; a new
+/// nonce, stored length, and stored hash.
+pub fn seal_object(
+    record: &ObjectRecord,
+    plain: &StoredObject,
+    ctx: &SealContext<'_>,
+    rng: &mut dyn Random,
+    limits: &Limits,
+) -> Result<(ObjectRecord, StoredObject)> {
+    if record.protection != Protection::None {
+        return Err(MochiError::new(
+            ErrorCode::InvalidArgument,
+            "internal: sealing an object that is already sealed",
+        ));
+    }
+    verify_stored(record, plain)?;
+    let stored = codec::seal_data_frame(plain.as_bytes(), ctx, record.id.as_bytes(), rng, limits)?;
+    let sealed = ObjectRecord {
+        protection: Protection::Aead,
+        stored_len: stored.len(),
+        stored_hash: stored_object_hash(stored.view()),
+        ..record.clone()
+    };
+    Ok((sealed, stored))
+}
+
 /// Read an object's stored bytes at `offset`. The recorded length is
 /// archive-derived, so it is limit-checked before allocation (spec §8.5).
 pub fn load_stored(
@@ -238,10 +331,16 @@ pub fn verify_stored(record: &ObjectRecord, stored: &StoredObject) -> Result<()>
 
 /// Stored integrity, then content integrity (spec §20.1). Returns decoded
 /// bytes only if every check passes; there is no partial result.
+///
+/// A sealed object ([`Protection::Aead`]) needs `seal`, the key and archive it
+/// was sealed in; without it the answer is `KEY_UNAVAILABLE`, after the stored
+/// hash (which needs no key) has been checked. A tag failure on an object whose
+/// stored hash verified is `CONTENT_INTEGRITY_FAILED`.
 pub fn decode_verified(
     record: &ObjectRecord,
     stored: &StoredObject,
     limits: &Limits,
+    seal: Option<&SealContext<'_>>,
 ) -> Result<DecodedBytes> {
     verify_stored(record, stored)?;
     if let Some(dep) = record.dependencies.first() {
@@ -254,14 +353,23 @@ pub fn decode_verified(
             ),
         ));
     }
-    let decoded = codec::decode_object(stored, record.protection, record.decoded_len, limits)
-        .map_err(|e| {
-            let err = MochiError::from(e);
-            MochiError::new(
-                err.code,
-                format!("object {}: {}", record.id.to_hex(), err.message),
-            )
-        })?;
+    let decoded = match (record.protection, seal) {
+        (Protection::Aead, Some(ctx)) => codec::decode_object_sealed(
+            stored,
+            ctx,
+            record.id.as_bytes(),
+            record.decoded_len,
+            limits,
+        ),
+        _ => codec::decode_object(stored, record.protection, record.decoded_len, limits),
+    }
+    .map_err(|e| {
+        let err = MochiError::from(e);
+        MochiError::new(
+            err.code,
+            format!("object {}: {}", record.id.to_hex(), err.message),
+        )
+    })?;
     if chunk_content_hash(&decoded) != record.content_hash {
         return Err(MochiError::new(
             ErrorCode::ContentIntegrityFailed,
@@ -366,7 +474,7 @@ mod tests {
         o.record
             .dependencies
             .push(Dependency::Dictionary(ObjectId::from_bytes([9; 32])));
-        let e = decode_verified(&o.record, &o.stored, &Limits::default()).unwrap_err();
+        let e = decode_verified(&o.record, &o.stored, &Limits::default(), None).unwrap_err();
         assert_eq!(e.code, ErrorCode::UnsupportedFeature);
     }
 
@@ -392,5 +500,66 @@ mod tests {
         o.record.stored_len = 10;
         let e = load_stored(&Never, u64::MAX - 3, &o.record, &Limits::default()).unwrap_err();
         assert_eq!(e.code, ErrorCode::OutOfBounds);
+    }
+
+    /// D20 item 9: a sealed object whose stored hash verifies but whose tag
+    /// does not is `CONTENT_INTEGRITY_FAILED` (the bytes are as written; they
+    /// are not what should be sealed there), never `STORED_INTEGRITY_FAILED`
+    /// and never a partial result. Opening needs the key; a keyless decode
+    /// reports `KEY_UNAVAILABLE` after the stored check.
+    #[test]
+    fn a_sealed_object_with_a_good_hash_and_a_bad_tag_is_a_content_failure() {
+        use mochi_format::seal::{KeyId, SealContext};
+        use mochi_format::secret::{DataKey, OsRandom};
+        struct Ids;
+        impl IdSource for Ids {
+            fn next_id(&mut self) -> Result<[u8; 32]> {
+                Ok([4; 32])
+            }
+        }
+        let key = DataKey::from_bytes([1; 32]);
+        let ctx = SealContext {
+            key: &key,
+            key_id: KeyId::from_bytes([2; 16]),
+            archive_id: [3; 32],
+        };
+        let content = DecodedBytes::new(b"sealed content ".repeat(8));
+        let o = build_object_sealed(
+            &content,
+            &EncodeParams::default(),
+            &ctx,
+            &mut Ids,
+            &mut OsRandom,
+            &Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(o.record.protection, Protection::Aead);
+        // Intact: opens, and a keyless decode is refused after the stored check.
+        let d = decode_verified(&o.record, &o.stored, &Limits::default(), Some(&ctx)).unwrap();
+        assert_eq!(d.as_bytes(), content.as_bytes());
+        let e = decode_verified(&o.record, &o.stored, &Limits::default(), None).unwrap_err();
+        assert_eq!(e.code, ErrorCode::KeyUnavailable);
+
+        // A flipped ciphertext byte with the record's hash made to match: the
+        // stored check passes, the tag does not.
+        let mut bytes = o.stored.as_bytes().to_vec();
+        let at = bytes.len() - 20;
+        bytes[at] ^= 1;
+        let tampered = StoredObject::from_loaded(bytes);
+        let mut record = o.record.clone();
+        record.stored_hash = stored_object_hash(tampered.view());
+        let e = decode_verified(&record, &tampered, &Limits::default(), Some(&ctx)).unwrap_err();
+        assert_eq!(e.code, ErrorCode::ContentIntegrityFailed, "{e}");
+        // Without the fixed-up hash it is the stored check that fails.
+        let e = decode_verified(&o.record, &tampered, &Limits::default(), Some(&ctx)).unwrap_err();
+        assert_eq!(e.code, ErrorCode::StoredIntegrityFailed);
+        // The wrong archive (a different associated data) is the same failure.
+        let other = SealContext {
+            archive_id: [9; 32],
+            ..ctx
+        };
+        let e =
+            decode_verified(&o.record, &o.stored, &Limits::default(), Some(&other)).unwrap_err();
+        assert_eq!(e.code, ErrorCode::ContentIntegrityFailed);
     }
 }

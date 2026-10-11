@@ -24,6 +24,10 @@ jobs:
       - name: Install pinned toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          # ubuntu-22.04 and ubuntu-24.04 share a job name and `runner.os`; without
+          # this the 22.04 job restores 24.04's build scripts (glibc 2.39).
+          key: ${{ matrix.os }}
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
@@ -54,12 +58,15 @@ jobs:
           # delta-segment vectors whose heads exercise the segment
           # assertions. Archives reach ~150 KB, above libFuzzer's default
           # max_len.
-          - { target: archive_open,      seeds: "../fixtures/golden/c5", args: "-max_len=400000" }
+          - { target: archive_open,      seeds: "../fixtures/golden/c5 ../fixtures/golden/c11", args: "-max_len=400000" }
           # Their own vectors: commit records (c5/*.bin), descriptors (b2).
           - { target: commit_decode,     seeds: "../fixtures/golden/c5", args: "" }
           - { target: descriptor_decode, seeds: "../fixtures/golden/b2", args: "" }
           # C10 (D19): the TAR-compatible profile's stream parser.
           - { target: tar_stream,        seeds: "../fixtures/golden/c10", args: "-max_len=100000" }
+          # C11 (D20): key envelopes and sealed objects.
+          - { target: key_envelope,      seeds: "../fixtures/golden/c11", args: "" }
+          - { target: sealed_object,     seeds: "../fixtures/golden/c11", args: "" }
     steps:
       - uses: actions/checkout@v4
       - name: Install nightly toolchain
@@ -106,6 +113,8 @@ jobs:
       - name: Install pinned toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
       - name: Build the power-cut helper
         run: cargo build --locked -p mochi-testkit --example g7_powercut
       - name: Load dm-flakey
@@ -135,6 +144,8 @@ jobs:
       - name: Install pinned toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
       - name: Build the test
         run: cargo test --locked -p mochi-testkit --test c6_restore_races --no-run
       - name: Mount ext4 with casefold
@@ -168,6 +179,8 @@ jobs:
       - name: Install pinned toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
       - name: Install zstd and bsdtar (Ubuntu)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y zstd libarchive-tools

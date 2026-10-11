@@ -77,8 +77,10 @@
 
 use std::collections::BTreeSet;
 
+mod keyless;
 mod tar_stream;
 
+use mochi_format::codec::Protection;
 use mochi_format::digest::CommitId;
 use mochi_format::frame::{walk_frame, FrameDetail};
 use mochi_format::registry::FrameKind;
@@ -90,8 +92,8 @@ use crate::error::{ErrorCode, MochiError};
 use crate::job::JobContext;
 use crate::object::{decode_verified, load_stored, verify_stored, Dependency, ObjectRecord};
 use crate::publish::{
-    commit_history, locate_head, open_at_footer, open_head, recover_baseline_at_footer, HeadSource,
-    HistoryEntry, OpenedHead, ReadOptions, TailState,
+    check_history_key_states, commit_history, locate_head, open_at_footer, open_head,
+    recover_baseline_at_footer, HeadSource, HistoryEntry, OpenedHead, ReadOptions, TailState,
 };
 use crate::read::read_version;
 use crate::report::{
@@ -116,6 +118,9 @@ pub mod phase {
     /// Each commit's TAR stream (TAR-compatible archives only): `completed`
     /// of `total` commits.
     pub const STREAMS: &str = "verify-streams";
+    /// Each commit of an Encrypted archive checked without a key: `completed`
+    /// of `total` commits.
+    pub const KEYLESS: &str = "verify-keyless";
 }
 
 /// What freshness is judged against (spec Annex B.1 D8).
@@ -149,7 +154,7 @@ impl FreshnessAnchor {
 }
 
 /// What to verify and how.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct VerifyOptions {
     pub level: VerificationLevel,
     pub read: ReadOptions,
@@ -261,7 +266,10 @@ pub fn classify(code: ErrorCode) -> ErrorClass {
         | ErrorCode::DurabilityUnconfirmed
         | ErrorCode::NameCollision
         | ErrorCode::NameUnsupported
-        | ErrorCode::AttributeNotRestored => ErrorClass::Operational,
+        | ErrorCode::AttributeNotRestored
+        // A wrong or missing passphrase is not evidence about the archive
+        // (D20 item 9): the run could not look, so nothing is concluded.
+        | ErrorCode::KeyUnavailable => ErrorClass::Operational,
     }
 }
 
@@ -293,6 +301,9 @@ struct Run {
     recovery_failed: bool,
     /// The archive is TAR-compatible and its streams were checked (D19).
     tar_streams: bool,
+    /// The archive is Encrypted and no passphrase was supplied: only stored
+    /// integrity was checked (Annex B.2.10 D20 item 12).
+    keyless: bool,
 }
 
 impl Run {
@@ -359,6 +370,7 @@ pub fn verify(src: &dyn ReadStorage, opts: &VerifyOptions, ctx: &JobContext<'_>)
         data_failed: false,
         recovery_failed: false,
         tar_streams: false,
+        keyless: false,
     };
     let mut head = None;
     let mut damage = None;
@@ -387,7 +399,7 @@ pub fn verify(src: &dyn ReadStorage, opts: &VerifyOptions, ctx: &JobContext<'_>)
                 head = c.head;
                 damage = c.damage;
             }
-            run.report.scope = Some(scope_text(opts, d, run.tar_streams));
+            run.report.scope = Some(scope_text(opts, d, run.tar_streams, run.keyless));
         }
     }
 
@@ -442,7 +454,20 @@ pub fn verify(src: &dyn ReadStorage, opts: &VerifyOptions, ctx: &JobContext<'_>)
     }
 }
 
-fn scope_text(opts: &VerifyOptions, d: u8, tar_streams: bool) -> String {
+fn scope_text(opts: &VerifyOptions, d: u8, tar_streams: bool, keyless: bool) -> String {
+    if keyless {
+        let data = match d {
+            1 => "control objects hashed; data regions not read",
+            2 => "control objects hashed; each commit's data region walked as sealed frames",
+            _ => "control objects hashed; each commit's data region hashed",
+        };
+        return format!(
+            "full retained history, WITHOUT a key (stored integrity only): head, every commit \
+             record and footer, every key envelope, {data}. Names, content, the catalog, and \
+             recoverability were not checked: they need the passphrase. Durability is not \
+             observable from the archive's bytes."
+        );
+    }
     let data = match d {
         1 => "control objects only; data objects not read",
         2 => "control objects; data-object references and frame boundaries",
@@ -545,6 +570,50 @@ fn check(
             return None;
         }
     };
+    let freshness = judge_freshness(&opts.anchor, &history, run);
+
+    // ---- an Encrypted archive: unlock the head, or check it keylessly ---------
+    if let Some(head_entry) = history.last().filter(|e| e.commit.encrypted()) {
+        if ro.keys.is_none() {
+            if !keyless::check(src, ro, &history, depth, true, ctx, run) {
+                return cancelled_with(run, None, None, freshness, Status::Unknown);
+            }
+            let head = &head_entry.commit;
+            run.report.archive_id = Some(head.archive_id.to_hex());
+            run.report.checked_commit = Some(head_entry.commit_id.to_hex());
+            // Stored integrity is the deepest level a keyless run completes:
+            // asked for more, the content checks it could not run leave the
+            // dimension `UNKNOWN`, never `PASS` (D20 item 12).
+            run.data_complete = depth == 3 && !run.data_failed;
+            let verified = VerifiedHead {
+                archive_id: head.archive_id,
+                seq: head.seq,
+                commit_id: head_entry.commit_id,
+            };
+            return Some(Checked {
+                head: Some(verified),
+                damage: None,
+                freshness,
+                key_availability: Status::Unknown,
+            });
+        }
+        if let Err(e) =
+            crate::keys::unlock_commit(src, &head_entry.commit, head_entry.commit_offset, ro, true)
+        {
+            run.error("unlocking the archive's data key", &e);
+            later(run, "the data key could not be opened");
+            return Some(Checked {
+                head: None,
+                damage: None,
+                freshness,
+                key_availability: Status::Unknown,
+            });
+        }
+        if !keyless::check(src, ro, &history, depth, false, ctx, run) {
+            return cancelled_with(run, None, None, freshness, Status::Unknown);
+        }
+    }
+
     let damage = match assess_damage(src, ro, ctx) {
         Ok(d) => {
             if !d.objects.is_empty() {
@@ -561,8 +630,6 @@ fn check(
             None
         }
     };
-    let freshness = judge_freshness(&opts.anchor, &history, run);
-
     // ---- the head, as a reader opens it ----------------------------------------
     ctx.report(phase::STRUCTURE, 2, Some(4));
     let opened = match open_head(src, ro) {
@@ -596,11 +663,10 @@ fn check(
             ),
         );
     }
-    let key_availability = if opened.descriptor.profile().encrypted {
-        Status::Unknown
-    } else {
-        Status::Pass
-    };
+    // No key is needed (Core), or the supplied passphrase opened the head's
+    // data key (Encrypted): either way the key is available. A keyless run of
+    // an Encrypted archive returned before this point with `UNKNOWN`.
+    let key_availability = Status::Pass;
     let verified = VerifiedHead {
         archive_id: opened.commit.archive_id,
         seq: opened.seq(),
@@ -612,6 +678,19 @@ fn check(
     ctx.report(phase::STRUCTURE, 3, Some(4));
     if let Err(e) = opened.catalog.verify() {
         run.error("checking the head catalog", &e);
+    }
+    // D20 item 10: every commit lists the envelopes its manifests replay to.
+    if opened.descriptor.profile().encrypted {
+        match check_history_key_states(src, &history, ro, &|| ctx.check_cancelled().is_err()) {
+            None => {
+                return cancelled_with(run, Some(verified), damage, freshness, key_availability)
+            }
+            Some(problems) => {
+                for (seq, e) in problems {
+                    run.error(&format!("the key state of commit {seq}"), &e);
+                }
+            }
+        }
     }
     ctx.report(phase::STRUCTURE, 4, Some(4));
 
@@ -948,6 +1027,8 @@ fn data_objects(
         }
     };
     let total = ids.len() as u64;
+    let key = crate::keys::catalog_key(ro, cat);
+    let seal = key.as_deref().map(crate::keys::Unlocked::context);
     let mut expected_bytes = 0u64;
     let mut checked_objects = 0u64;
     let mut checked_bytes = 0u64;
@@ -987,7 +1068,7 @@ fn data_objects(
         if depth >= 3 {
             let result = load_stored(src, at, &record, &ro.limits).and_then(|stored| {
                 if depth >= 4 {
-                    decode_verified(&record, &stored, &ro.limits).map(|_| ())
+                    decode_verified(&record, &stored, &ro.limits, seal.as_ref()).map(|_| ())
                 } else {
                     verify_stored(&record, &stored)
                 }
@@ -1045,14 +1126,25 @@ fn referential(
         let e = MochiError::from(e);
         bad(format!("no valid frame at {at}: {}", e.message))
     })?;
-    if span.kind != FrameKind::ZstdData
-        || !matches!(span.detail, FrameDetail::Data(_))
-        || span.len != record.stored_len
-    {
+    // A sealed object (Encrypted profile, D20) is one `ENCRYPTED_OBJECT` skippable
+    // frame; every other object is one Zstandard data frame (§5.1).
+    let shaped = if record.protection == Protection::Aead {
+        span.kind == FrameKind::EncryptedObject
+            && matches!(span.detail, FrameDetail::Skippable { .. })
+    } else {
+        span.kind == FrameKind::ZstdData && matches!(span.detail, FrameDetail::Data(_))
+    };
+    if !shaped || span.len != record.stored_len {
         return Err(bad(format!(
-            "the frame at {at} is a {:?} frame of {} bytes, not a data frame of the recorded \
-             {} bytes",
-            span.kind, span.len, record.stored_len
+            "the frame at {at} is a {:?} frame of {} bytes, not the {} of the recorded {} bytes",
+            span.kind,
+            span.len,
+            if record.protection == Protection::Aead {
+                "sealed object"
+            } else {
+                "data frame"
+            },
+            record.stored_len
         )));
     }
     for d in &record.dependencies {
@@ -1162,6 +1254,7 @@ pub fn check_catalog_contents(
         data_failed: false,
         recovery_failed: false,
         tar_streams: false,
+        keyless: false,
     };
     let d = depth(level).unwrap_or(0);
     let mut finished = true;

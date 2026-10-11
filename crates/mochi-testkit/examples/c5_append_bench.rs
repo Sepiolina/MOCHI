@@ -59,6 +59,7 @@ fn options() -> WriterOptions {
         profile: None,
         checkpoint_trigger: None,
         dedup: Default::default(),
+        kdf: None,
     }
 }
 

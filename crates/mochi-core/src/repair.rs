@@ -1028,6 +1028,9 @@ pub fn plan(src: &dyn ReadStorage, opts: &ReadOptions, ctx: &JobContext<'_>) -> 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RepairOptions {
+    /// Argon2id parameters of the new archive's key envelopes; `None`: the
+    /// defaults. Encrypted archives only.
+    pub kdf: Option<mochi_format::kdf::KdfParams>,
     /// Write the repair although the source head's retention state cannot
     /// be rebuilt: the new archive then has no holds and nothing expired.
     /// Recorded in the report.
@@ -1150,8 +1153,11 @@ where
         // A rewrite keeps the source's profile (Annex B.2.9 D19 rule 9); the
         // newest opened head's descriptor is the one that was verified.
         profile: s.opened.first().map(|o| o.descriptor.profile()),
+        // Encrypted: the passphrases given open the new archive, which has its
+        // own data key (D20 item 10).
+        read: read.clone(),
+        kdf: options.kdf,
         checkpoint_trigger: options.checkpoint_trigger,
-        ..WriterOptions::default()
     };
     let mut copier = Copier::default();
     let mut new_ids: Vec<String> = Vec::new();
@@ -1239,7 +1245,7 @@ where
         let v = verify(
             out,
             &VerifyOptions {
-                read: *read,
+                read: read.clone(),
                 deep: true,
                 ..VerifyOptions::default()
             },

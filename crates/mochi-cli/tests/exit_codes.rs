@@ -32,12 +32,15 @@ fn post_1_0_commands_exit_4_not_3() {
     }
 }
 
+/// `rekey` is built (C11): asked to do nothing, it says what to choose and
+/// exits 3, never success.
 #[test]
-fn in_scope_but_unbuilt_commands_are_an_operational_error_never_success() {
+fn rekey_with_nothing_chosen_is_an_operational_error_never_success() {
     let cmd = &["rekey", "a.mochi"];
     let (code, _, err) = go(cmd);
     assert_eq!(code, exit::ERROR, "{cmd:?}");
-    assert!(err.contains("NOT_IMPLEMENTED"), "{cmd:?}: {err}");
+    assert!(err.contains("INVALID_ARGUMENT"), "{cmd:?}: {err}");
+    assert!(err.contains("--list"), "{cmd:?}: {err}");
 }
 
 /// A missing archive is an operational error with the JSON envelope, never
@@ -97,7 +100,6 @@ fn help_and_version_succeed_and_carry_the_draft_label() {
 #[test]
 fn every_1_0_command_from_spec_23_2_is_present() {
     // Guards against silently dropping a command from the 1.0 scope. Every
-    // one has help; the unbuilt ones still refuse with NOT_IMPLEMENTED.
     for name in [
         "create",
         "append",
@@ -120,9 +122,9 @@ fn every_1_0_command_from_spec_23_2_is_present() {
         assert_eq!(code, exit::OK, "{name} --help: {err}");
         assert!(out.contains("Usage"), "{name}: {out}");
     }
+    // The archive is required; a bare `rekey` is a usage error (exit 3).
     let (code, _, err) = go(&["rekey"]);
-    assert_eq!(code, exit::ERROR, "rekey should parse: {err}");
-    assert!(err.contains("NOT_IMPLEMENTED"), "rekey: {err}");
+    assert_eq!(code, exit::ERROR, "{err}");
 }
 
 #[test]

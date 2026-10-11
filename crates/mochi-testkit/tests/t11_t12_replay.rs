@@ -555,7 +555,7 @@ fn t12_unknown_operation_kind_mid_segment_is_record_invalid() {
 fn t12_unknown_required_feature_mid_segment_is_unsupported() {
     let (mut f, h) = cp0_d1();
     let r2 = f.append_manifest_edited(&empty_delta(&h[1], txid(34)), |v| {
-        *forge::field(v, 9) = Value::Array(vec![Value::Uint(1)]);
+        *forge::field(v, 9) = Value::Array(vec![Value::Uint(2)]);
     });
     let c2 = f.append_delta(&h[1], rule_base(&h[1]), r2, txid(34));
     let r3 = f.append_manifest(&empty_delta(&c2, txid(35)));

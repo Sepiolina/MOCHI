@@ -105,15 +105,19 @@ use mochi_format::cbor::{self, CborLimits, Value};
 use mochi_format::codec::{EncodeParams, Protection};
 use mochi_format::digest::{
     chunk_content_hash, file_content_hash, stored_object_hash, ChunkContentHash, CommitId,
-    StoredObjectHash, TailQuarantineHash,
+    StoredBytesHasher, StoredObjectHash, StoredObjectScope, TailQuarantineHash,
 };
 use mochi_format::envelope::RecordIdentity;
 use mochi_format::error::FormatError;
 use mochi_format::footer::{encode_footer_frame, validate_footer, validate_footer_at_eof};
 use mochi_format::footer::{ValidatedFooter, FOOTER_FRAME_LEN};
 use mochi_format::frame::{walk_frame, FrameDetail, Frames};
+use mochi_format::kdf::KdfParams;
 use mochi_format::registry::{self, FrameKind, SKIPPABLE_HEADER_LEN};
 use mochi_format::repr::{DecodedBytes, DecodedSlice, StoredObject};
+use mochi_format::seal::KeyId;
+use mochi_format::seal::{SealContext, SealTarget, FEATURE_ENCRYPTED};
+use mochi_format::secret::{DataKey, OsRandom, Passphrase, Random};
 use mochi_format::Limits;
 use serde::Serialize;
 
@@ -124,14 +128,18 @@ use crate::catalog::{Catalog, CatalogLimits, Commit, FileVersion, SegmentApplier
 use crate::commit::{uuid_v4, CommitLink, CommitParent, CommitRecord, Metadata, ObjectRef};
 use crate::descriptor::{Descriptor, Profile};
 use crate::error::{ErrorCode, MochiError, Result};
-use crate::image::{decode_image_record, encode_image_record};
+use crate::image::{decode_image_payload, decode_image_record, encode_image_record, image_payload};
 use crate::job::JobContext;
+use crate::keys::{
+    open_sealed_record, read_envelopes, seal_record, unlock_commit, KeyEnvelope, Unlocked,
+};
 use crate::manifest::{
-    Attributes, ChunkEntry, FileVersionEntry, Manifest, ManifestKind, Mtime, ParentLink, Provenance,
+    Attributes, ChunkEntry, FileVersionEntry, KeyOp, Manifest, ManifestKind, Mtime, ParentLink,
+    Provenance,
 };
 use crate::object::{
-    build_object, decode_verified, load_stored, verify_stored, ArchiveId, IdSource, ObjectId,
-    ObjectRecord,
+    build_object, build_object_sealed, decode_verified, load_stored, seal_object, verify_stored,
+    ArchiveId, IdSource, ObjectId, ObjectRecord,
 };
 use crate::quarantine::SidecarMetadata;
 use crate::recovery::{
@@ -160,18 +168,22 @@ pub const DEFAULT_CHUNK_SIZE: u64 = 8 << 20;
 // ---- options -------------------------------------------------------------------
 
 /// Limits for reading untrusted archives (spec §8.5).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ReadOptions {
     pub limits: Limits,
     pub catalog: CatalogLimits,
     pub cbor: CborLimits,
+    /// The passphrases of an Encrypted-profile archive and the data keys they
+    /// have opened (Annex B.2.10 D20). `None` reads such an archive keylessly:
+    /// structure, hashes, and key envelopes, never names or content.
+    pub keys: Option<std::sync::Arc<crate::keys::KeySession>>,
 }
 
 /// Writer configuration. `None` parameters mean "the archive's recorded
 /// value" when appending, and the product default when creating. A value
 /// that differs from what the archive recorded at creation is refused rather
 /// than silently ignored or silently changed.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct WriterOptions {
     pub read: ReadOptions,
     pub chunk_size: Option<u64>,
@@ -191,6 +203,11 @@ pub struct WriterOptions {
     /// In-archive deduplication (spec §9.4, §9.5). Writer policy: not
     /// recorded in the archive, and readers cannot tell the difference.
     pub dedup: Dedup,
+    /// Argon2id cost for the key envelopes this writer creates (Annex B.2.10
+    /// item 1). `None` is the writer default (m = 64 MiB, t = 3, p = 4), which
+    /// is what every product surface uses; a value above the reader defaults
+    /// is `LIMIT_EXCEEDED`. The passphrases come from `read.keys`.
+    pub kdf: Option<KdfParams>,
 }
 
 /// Write-path deduplication (spec §9.4, §9.5; plan C9). A chunk whose
@@ -741,7 +758,7 @@ pub fn read_commit(
 /// Load a referenced object and check its stored-object hash **before**
 /// anything parses it. The range must end at or before `limit` (the commit
 /// frame's offset: a commit references only bytes its footer publishes).
-fn load_verified(
+pub(crate) fn load_verified(
     src: &dyn ReadStorage,
     r: &ObjectRef,
     limit: u64,
@@ -852,11 +869,22 @@ pub struct OpenedHead {
     /// it is the commit itself. `base_hint_mismatch` is a diagnostic only
     /// (review decision 17).
     pub segment: SegmentInfo,
+    /// The archive's data key, for an Encrypted-profile archive opened with a
+    /// passphrase that opens one of this commit's key envelopes (Annex B.2.10
+    /// D20). `None` for every other archive.
+    pub unlocked: Option<std::sync::Arc<Unlocked>>,
 }
 
 impl OpenedHead {
     pub fn seq(&self) -> u64 {
         self.commit.seq
+    }
+
+    /// The key and archive sealed chunks are read under, if this archive is
+    /// encrypted; `None` for Core, where [`crate::object::decode_verified`]
+    /// needs none.
+    pub fn seal_context(&self) -> Option<SealContext<'_>> {
+        self.unlocked.as_deref().map(Unlocked::context)
     }
 }
 
@@ -956,7 +984,146 @@ pub fn segment_state(
         check_delta_parent_link(&delta, &prev.commit)?;
         state.apply_delta(&delta)?;
     }
-    state.complete(&head.catalog.replay(None)?)
+    let state = state.complete(&head.catalog.replay(None)?)?;
+    check_key_state(
+        src,
+        &head.commit,
+        head.location.footer.fields.commit_offset,
+        &state.keys,
+        opts,
+    )?;
+    Ok(state)
+}
+
+/// D20 item 10: the key envelopes a commit lists are the key state replayed
+/// from S(*b*) and the segment's key operations. A commit that lists others
+/// disagrees with its own manifests (`RECORD_INVALID`). Checks nothing outside
+/// the Encrypted profile.
+pub(crate) fn check_key_state(
+    src: &dyn ReadStorage,
+    commit: &CommitRecord,
+    commit_offset: u64,
+    replayed: &[[u8; 16]],
+    opts: &ReadOptions,
+) -> Result<()> {
+    if !commit.encrypted() {
+        return Ok(());
+    }
+    let listed: Vec<[u8; 16]> = read_envelopes(src, commit, commit_offset, opts)?
+        .into_iter()
+        .map(|(_, e)| e.envelope_id)
+        .collect();
+    if listed != replayed {
+        return Err(MochiError::new(
+            ErrorCode::RecordInvalid,
+            format!(
+                "commit {} lists {} key envelope(s) that differ from the key state its \
+                 manifests replay to ({} envelope(s)) (D20 item 10)",
+                commit.seq,
+                listed.len(),
+                replayed.len()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The Argon2id cost a writer uses: the one it was given, else the D20
+/// defaults. Shipped builds have no other source (D20 item 1: writers expose no
+/// other parameters); builds with `test-controls` may set a process-wide default
+/// with [`test_controls::set_default_kdf`] so tests that go through a binary's
+/// whole surface do not spend seconds in Argon2 on every command.
+fn writer_kdf(requested: Option<KdfParams>) -> KdfParams {
+    #[cfg(any(test, feature = "test-controls"))]
+    if requested.is_none() {
+        if let Some(k) = test_controls::default_kdf() {
+            return k;
+        }
+    }
+    requested.unwrap_or(KdfParams::WRITER_DEFAULT)
+}
+
+/// Test-only controls (review decision 14); absent from shipped builds.
+#[cfg(any(test, feature = "test-controls"))]
+pub mod test_controls {
+    use mochi_format::kdf::KdfParams;
+    use std::sync::Mutex;
+
+    static DEFAULT_KDF: Mutex<Option<KdfParams>> = Mutex::new(None);
+
+    /// Use `kdf` for every writer that is not given one (`None` restores the
+    /// D20 defaults).
+    pub fn set_default_kdf(kdf: Option<KdfParams>) {
+        if let Ok(mut g) = DEFAULT_KDF.lock() {
+            *g = kdf;
+        }
+    }
+
+    pub(super) fn default_kdf() -> Option<KdfParams> {
+        DEFAULT_KDF.lock().ok().and_then(|g| *g)
+    }
+}
+
+/// Encrypted profile (D20 item 10), for `verify`: for **every** commit of
+/// `history`, the envelopes it lists equal the key state its segment's
+/// manifests replay to (S(*b*), then each delta's key operations). Returns each
+/// commit that disagrees or whose manifests cannot be replayed, with the
+/// reason; a commit after a failed checkpoint is not blamed again. Opening for
+/// reading does not do this (it never reads S(*b*), D10.9); appending, baseline
+/// recovery, and [`segment_state`] do, for the commit they open. `None` if
+/// cancelled.
+pub(crate) fn check_history_key_states(
+    src: &dyn ReadStorage,
+    history: &[HistoryEntry],
+    opts: &ReadOptions,
+    cancelled: &dyn Fn() -> bool,
+) -> Option<Vec<(u64, MochiError)>> {
+    let mut problems = Vec::new();
+    let mut state: Option<SegmentState> = None;
+    for e in history {
+        if cancelled() {
+            return None;
+        }
+        let step = (|| -> Result<()> {
+            match e.commit.metadata {
+                Metadata::Checkpoint { snapshot, .. } => {
+                    let s_b = read_bound_manifest(
+                        src,
+                        &e.commit,
+                        &snapshot,
+                        e.commit_offset,
+                        ManifestKind::Snapshot,
+                        opts,
+                    );
+                    state = s_b.as_ref().ok().map(SegmentState::from_snapshot);
+                    s_b?;
+                }
+                Metadata::Delta { .. } => {
+                    let delta = read_bound_manifest(
+                        src,
+                        &e.commit,
+                        &e.commit.delta_manifest,
+                        e.commit_offset,
+                        ManifestKind::Delta,
+                        opts,
+                    )?;
+                    match state.as_mut() {
+                        Some(st) => st.apply_delta(&delta)?,
+                        // Blamed at the checkpoint that failed.
+                        None => return Ok(()),
+                    }
+                }
+            }
+            match &state {
+                Some(st) => check_key_state(src, &e.commit, e.commit_offset, &st.keys, opts),
+                None => Ok(()),
+            }
+        })();
+        if let Err(err) = step {
+            problems.push((e.commit.seq, err));
+        }
+    }
+    Some(problems)
 }
 
 /// D12: a descriptor that cannot be loaded, hash-verified, or decoded, or
@@ -1000,7 +1167,7 @@ pub(crate) fn read_descriptor(
 /// that it is of `kind` and carries the commit's D11 identity
 /// (`ENVELOPE_INVALID` on a mismatch, the same fault codes as the binary
 /// envelope).
-pub(crate) fn read_bound_manifest(
+pub fn read_bound_manifest(
     src: &dyn ReadStorage,
     commit: &CommitRecord,
     r: &ObjectRef,
@@ -1013,7 +1180,37 @@ pub(crate) fn read_bound_manifest(
         ManifestKind::Snapshot => "snapshot manifest",
     };
     let stored = load_verified(src, r, limit, opts.limits.max_frame_len, what)?;
-    let (manifest, _) = Manifest::from_stored(&stored, &opts.limits, &opts.cbor)?;
+    let manifest = if commit.encrypted() {
+        // D20 item 5: a manifest of an Encrypted archive is a sealed object,
+        // bound to its commit's sequence and transaction ID; the plaintext is
+        // exactly what a Core manifest frame would carry as its payload.
+        // Unlocks from the commit's own envelopes when the session has not
+        // opened this archive yet; a cached key (the head's) is reused.
+        let key = unlock_commit(src, commit, limit, opts, false)?;
+        let target = match kind {
+            ManifestKind::Delta => SealTarget::DeltaManifest {
+                sequence: commit.seq,
+                transaction_id: commit.transaction_id,
+            },
+            ManifestKind::Snapshot => SealTarget::SnapshotManifest {
+                sequence: commit.seq,
+                transaction_id: commit.transaction_id,
+            },
+        };
+        let plaintext = open_sealed_record(&stored, &key, &target, &opts.limits)?;
+        Manifest::decode(&plaintext, &opts.limits, &opts.cbor)?
+    } else {
+        Manifest::from_stored(&stored, &opts.limits, &opts.cbor)?.0
+    };
+    if manifest.encrypted() != commit.encrypted() {
+        return Err(MochiError::new(
+            ErrorCode::RecordInvalid,
+            format!(
+                "the {what} and the commit disagree about the Encrypted profile (required \
+                 feature {FEATURE_ENCRYPTED})"
+            ),
+        ));
+    }
     if manifest.kind != kind {
         return Err(MochiError::new(
             ErrorCode::RecordInvalid,
@@ -1082,6 +1279,10 @@ pub struct SegmentState {
     /// reaches.
     pub attributes: BTreeMap<FileVersionId, Attributes>,
     pub retention: RetentionState,
+    /// Encrypted profile (D20 item 10): the IDs of the key envelopes valid at
+    /// the commit, replayed from S(*b*) and the segment's key operations. Empty
+    /// outside the profile. The commit's own key list must equal it.
+    pub keys: Vec<[u8; 16]>,
 }
 
 impl SegmentState {
@@ -1093,6 +1294,7 @@ impl SegmentState {
                 .map(|v| (v.version.id, v.attributes))
                 .collect(),
             retention: s_b.retention.clone(),
+            keys: s_b.keys.state.clone(),
         }
     }
 
@@ -1115,10 +1317,13 @@ impl SegmentState {
         }
         let mut retention = self.retention.clone();
         retention.apply(&delta.retention_ops, delta.commit_seq)?;
+        let mut keys = self.keys.clone();
+        crate::manifest::ManifestKeys::apply(&mut keys, &delta.keys.ops)?;
         for v in &delta.file_versions {
             self.attributes.insert(v.version.id, v.attributes);
         }
         self.retention = retention;
+        self.keys = keys;
         Ok(())
     }
 
@@ -1128,6 +1333,7 @@ impl SegmentState {
         Ok(SegmentState {
             attributes: reachable_attributes(reachable, self.attributes)?,
             retention: self.retention,
+            keys: self.keys,
         })
     }
 }
@@ -1149,6 +1355,23 @@ fn open_at(
 
     // D12: interpretation needs a valid descriptor bound to this commit.
     let descriptor = read_descriptor(src, &commit, limit, opts)?;
+    // D20 item 4: the descriptor and the commit agree about the profile, or
+    // the descriptor is mismatched (D12). An Encrypted archive then needs a
+    // passphrase that opens one of *this commit's* key envelopes.
+    if descriptor.encrypted() != commit.encrypted() {
+        return Err(MochiError::new(
+            ErrorCode::DescriptorInvalid,
+            "the archive descriptor and the commit disagree about the Encrypted profile",
+        ));
+    }
+    let unlocked = if commit.encrypted() {
+        // The head needs one of its own envelopes opened; a historical commit
+        // may reuse the archive's data key (see `unlock_commit`).
+        let strict = location.source != HeadSource::Explicit;
+        Some(unlock_commit(src, &commit, limit, opts, strict)?)
+    } else {
+        None
+    };
 
     // Q31: a checkpoint opened for reading does not need its own delta
     // manifest (the snapshot's base is the checkpoint itself, D10.9), so
@@ -1248,6 +1471,9 @@ fn open_at(
             "the catalog does not materialize the commit being opened (§10.6)",
         ));
     }
+    if let Some(st) = &state {
+        check_key_state(src, &commit, limit, &st.keys, opts)?;
+    }
     Ok(Opened {
         head: OpenedHead {
             location,
@@ -1259,6 +1485,7 @@ fn open_at(
             catalog,
             catalog_source,
             segment,
+            unlocked,
         },
         state,
     })
@@ -1316,7 +1543,18 @@ pub(crate) fn check_image(
         opts.limits.max_frame_len,
         "catalog checkpoint",
     )?;
-    let image = decode_image_record(&stored, &cp.commit.identity(), &opts.limits)?;
+    let plaintext;
+    let image = if cp.commit.encrypted() {
+        let key = unlock_commit(src, &cp.commit, cp.commit_offset, opts, false)?;
+        let target = SealTarget::Image {
+            sequence: cp.commit.seq,
+            transaction_id: cp.commit.transaction_id,
+        };
+        plaintext = open_sealed_record(&stored, &key, &target, &opts.limits)?;
+        decode_image_payload(&plaintext, &cp.commit.identity(), &opts.limits, true)?
+    } else {
+        decode_image_record(&stored, &cp.commit.identity(), &opts.limits)?
+    };
     let catalog = if writable {
         Catalog::open_image_writable(image, &opts.catalog)?
     } else {
@@ -1752,6 +1990,7 @@ fn recover_baseline(
     let SegmentState {
         attributes,
         retention,
+        keys,
     } = state.complete(applier.namespace()).map_err(|e| {
         MochiError::new(
             e.code,
@@ -1762,6 +2001,7 @@ fn recover_baseline(
             ),
         )
     })?;
+    check_key_state(src, &last.commit, last.commit_offset, &keys, opts)?;
     let catalog = applier.into_catalog();
     catalog.make_query_only()?;
     Ok(BaselineRecovery {
@@ -2085,6 +2325,10 @@ pub struct Transaction {
     retention: Vec<RetentionOp>,
     /// Compaction only: delta(0)'s provenance.
     provenance: Option<Provenance>,
+    /// Encrypted profile only (D20 item 10): passphrases to add as new key
+    /// envelopes, and envelope IDs to remove. A rewrap.
+    key_adds: Vec<std::sync::Arc<Passphrase>>,
+    key_removes: Vec<[u8; 16]>,
 }
 
 #[derive(Debug, Clone)]
@@ -2183,6 +2427,25 @@ impl Transaction {
         self
     }
 
+    /// Encrypted profile (D20 item 10): wrap the archive's data key under
+    /// `passphrase` in a new key envelope. With [`remove_envelope`] this is a
+    /// rewrap commit: the data key and the data do not change, and the key
+    /// operations are its audit record. Refused in other profiles.
+    ///
+    /// [`remove_envelope`]: Self::remove_envelope
+    pub fn add_passphrase(&mut self, passphrase: std::sync::Arc<Passphrase>) -> &mut Self {
+        self.key_adds.push(passphrase);
+        self
+    }
+
+    /// Encrypted profile: take a key envelope out of the set valid from this
+    /// commit on. **Not revocation**: the frame stays in the file's history and
+    /// any earlier copy still opens with it. The set never becomes empty.
+    pub fn remove_envelope(&mut self, envelope_id: [u8; 16]) -> &mut Self {
+        self.key_removes.push(envelope_id);
+        self
+    }
+
     /// Record this informational time instead of the system clock.
     pub fn at(&mut self, time: Mtime) -> &mut Self {
         self.time = Some(time);
@@ -2217,7 +2480,10 @@ impl Transaction {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty() && self.retention.is_empty()
+        self.entries.is_empty()
+            && self.retention.is_empty()
+            && self.key_adds.is_empty()
+            && self.key_removes.is_empty()
     }
 }
 
@@ -2259,6 +2525,51 @@ struct Prepared {
     /// Chunks this commit stored, for the dedup index once it is published.
     new_chunks: Vec<(DedupKey, ObjectId)>,
     checkpoint: bool,
+    /// The key envelopes valid from this commit (Encrypted profile; empty
+    /// otherwise).
+    envelopes: Vec<EnvelopeRef>,
+}
+
+/// The contiguous byte range of one commit's data objects and the running
+/// stored-object-scope hash over it (Annex B.2.10 D20 item 7). Data objects
+/// are appended back to back; anything between them would break the range, so
+/// `extend` refuses it.
+struct DataRegion {
+    start: u64,
+    end: u64,
+    hasher: StoredBytesHasher<StoredObjectScope>,
+}
+
+impl DataRegion {
+    fn start(offset: u64, stored: &StoredObject) -> Self {
+        let mut hasher = StoredBytesHasher::stored_object();
+        hasher.update(stored.view());
+        DataRegion {
+            start: offset,
+            end: offset.saturating_add(stored.len()),
+            hasher,
+        }
+    }
+
+    fn extend(&mut self, offset: u64, stored: &StoredObject) -> Result<()> {
+        if offset != self.end {
+            return Err(MochiError::new(
+                ErrorCode::InvalidArgument,
+                "internal: a data object was not appended where the previous one ended",
+            ));
+        }
+        self.hasher.update(stored.view());
+        self.end = self.end.saturating_add(stored.len());
+        Ok(())
+    }
+
+    fn finish(&self) -> ObjectRef {
+        ObjectRef {
+            offset: self.start,
+            stored_len: self.end - self.start,
+            stored_hash: self.hasher.finalize(),
+        }
+    }
 }
 
 type DedupKey = (u64, ChunkContentHash);
@@ -2300,10 +2611,11 @@ fn dedup_index_at_head(catalog: &Catalog) -> Result<HashMap<DedupKey, ObjectId>>
                 "an extent names a chunk the catalog does not hold",
             ));
         };
-        if record.protection != Protection::None
-            || !record.dependencies.is_empty()
-            || catalog.object_location(&id)?.is_none()
-        {
+        // Deduplication under encryption keeps working (D20 item 8): equality
+        // is judged by the plaintext hash in the sealed catalog, and a
+        // duplicate reuses the existing sealed chunk. Every chunk of an
+        // archive has its profile's protection, so none is skipped for it.
+        if !record.dependencies.is_empty() || catalog.object_location(&id)?.is_none() {
             continue;
         }
         index
@@ -2382,6 +2694,41 @@ pub struct ArchiveWriter<S: Storage> {
     dedup_index: Option<HashMap<DedupKey, ObjectId>>,
     poisoned: Option<String>,
     audit: Vec<AuditEvent>,
+    /// The Encrypted profile's key state (Annex B.2.10 D20); `None` for every
+    /// other profile.
+    crypto: Option<WriterCrypto>,
+}
+
+/// One key envelope valid at the head: its ID and where its frame is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EnvelopeRef {
+    id: [u8; 16],
+    object: ObjectRef,
+}
+
+/// The writer's key state: the archive's data key, the random source every
+/// nonce and identifier comes from, the key cost for new envelopes, and the
+/// envelopes valid at the head, in increasing ID order.
+struct WriterCrypto {
+    key: std::sync::Arc<Unlocked>,
+    rng: Box<dyn Random>,
+    kdf: KdfParams,
+    envelopes: Vec<EnvelopeRef>,
+}
+
+impl WriterCrypto {
+    /// A fresh data key for a new archive: the key, its ID, and a source of
+    /// randomness. The envelopes wrapping it are written by the first commit.
+    fn create(archive_id: ArchiveId, kdf: KdfParams, mut rng: Box<dyn Random>) -> Result<Self> {
+        let dek = DataKey::generate(rng.as_mut())?;
+        let key_id = KeyId::generate(rng.as_mut())?;
+        Ok(WriterCrypto {
+            key: std::sync::Arc::new(Unlocked::new(archive_id, key_id, [0; 16], dek)),
+            rng,
+            kdf,
+            envelopes: Vec::new(),
+        })
+    }
 }
 
 impl<S: Storage> std::fmt::Debug for ArchiveWriter<S> {
@@ -2394,14 +2741,15 @@ impl<S: Storage> std::fmt::Debug for ArchiveWriter<S> {
     }
 }
 
-/// The profiles this build can write a new archive in: the default (Core)
-/// and the TAR-compatible profile (Annex B.2.9 D19); the Encrypted writer
-/// does not exist yet.
+/// The profiles this build can write a new archive in: the default (Core),
+/// the TAR-compatible profile (Annex B.2.9 D19), and the Encrypted profile
+/// (Annex B.2.10 D20); the last two exclude each other.
 fn check_create_profile(asked: Profile) -> Result<()> {
-    if asked.encrypted {
+    if asked.encrypted && asked.tar_compatible {
         return Err(MochiError::new(
-            ErrorCode::UnsupportedFeature,
-            "this build cannot write the Encrypted profile (spec §7.3)",
+            ErrorCode::InvalidArgument,
+            "the Encrypted and TAR-compatible profiles cannot be combined: generic tools \
+             cannot extract an encrypted archive (Annex B.2.10 D20 item 4)",
         ));
     }
     Ok(())
@@ -2555,6 +2903,7 @@ impl<S: Storage> ArchiveWriter<S> {
     pub fn create(mut storage: S, mut ids: Box<dyn IdSource>, opts: WriterOptions) -> Result<Self> {
         lock(&mut storage)?;
         let mut dedup = Dedup::Off;
+        let mut crypto = None;
         let result = (|| -> Result<(ArchiveId, WriterParams, Catalog)> {
             if storage.size()? != 0 {
                 return Err(MochiError::new(
@@ -2570,11 +2919,20 @@ impl<S: Storage> ArchiveWriter<S> {
                 zstd_level: opts.zstd_level.unwrap_or(EncodeParams::default().level),
             };
             params.validate(&opts.read.limits)?;
-            Ok((
-                ArchiveId::generate(ids.as_mut())?,
-                params,
-                Catalog::new_working()?,
-            ))
+            let archive_id = ArchiveId::generate(ids.as_mut())?;
+            if profile.encrypted {
+                if opts.read.keys.is_none() {
+                    return Err(MochiError::new(
+                        ErrorCode::InvalidArgument,
+                        "an Encrypted archive needs a passphrase to wrap its data key",
+                    ));
+                }
+                let kdf = writer_kdf(opts.kdf);
+                kdf.check(&Limits::WRITER_DEFAULT)
+                    .map_err(MochiError::from)?;
+                crypto = Some(WriterCrypto::create(archive_id, kdf, Box::new(OsRandom))?);
+            }
+            Ok((archive_id, params, Catalog::new_working()?))
         })();
         let policy = CheckpointPolicy::Trigger(opts.checkpoint_trigger.unwrap_or_default());
         let tar = opts.profile.is_some_and(|p| p.tar_compatible);
@@ -2590,15 +2948,21 @@ impl<S: Storage> ArchiveWriter<S> {
             ids,
             read: opts.read,
             params,
-            record_time: opts.record_time,
+            // The Encrypted profile records no commit times (D20 item 6).
+            record_time: opts.record_time && crypto.is_none(),
             archive_id,
             head: None,
             catalog,
             attributes: BTreeMap::new(),
             retention: RetentionState::default(),
             // The default profile is not TAR-compatible (spec D4); choosing
-            // it is explicit and fixed at creation (D12).
-            new_descriptor: Some(Descriptor::new(archive_id, tar)),
+            // it is explicit and fixed at creation (D12). The Encrypted
+            // profile is the required feature of D20 item 4.
+            new_descriptor: Some(if crypto.is_some() {
+                Descriptor::new_encrypted(archive_id)
+            } else {
+                Descriptor::new(archive_id, tar)
+            }),
             policy,
             checkpoint_requested: false,
             #[cfg(any(test, feature = "test-controls"))]
@@ -2611,6 +2975,7 @@ impl<S: Storage> ArchiveWriter<S> {
             dedup_index: None,
             poisoned: None,
             audit: Vec::new(),
+            crypto,
         })
     }
 
@@ -2856,13 +3221,52 @@ impl<S: Storage> ArchiveWriter<S> {
                 if let Some(t) = &truncation {
                     audit.push(AuditEvent::TailTruncated(t.clone()));
                 }
+                // The Encrypted profile (D20): the head open unlocked the data
+                // key; the writer keeps it and the envelopes valid at the head.
+                let crypto = if head.descriptor.encrypted() {
+                    let built = (|| -> Result<WriterCrypto> {
+                        let key = head.unlocked.clone().ok_or_else(|| {
+                            MochiError::new(
+                                ErrorCode::KeyUnavailable,
+                                "this archive is encrypted: a passphrase is required to append",
+                            )
+                        })?;
+                        let envelopes = read_envelopes(
+                            &storage,
+                            &head.commit,
+                            head.location.footer.fields.commit_offset,
+                            &opts.read,
+                        )?
+                        .into_iter()
+                        .map(|(object, e)| EnvelopeRef {
+                            id: e.envelope_id,
+                            object,
+                        })
+                        .collect();
+                        Ok(WriterCrypto {
+                            key,
+                            rng: Box::new(OsRandom),
+                            kdf: writer_kdf(opts.kdf),
+                            envelopes,
+                        })
+                    })();
+                    match built {
+                        Ok(c) => Some(c),
+                        Err(e) => {
+                            let _ = storage.unlock();
+                            return Err(e);
+                        }
+                    }
+                } else {
+                    None
+                };
                 Ok((
                     ArchiveWriter {
                         storage,
                         ids,
                         read: opts.read,
                         params,
-                        record_time: opts.record_time,
+                        record_time: opts.record_time && crypto.is_none(),
                         archive_id: head.commit.archive_id,
                         head: Some(WriterHead {
                             seq: head.commit.seq,
@@ -2893,6 +3297,7 @@ impl<S: Storage> ArchiveWriter<S> {
                         dedup_index: None,
                         poisoned: None,
                         audit,
+                        crypto,
                     },
                     truncation,
                 ))
@@ -3278,6 +3683,15 @@ impl<S: Storage> ArchiveWriter<S> {
         self.attributes = prepared.attributes;
         self.retention = prepared.retention;
         self.new_descriptor = None;
+        if let Some(c) = self.crypto.as_mut() {
+            c.envelopes = prepared.envelopes;
+            // Reading this archive back in this process needs no second
+            // derivation: the session learns the key under each envelope.
+            if let Some(keys) = &self.read.keys {
+                let ids: Vec<[u8; 16]> = c.envelopes.iter().map(|e| e.id).collect();
+                keys.register_envelopes(c.key.clone(), &ids);
+            }
+        }
         Ok(CommitOutcome {
             status: CommitStatus::LocalCommitted,
             durability,
@@ -3314,6 +3728,21 @@ impl<S: Storage> ArchiveWriter<S> {
                 format!("retention: {}", e.message),
             )
         })?;
+        if self.crypto.is_none() && (!tx.key_adds.is_empty() || !tx.key_removes.is_empty()) {
+            return Err(MochiError::new(
+                ErrorCode::InvalidArgument,
+                "key envelopes belong to the Encrypted profile; this archive is not encrypted",
+            ));
+        }
+        // The Encrypted profile's transaction ID is drawn first, because the
+        // key envelopes this commit writes carry it (D11 identity) and are
+        // written before any data. Other profiles draw it after content, as
+        // they always have.
+        let early_tx = if self.crypto.is_some() {
+            Some(self.draw_transaction_id()?)
+        } else {
+            None
+        };
         let mut cat = match self.head {
             None => Catalog::new_working()?,
             Some(_) => self.catalog.duplicate()?,
@@ -3376,6 +3805,18 @@ impl<S: Storage> ArchiveWriter<S> {
             }
         };
 
+        // Key envelopes (Encrypted profile, D20 items 3 and 10): the first
+        // commit wraps the data key under each supplied passphrase; a rewrap
+        // adds and removes envelopes. Written before any data, so a commit's
+        // data region is one contiguous range. The commit lists the complete
+        // resulting set, in increasing envelope-ID order.
+        let mut key_ops: Vec<KeyOp> = Vec::new();
+        let mut envelopes: Vec<EnvelopeRef> = Vec::new();
+        if let (Some(tx_id), true) = (early_tx, self.crypto.is_some()) {
+            envelopes = self.prepare_envelopes(seq, tx_id, &tx, &mut key_ops)?;
+        }
+        let mut region: Option<DataRegion> = None;
+
         // Step 3: content.
         ctx.report(phase::CONTENT, 0, Some(total));
         for entry in &tx.entries {
@@ -3418,14 +3859,8 @@ impl<S: Storage> ArchiveWriter<S> {
                                 id
                             }
                             None => {
-                                let obj = build_object(
-                                    &decoded,
-                                    &encode,
-                                    Protection::None,
-                                    self.ids.as_mut(),
-                                    &self.read.limits,
-                                )?;
-                                let offset = self.storage.append(obj.stored.as_bytes())?;
+                                let obj = self.build_chunk(&decoded, &encode)?;
+                                let offset = self.append_data(&obj.stored, &mut region)?;
                                 cat.insert_object(&obj.record, Some(offset))?;
                                 let id = obj.record.id;
                                 new_chunks.push((key, id));
@@ -3579,10 +4014,15 @@ impl<S: Storage> ArchiveWriter<S> {
                                     continue;
                                 }
                                 verify_stored(record, bytes)?;
-                                let offset = self.storage.append(bytes.as_bytes())?;
-                                cat.insert_object(record, Some(offset))?;
+                                // Into an Encrypted archive a chunk arrives as
+                                // its plain Zstandard frame and is sealed anew:
+                                // the new archive has its own ID and key (D20
+                                // item 10), so no sealed byte is carried over.
+                                let (record, bytes) = self.seal_copied(record, bytes)?;
+                                let offset = self.append_data(&bytes, &mut region)?;
+                                cat.insert_object(&record, Some(offset))?;
                                 chunks.push(ChunkEntry {
-                                    record: record.clone(),
+                                    record,
                                     location: Some(offset),
                                 });
                                 objects += 1;
@@ -3680,9 +4120,10 @@ impl<S: Storage> ArchiveWriter<S> {
         // The transaction ID is drawn here, after content (so the IDs drawn
         // for objects and versions are unchanged from schema 0) and before
         // any record that carries it (D11 identity: manifests, image).
-        let mut txid = [0u8; 16];
-        txid.copy_from_slice(&self.ids.next_id()?[..16]);
-        let transaction_id = uuid_v4(txid);
+        let transaction_id = match early_tx {
+            Some(t) => t,
+            None => self.draw_transaction_id()?,
+        };
 
         // Step 4: delta manifest, snapshot manifest, catalog image. Each is
         // bounded by the reader defaults, not self.read.limits (B.2.3); one
@@ -3702,13 +4143,17 @@ impl<S: Storage> ArchiveWriter<S> {
             file_versions: versions,
             ops,
             entries: Vec::new(),
-            required_features: Vec::new(),
+            required_features: self.profile_features(),
             retention_ops: tx.retention.clone(),
             retention: Default::default(),
             provenance: tx.provenance.clone(),
+            keys: crate::manifest::ManifestKeys {
+                ops: key_ops.clone(),
+                state: Vec::new(),
+            },
         };
         manifest.canonicalize();
-        let delta_manifest = self.append_object(&manifest.to_stored()?)?;
+        let delta_manifest = self.store_manifest(&manifest, seq, transaction_id)?;
         ctx.check_cancelled()?;
 
         // Checkpoint or delta (D10). Commit 0 is always a checkpoint, and so
@@ -3725,12 +4170,15 @@ impl<S: Storage> ArchiveWriter<S> {
         let (metadata, attributes) = if checkpoint {
             ctx.report(phase::CHECKPOINT, 0, None);
             #[allow(unused_mut)]
-            let mut snapshot = Manifest::snapshot_from_catalog(
+            let mut snapshot = Manifest::snapshot_from_catalog_in(
                 &cat,
                 self.archive_id,
                 seq,
                 transaction_id,
                 &attributes,
+                self.crypto
+                    .as_ref()
+                    .map(|_| envelopes.iter().map(|e| e.id).collect()),
             )?;
             snapshot.retention = retention.clone();
             // The source of truth for adoption (D10.7): the writer's own
@@ -3744,7 +4192,7 @@ impl<S: Storage> ArchiveWriter<S> {
             if let Some(t) = self.tamper {
                 t.apply_to_snapshot(&mut snapshot)?;
             }
-            let snapshot_ref = self.append_object(&snapshot.to_stored()?)?;
+            let snapshot_ref = self.store_manifest(&snapshot, seq, transaction_id)?;
             ctx.check_cancelled()?;
 
             // Binary envelope v0 (B.2.2, T10), bounded by the reader defaults
@@ -3766,8 +4214,7 @@ impl<S: Storage> ArchiveWriter<S> {
                 commit_sequence: seq,
                 transaction_id,
             };
-            let image_ref =
-                self.append_object(&encode_image_record(image.as_bytes(), identity)?)?;
+            let image_ref = self.store_image(image.as_bytes(), identity)?;
             ctx.check_cancelled()?;
 
             // D10.7 adoption (§18.1): re-read both representations from the
@@ -3785,6 +4232,7 @@ impl<S: Storage> ArchiveWriter<S> {
                 &identity,
                 self.archive_id,
                 &self.params.encode()?,
+                self.crypto.as_ref().map(|c| &*c.key),
             )?;
             ctx.check_cancelled()?;
             (
@@ -3811,11 +4259,15 @@ impl<S: Storage> ArchiveWriter<S> {
 
         // Step 5: the commit record.
         ctx.report(phase::COMMIT_RECORD, 0, None);
-        let time = match (tx.time, self.record_time) {
-            (Some(t), _) => Some(t),
-            (None, true) => system_time(),
-            (None, false) => None,
+        // The Encrypted profile records no commit time at all (D20 item 6):
+        // not the clock, and not a caller's explicit time either.
+        let time = match (tx.time, self.record_time, self.crypto.is_some()) {
+            (_, _, true) => None,
+            (Some(t), _, false) => Some(t),
+            (None, true, false) => system_time(),
+            (None, false, false) => None,
         };
+        let data_region = region.as_ref().map(DataRegion::finish);
         let record = CommitRecord {
             archive_id: self.archive_id,
             seq,
@@ -3827,9 +4279,11 @@ impl<S: Storage> ArchiveWriter<S> {
             }),
             metadata,
             delta_manifest,
-            required_features: Vec::new(),
+            required_features: self.profile_features(),
             time,
             descriptor,
+            key_envelopes: envelopes.iter().map(|e| e.object).collect(),
+            data_region,
         };
         let (commit_frame, commit_id) = record.to_stored()?;
         if commit_frame.len() > self.read.limits.max_commit_frame_len {
@@ -3889,7 +4343,232 @@ impl<S: Storage> ArchiveWriter<S> {
             new_chunks,
             checkpoint,
             retention,
+            envelopes,
         })
+    }
+
+    /// The required features every record this writer emits lists: the
+    /// Encrypted profile's identifier, or none (D20 item 4).
+    fn profile_features(&self) -> Vec<u64> {
+        if self.crypto.is_some() {
+            vec![FEATURE_ENCRYPTED]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// A fresh transaction ID (RFC 9562 version 4) from the ID source.
+    fn draw_transaction_id(&mut self) -> Result<[u8; 16]> {
+        let mut txid = [0u8; 16];
+        txid.copy_from_slice(&self.ids.next_id()?[..16]);
+        Ok(uuid_v4(txid))
+    }
+
+    /// Encode one chunk: unprotected, or sealed for its own object ID in the
+    /// Encrypted profile.
+    fn build_chunk(
+        &mut self,
+        decoded: &DecodedBytes,
+        encode: &EncodeParams,
+    ) -> Result<crate::object::EncodedObject> {
+        match self.crypto.as_mut() {
+            Some(c) => build_object_sealed(
+                decoded,
+                encode,
+                &c.key.context(),
+                self.ids.as_mut(),
+                c.rng.as_mut(),
+                &self.read.limits,
+            ),
+            None => build_object(
+                decoded,
+                encode,
+                Protection::None,
+                self.ids.as_mut(),
+                &self.read.limits,
+            ),
+        }
+    }
+
+    /// Append a data object and, in the Encrypted profile, extend the commit's
+    /// **data region** (D20 item 7): data objects are contiguous, so one range
+    /// and one hash cover them all.
+    fn append_data(
+        &mut self,
+        stored: &StoredObject,
+        region: &mut Option<DataRegion>,
+    ) -> Result<u64> {
+        let offset = self.storage.append(stored.as_bytes())?;
+        if self.crypto.is_some() {
+            match region {
+                Some(r) => r.extend(offset, stored)?,
+                None => *region = Some(DataRegion::start(offset, stored)),
+            }
+        }
+        Ok(offset)
+    }
+
+    /// A chunk a rewrite hands over as its plain Zstandard frame, ready to
+    /// store: sealed anew for this archive in the Encrypted profile, as it is
+    /// otherwise.
+    fn seal_copied(
+        &mut self,
+        record: &ObjectRecord,
+        bytes: &StoredObject,
+    ) -> Result<(ObjectRecord, StoredObject)> {
+        match self.crypto.as_mut() {
+            Some(c) => seal_object(
+                record,
+                bytes,
+                &c.key.context(),
+                c.rng.as_mut(),
+                &Limits::WRITER_DEFAULT,
+            ),
+            None => Ok((record.clone(), bytes.clone())),
+        }
+    }
+
+    /// Store a manifest: as a recovery-manifest frame, or in the Encrypted
+    /// profile as a sealed object bound to its commit.
+    fn store_manifest(
+        &mut self,
+        manifest: &Manifest,
+        seq: u64,
+        transaction_id: [u8; 16],
+    ) -> Result<ObjectRef> {
+        let frame = match self.crypto.as_mut() {
+            None => manifest.to_stored()?,
+            Some(c) => {
+                let target = match manifest.kind {
+                    ManifestKind::Delta => SealTarget::DeltaManifest {
+                        sequence: seq,
+                        transaction_id,
+                    },
+                    ManifestKind::Snapshot => SealTarget::SnapshotManifest {
+                        sequence: seq,
+                        transaction_id,
+                    },
+                };
+                seal_record(&c.key, &target, &manifest.encode()?, c.rng.as_mut())?
+            }
+        };
+        self.append_object(&frame)
+    }
+
+    /// Store a catalog image: as an image frame, or sealed in the Encrypted
+    /// profile (the plaintext is the frame's payload, D20 item 5).
+    fn store_image(&mut self, image: &[u8], identity: RecordIdentity) -> Result<ObjectRef> {
+        let frame = encode_image_record(image, identity, self.crypto.is_some())?;
+        let frame = match self.crypto.as_mut() {
+            None => frame,
+            Some(c) => {
+                let target = SealTarget::Image {
+                    sequence: identity.commit_sequence,
+                    transaction_id: identity.transaction_id,
+                };
+                seal_record(&c.key, &target, image_payload(&frame)?, c.rng.as_mut())?
+            }
+        };
+        self.append_object(&frame)
+    }
+
+    /// Write the key envelopes this commit introduces and return the complete
+    /// set valid from it, in increasing envelope-ID order (D20 item 10). The
+    /// first commit wraps the data key under every passphrase of the session;
+    /// a rewrap adds the transaction's passphrases and removes its envelope
+    /// IDs. Operations are recorded as the manifest's key operations: all
+    /// additions, then all removals, so the set is never empty in between.
+    fn prepare_envelopes(
+        &mut self,
+        seq: u64,
+        transaction_id: [u8; 16],
+        tx: &Transaction,
+        key_ops: &mut Vec<KeyOp>,
+    ) -> Result<Vec<EnvelopeRef>> {
+        let creating = self.head.is_none();
+        if creating && (!tx.key_adds.is_empty() || !tx.key_removes.is_empty()) {
+            return Err(MochiError::new(
+                ErrorCode::InvalidArgument,
+                "the first commit of an archive writes its key envelopes from the session's \
+                 passphrases; a rewrap needs an existing archive",
+            ));
+        }
+        let archive_id = self.archive_id;
+        let initial: Vec<&Passphrase> = if creating {
+            self.read
+                .keys
+                .as_ref()
+                .map(|k| k.passphrases().iter().collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let adds: Vec<&Passphrase> = if creating {
+            initial
+        } else {
+            tx.key_adds.iter().map(|p| &**p).collect()
+        };
+        let Some(c) = self.crypto.as_mut() else {
+            return Err(MochiError::new(
+                ErrorCode::InvalidArgument,
+                "internal: key envelopes in an archive without keys",
+            ));
+        };
+        let mut set = c.envelopes.clone();
+        let mut written: Vec<([u8; 16], StoredObject)> = Vec::new();
+        for p in adds {
+            let e = KeyEnvelope::create(
+                archive_id,
+                seq,
+                transaction_id,
+                c.key.key_id,
+                c.key.dek(),
+                p,
+                c.kdf,
+                c.rng.as_mut(),
+                &Limits::WRITER_DEFAULT,
+            )?;
+            key_ops.push(KeyOp::Add(e.envelope_id));
+            written.push((e.envelope_id, e.to_stored()?));
+        }
+        for id in &tx.key_removes {
+            if !set.iter().any(|e| e.id == *id) {
+                return Err(MochiError::new(
+                    ErrorCode::InvalidArgument,
+                    "the key envelope to remove is not valid at the head",
+                ));
+            }
+            key_ops.push(KeyOp::Remove(*id));
+        }
+        set.retain(|e| !tx.key_removes.contains(&e.id));
+        // Write the new frames now (the set needs their references).
+        for (id, frame) in &written {
+            set.push(EnvelopeRef {
+                id: *id,
+                object: ObjectRef {
+                    offset: self.storage.append(frame.as_bytes())?,
+                    stored_len: frame.len(),
+                    stored_hash: stored_object_hash(frame.view()),
+                },
+            });
+        }
+        if set.is_empty() {
+            return Err(MochiError::new(
+                ErrorCode::InvalidArgument,
+                "an Encrypted archive keeps at least one key envelope",
+            ));
+        }
+        if set.len() as u64 > Limits::WRITER_DEFAULT.max_key_envelopes {
+            return Err(MochiError::new(
+                ErrorCode::LimitExceeded,
+                format!(
+                    "an archive lists at most {} key envelopes",
+                    Limits::WRITER_DEFAULT.max_key_envelopes
+                ),
+            ));
+        }
+        set.sort_by_key(|e| e.id);
+        Ok(set)
     }
 
     /// A chunk at the published head holding exactly `part`, validated by
@@ -3930,7 +4609,8 @@ impl<S: Storage> ArchiveWriter<S> {
                 ));
             }
             let stored = load_stored(&self.storage, offset, &record, &self.read.limits)?;
-            let decoded = decode_verified(&record, &stored, &self.read.limits)?;
+            let ctx = self.crypto.as_ref().map(|c| c.key.context());
+            let decoded = decode_verified(&record, &stored, &self.read.limits, ctx.as_ref())?;
             Ok(decoded.as_bytes() == part)
         })();
         match check {
@@ -4092,7 +4772,7 @@ impl<S: Storage> ArchiveWriter<S> {
             let record = cat.object(&chunk)?.ok_or_else(unknown)?;
             let at = cat.object_location(&chunk)?.ok_or_else(unknown)?;
             let stored = load_stored(&self.storage, at, &record, &self.read.limits)?;
-            let decoded = decode_verified(&record, &stored, &self.read.limits)?;
+            let decoded = decode_verified(&record, &stored, &self.read.limits, None)?;
             let range = usize::try_from(chunk_offset)
                 .ok()
                 .zip(usize::try_from(e.length).ok())
@@ -4182,6 +4862,7 @@ fn order_copied_chunks<'a>(
 /// rejecting hash-valid bytes the writer just produced is also a mismatch
 /// (the writer wrote something its own reader refuses). A hash failure or a
 /// failed read is a storage fault and keeps its code.
+#[allow(clippy::too_many_arguments)]
 fn adopt_checkpoint(
     storage: &dyn ReadStorage,
     source: &AuthoritativeState,
@@ -4190,6 +4871,7 @@ fn adopt_checkpoint(
     identity: &RecordIdentity,
     archive_id: ArchiveId,
     writer_params: &[u8],
+    key: Option<&Unlocked>,
 ) -> Result<()> {
     let seq = source.seq;
     let max = Limits::WRITER_DEFAULT.max_frame_len;
@@ -4215,9 +4897,21 @@ fn adopt_checkpoint(
         max,
         "snapshot manifest",
     )?;
-    let (manifest, _) =
-        Manifest::from_stored(&stored, &Limits::WRITER_DEFAULT, &CborLimits::default())
-            .map_err(|e| remap("snapshot manifest", e))?;
+    let manifest = match key {
+        None => Manifest::from_stored(&stored, &Limits::WRITER_DEFAULT, &CborLimits::default())
+            .map(|(m, _)| m),
+        Some(k) => open_sealed_record(
+            &stored,
+            k,
+            &SealTarget::SnapshotManifest {
+                sequence: identity.commit_sequence,
+                transaction_id: identity.transaction_id,
+            },
+            &Limits::WRITER_DEFAULT,
+        )
+        .and_then(|pt| Manifest::decode(&pt, &Limits::WRITER_DEFAULT, &CborLimits::default())),
+    }
+    .map_err(|e| remap("snapshot manifest", e))?;
     if manifest.kind != ManifestKind::Snapshot || manifest.identity().check(identity).is_err() {
         return Err(mismatch(
             "snapshot manifest",
@@ -4236,8 +4930,26 @@ fn adopt_checkpoint(
     // Image: hash, envelope bound to this commit, then SQLite exactly as a
     // reader opens it (integrity, foreign keys, extents, namespace).
     let stored = load_verified(storage, image_ref, image_ref.end()?, max, "catalog image")?;
-    let bytes = decode_image_record(&stored, identity, &Limits::WRITER_DEFAULT)
-        .map_err(|e| remap("catalog image", e))?;
+    let plaintext;
+    let bytes = match key {
+        None => decode_image_record(&stored, identity, &Limits::WRITER_DEFAULT),
+        Some(k) => match open_sealed_record(
+            &stored,
+            k,
+            &SealTarget::Image {
+                sequence: identity.commit_sequence,
+                transaction_id: identity.transaction_id,
+            },
+            &Limits::WRITER_DEFAULT,
+        ) {
+            Ok(pt) => {
+                plaintext = pt;
+                decode_image_payload(&plaintext, identity, &Limits::WRITER_DEFAULT, true)
+            }
+            Err(e) => Err(e),
+        },
+    }
+    .map_err(|e| remap("catalog image", e))?;
     let img = Catalog::open_image(bytes, &CatalogLimits::default())
         .map_err(|e| remap("catalog image", e))?;
     let head = img.head_commit().map_err(|e| remap("catalog image", e))?;

@@ -197,3 +197,21 @@ verifying at every level (not compared with a fresh build: it contains zstd and 
 output). Frozen when first written. Regenerate nothing blindly; if a deliberate format
 change needs new files, delete the specific file and run
 `cargo test -p mochi-testkit --test c10_golden -- --ignored write_c10_golden_files`.
+
+## C11 vectors
+
+Encrypted profile (spec Annex B.2.10 D20; plan C11). Written by `c11_golden.rs`.
+
+`c11/valid-key-envelope.bin`, `valid-sealed-chunk.bin`, `valid-sealed-delta-manifest.bin`:
+built with a **fixed random stream**, so they are compared byte for byte with the builders,
+decode, and open with the golden key and passphrase (the envelope uses a tiny Argon2id
+cost, 64 KiB, one pass, one lane). `c11/reject-*.bin` (16): one deviation each, refused with
+the code `c11_golden.rs` lists: a truncated or wrong-kind envelope, hostile or invalid KDF
+parameters (memory, iterations, lanes, zero lanes, memory below 8 per lane), a flipped wrapped
+key, and sealed frames with a wrong version, suite, kind, key ID, nonce, ciphertext, or tag, or
+too short.
+
+`c11/valid-archive-encrypted.mochi`: a whole Encrypted archive (three commits, a rewrap, two
+passphrases) that must keep verifying at every level with either passphrase, and keylessly at
+`stored_integrity`. Not compared with a fresh build (zstd, SQLite, random nonces). Frozen when
+first written; `write_c11_golden_files` refuses to overwrite a differing file.

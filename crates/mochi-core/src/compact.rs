@@ -55,7 +55,7 @@ use crate::error::{ErrorCode, MochiError, Result};
 use crate::gc::{mark, resolve_retention, PlanHead};
 use crate::job::JobContext;
 use crate::manifest::{Attributes, FileVersionEntry, ManifestKind, Provenance};
-use crate::object::{load_stored, verify_stored, IdSource, ObjectId, ObjectRecord};
+use crate::object::{load_stored, unseal_object, verify_stored, IdSource, ObjectId, ObjectRecord};
 #[cfg(any(test, feature = "test-controls"))]
 use crate::publish::CheckpointPolicy;
 use crate::publish::{
@@ -67,6 +67,7 @@ use crate::read::read_version;
 use crate::retention::{RetentionOp, RetentionState};
 use crate::segment::check_delta_parent_link;
 use crate::storage::{ReadStorage, Storage, StorageDir};
+use mochi_format::codec::Protection;
 
 /// Progress phases reported by [`compact`], in order (then the writer's own
 /// phases for each commit, `publish`, and `directory`).
@@ -90,8 +91,23 @@ pub enum Keep {
     Roots(PlanHead),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct CompactOptions {
+    /// How the source is read. For an Encrypted archive this carries the
+    /// passphrases: they open the source, and the new archive (which has its
+    /// own data key, D20 item 10) gets one key envelope for each of them.
+    /// Without one the rewrite fails with `KEY_UNAVAILABLE`, plan included.
+    pub read: ReadOptions,
+    /// The passphrases the **new** archive is wrapped under, when they differ
+    /// from the source's (`rekey --reencrypt`); `None`: those of `read`.
+    pub new_keys: Option<std::sync::Arc<crate::keys::KeySession>>,
+    /// Argon2id parameters of the new archive's envelopes; `None`: the
+    /// defaults. Encrypted archives only.
+    pub kdf: Option<mochi_format::kdf::KdfParams>,
+    /// Why the new archive exists, recorded in its delta(0) provenance:
+    /// collection (the default) or, for `rekey --reencrypt`, re-encryption
+    /// (Encrypted profile only).
+    pub reason: crate::manifest::RewriteReason,
     /// §18.2 step 3: read back and verify every file version before
     /// publishing. On by default.
     pub verify_content: bool,
@@ -105,6 +121,10 @@ pub struct CompactOptions {
 impl Default for CompactOptions {
     fn default() -> Self {
         CompactOptions {
+            read: ReadOptions::default(),
+            new_keys: None,
+            kdf: None,
+            reason: crate::manifest::RewriteReason::Collection,
             verify_content: true,
             checkpoint_trigger: None,
             #[cfg(any(test, feature = "test-controls"))]
@@ -144,6 +164,9 @@ pub struct CompactReport {
     pub durability_unconfirmed: Option<String>,
     /// Always true: the source is never written or removed.
     pub source_kept: bool,
+    /// The chunks were opened and sealed again under the new archive's own
+    /// key (Encrypted profile, D20 item 10) instead of copied as they were.
+    pub resealed: bool,
 }
 
 type Namespace = BTreeMap<ArchivePath, FileVersionId>;
@@ -251,7 +274,20 @@ impl Copier {
                         )
                     })?;
                     let bytes = load_stored(src, at, &record, &opts.limits)?;
-                    verify_stored(&record, &bytes)?;
+                    // A sealed chunk is opened to its Zstandard frame; the
+                    // writer of the new archive seals it again (D20 item 10).
+                    let (record, bytes) = if record.protection == Protection::Aead {
+                        let key = crate::keys::catalog_key(opts, cat).ok_or_else(|| {
+                            MochiError::new(
+                                ErrorCode::KeyUnavailable,
+                                "this archive is encrypted: a passphrase is required to copy it",
+                            )
+                        })?;
+                        unseal_object(&record, &bytes, &key.context(), &opts.limits)?
+                    } else {
+                        verify_stored(&record, &bytes)?;
+                        (record, bytes)
+                    };
                     stored.push((record, bytes));
                 }
             }
@@ -396,7 +432,15 @@ where
     D::File: Storage,
 {
     let src: &dyn ReadStorage = source.storage();
-    let opts = ReadOptions::default();
+    let opts = options.read.clone();
+    // How the new archive is read back: with its own passphrases.
+    let out_opts = match &options.new_keys {
+        Some(k) => ReadOptions {
+            keys: Some(k.clone()),
+            ..opts.clone()
+        },
+        None => opts.clone(),
+    };
     ctx.report(phase::PREPARE, 0, None);
     let head = open_head(src, &opts)?;
     if Some(head.commit_id) != source.head_commit_id() {
@@ -456,6 +500,7 @@ where
             .map(|r| Ok((*r, source_commit(*r)?.commit_id)))
             .collect::<Result<_>>()?,
         collected: (0..head_seq).filter(|s| !root_set.contains(s)).collect(),
+        reason: options.reason,
     };
     let mut new_retention = RetentionState::default();
     for (label, s) in &retention.holds {
@@ -492,8 +537,11 @@ where
         // A rewrite keeps the source's profile; a TAR-compatible source gets
         // its framing regenerated by the writer (Annex B.2.9 D19 rule 9).
         profile: Some(head.descriptor.profile()),
+        // The passphrases are the new archive's, and its key is new (D20
+        // item 10): nothing sealed in the source is carried over.
+        read: out_opts.clone(),
+        kdf: options.kdf,
         checkpoint_trigger: options.checkpoint_trigger,
-        ..WriterOptions::default()
     };
     let mut versions_verified = None;
     let mut new_head_id = None;
@@ -548,7 +596,7 @@ where
         // §18.2 steps 1–3, against what was written, before publication.
         ctx.report(phase::VERIFY, 0, None);
         let out: &dyn ReadStorage = w.storage();
-        let new_head = open_head(out, &opts)?;
+        let new_head = open_head(out, &out_opts)?;
         let fail = |what: String| {
             MochiError::new(
                 ErrorCode::CheckpointMismatch,
@@ -563,7 +611,7 @@ where
             )));
         }
         copier.check_namespaces(&new_head, &fail)?;
-        let written = all_attributes(out, &opts)?;
+        let written = all_attributes(out, &out_opts)?;
         let want: BTreeMap<FileVersionId, Attributes> = marked
             .versions
             .iter()
@@ -579,10 +627,10 @@ where
         if written != want {
             return Err(fail("promised attributes differ".into()));
         }
-        if segment_state(out, &new_head, &opts)?.retention != new_retention {
+        if segment_state(out, &new_head, &out_opts)?.retention != new_retention {
             return Err(fail("the retention state differs".into()));
         }
-        if read_provenance(out, &opts)?.as_ref() != Some(&provenance) {
+        if read_provenance(out, &out_opts)?.as_ref() != Some(&provenance) {
             return Err(fail("the provenance differs".into()));
         }
         if options.verify_content {
@@ -601,7 +649,7 @@ where
                     &new_head.catalog,
                     &id,
                     &mut std::io::sink(),
-                    &opts,
+                    &out_opts,
                     ctx,
                 )?;
                 n += 1;
@@ -645,6 +693,7 @@ where
             _ => None,
         },
         source_kept: true,
+        resealed: head.commit.encrypted(),
     })
 }
 

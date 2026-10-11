@@ -1966,6 +1966,8 @@ The profile is writer-side only. It adds no frame kind, no schema, no record fie
 (g) `recovery-manifest-v2.cddl` does not yet draw key 12 (provenance), which the code defines and B.2.8 describes; `recovery-manifest-v3.cddl` restates it. The v2 file should be corrected when R3 is frozen.
 (h) Converting an archive to or from the Encrypted profile by rewrite is not offered (D12).
 
+**Implementation notes (C11, 2026-10-09; for review).** The implementation follows items 1 to 15. Where the text left a choice, the code chose as listed in `docs/c11-encrypted.md` ("Decisions made in the implementation"): low-level reads unlock from the commit's own envelopes while the head is opened strictly (item 10); "checked wherever manifests are replayed with a key" (item 10) is met for every commit by `verify` and `fsck`, and for the opened commit by appends, baseline recovery, and `segment_state`, but not by a plain read open, which never reads S(*b*) (D10.9); a keyless run's Integrity is `UNKNOWN` above `stored_integrity` (item 12); and the shipped CLI has no KDF-cost option (item 1: writers expose no other parameters). The commit schema's data region has a minimum length of 73 bytes (`8 + 48 + 1 + 16`: skippable header, sealed header, one ciphertext byte, tag), not 72 as the CDDL first said.
+
 ## Annex C. Document Lineage **[1.0 integration]**
 
 | Document | Status |

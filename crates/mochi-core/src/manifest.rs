@@ -38,6 +38,7 @@ use mochi_format::envelope::{check_required_features, RecordIdentity};
 use mochi_format::frame::{encode_skippable_frame_within, walk_frame, FrameDetail};
 use mochi_format::registry::{FrameKind, SKIPPABLE_HEADER_LEN};
 use mochi_format::repr::StoredObject;
+use mochi_format::seal::FEATURE_ENCRYPTED;
 use mochi_format::{FormatError, Limits};
 
 use crate::catalog::extent::{Extent, ExtentSource};
@@ -58,11 +59,21 @@ pub const SCHEMA_VERSION: u64 = 1;
 /// refused.
 pub const RETENTION_SCHEMA_VERSION: u64 = 2;
 
+/// Schema version that adds key 13, key operations or key state (Annex B.2.10
+/// D20; `docs/schemas/recovery-manifest-v3.cddl`). Used exactly for the
+/// manifests of an Encrypted-profile archive (required feature 1): there it
+/// is schema 2 with key 11 required even when empty and key 13 required.
+pub const ENCRYPTED_SCHEMA_VERSION: u64 = 3;
+
 /// The pre-batch draft schema. Refused, and named as legacy (§26).
 pub const LEGACY_SCHEMA_VERSION: u64 = 0;
 
-/// Required features this build understands (key 9). None; fail closed.
-pub const KNOWN_REQUIRED_FEATURES: &[u64] = &[];
+/// Required features this build understands (key 9): the Encrypted profile's
+/// identifier (D20 item 4). Anything else fails closed.
+pub const KNOWN_REQUIRED_FEATURES: &[u64] = &[FEATURE_ENCRYPTED];
+
+/// Most key envelopes one commit lists (D20 item 3); also bounds key state.
+pub const MAX_KEY_ENVELOPES: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManifestKind {
@@ -151,6 +162,67 @@ pub struct Manifest {
     pub retention: RetentionState,
     /// Delta(0) of a compacted archive only (schema 2, key 12).
     pub provenance: Option<Provenance>,
+    /// Encrypted profile only (schema 3, key 13): the key operations of a
+    /// delta, or the key state of a snapshot (D20 item 10).
+    pub keys: ManifestKeys,
+}
+
+/// A key operation on the set of valid key envelopes (D20 item 10): the
+/// rewrap audit record. Applied in order, each judged against the state the
+/// previous one left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyOp {
+    /// Add an envelope; its ID must not be in the set.
+    Add([u8; 16]),
+    /// Remove an envelope; its ID must be in the set, and the set must not
+    /// become empty.
+    Remove([u8; 16]),
+}
+
+/// Key 13 of a schema-3 manifest: operations in a delta, state in a snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ManifestKeys {
+    /// Delta only; in order.
+    pub ops: Vec<KeyOp>,
+    /// Snapshot only: the complete set of valid envelope IDs, strictly
+    /// increasing bytewise.
+    pub state: Vec<[u8; 16]>,
+}
+
+impl ManifestKeys {
+    /// Apply `ops` to `set` in order, atomically: on any violation `set` is
+    /// unchanged. `RECORD_INVALID`, because a manifest that does this is
+    /// invalid, not unsupported.
+    pub fn apply(set: &mut Vec<[u8; 16]>, ops: &[KeyOp]) -> Result<()> {
+        let mut next = set.clone();
+        for op in ops {
+            match op {
+                KeyOp::Add(id) => {
+                    if next.contains(id) {
+                        return Err(schema(
+                            "a key operation adds an envelope already in the set",
+                        ));
+                    }
+                    next.push(*id);
+                }
+                KeyOp::Remove(id) => {
+                    let Some(i) = next.iter().position(|e| e == id) else {
+                        return Err(schema("a key operation removes an envelope not in the set"));
+                    };
+                    next.remove(i);
+                    if next.is_empty() {
+                        return Err(schema("a key operation would leave no key envelope"));
+                    }
+                }
+            }
+            if next.len() > MAX_KEY_ENVELOPES {
+                return Err(schema("a key operation exceeds the key-envelope limit"));
+            }
+        }
+        next.sort();
+        *set = next;
+        Ok(())
+    }
 }
 
 /// Where a compacted archive came from (spec Annex B D18; plan C9). Carried
@@ -167,6 +239,22 @@ pub struct Provenance {
     /// Source snapshots left out because no retained root protected them,
     /// strictly increasing, each before the source head.
     pub collected: Vec<u64>,
+    /// Why the archive was rewritten (schema 3 only; key 3 of the map). A
+    /// rewrite of an Encrypted archive always creates a new data key; this
+    /// says whether that was the point (D20 item 10, the re-encryption audit
+    /// record). Absent on the wire means [`RewriteReason::Collection`].
+    pub reason: RewriteReason,
+}
+
+/// The reason for a rewrite (`rekey --reencrypt` versus collection or
+/// compaction): the two separate audit records of spec §14.4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RewriteReason {
+    /// Collection or compaction (the default; key 3 absent).
+    #[default]
+    Collection,
+    /// `rekey --reencrypt` (key 3 = 1).
+    Reencryption,
 }
 
 impl Provenance {
@@ -228,9 +316,21 @@ impl Manifest {
         Ok(self.to_value_unchecked())
     }
 
-    /// 2 when the manifest carries retention data or provenance, else 1.
+    /// Whether this manifest belongs to an Encrypted-profile archive: it
+    /// lists the D20 required feature (key 9).
+    pub fn encrypted(&self) -> bool {
+        self.required_features.contains(&FEATURE_ENCRYPTED)
+    }
+
+    /// 3 for an Encrypted-profile manifest (D20); otherwise 2 when the
+    /// manifest carries retention data or provenance, else 1.
     pub fn schema_version(&self) -> u64 {
-        if self.retention_ops.is_empty() && self.retention.is_empty() && self.provenance.is_none() {
+        if self.encrypted() {
+            ENCRYPTED_SCHEMA_VERSION
+        } else if self.retention_ops.is_empty()
+            && self.retention.is_empty()
+            && self.provenance.is_none()
+        {
             SCHEMA_VERSION
         } else {
             RETENTION_SCHEMA_VERSION
@@ -291,7 +391,7 @@ impl Manifest {
             ),
             (10, Value::Bytes(self.transaction_id.to_vec())),
         ];
-        if self.schema_version() == RETENTION_SCHEMA_VERSION {
+        if self.schema_version() >= RETENTION_SCHEMA_VERSION {
             fields.push((
                 11,
                 match self.kind {
@@ -304,6 +404,34 @@ impl Manifest {
             if let Some(p) = &self.provenance {
                 fields.push((12, provenance_value(p)));
             }
+        }
+        if self.schema_version() == ENCRYPTED_SCHEMA_VERSION {
+            fields.push((
+                13,
+                match self.kind {
+                    ManifestKind::Delta => Value::Array(
+                        self.keys
+                            .ops
+                            .iter()
+                            .map(|op| match op {
+                                KeyOp::Add(id) => {
+                                    Value::Array(vec![Value::Uint(0), Value::Bytes(id.to_vec())])
+                                }
+                                KeyOp::Remove(id) => {
+                                    Value::Array(vec![Value::Uint(1), Value::Bytes(id.to_vec())])
+                                }
+                            })
+                            .collect(),
+                    ),
+                    ManifestKind::Snapshot => Value::Array(
+                        self.keys
+                            .state
+                            .iter()
+                            .map(|id| Value::Bytes(id.to_vec()))
+                            .collect(),
+                    ),
+                },
+            ));
         }
         Value::Map(fields)
     }
@@ -465,6 +593,94 @@ impl Manifest {
                 self.retention.check(self.commit_seq)?;
             }
         }
+        // Encrypted profile (schema 3, D20): the data key is archive-wide, so
+        // no chunk depends on a key envelope, and every chunk is sealed;
+        // outside the profile none is. Key operations belong to deltas, key
+        // state to snapshots.
+        let encrypted = self.encrypted();
+        for c in &self.chunks {
+            if encrypted != (c.record.protection == Protection::Aead) {
+                return Err(schema(if encrypted {
+                    "an Encrypted archive's manifest lists a chunk that is not sealed"
+                } else {
+                    "a manifest outside the Encrypted profile lists a sealed chunk"
+                }));
+            }
+            if encrypted
+                && c.record
+                    .dependencies
+                    .iter()
+                    .any(|d| matches!(d, Dependency::KeyEnvelope(_)))
+            {
+                return Err(schema(
+                    "a sealed chunk depends on no key envelope: the data key is archive-wide (D20)",
+                ));
+            }
+        }
+        if encrypted {
+            match self.kind {
+                ManifestKind::Delta => {
+                    if !self.keys.state.is_empty() {
+                        return Err(schema("a delta manifest carries a key state"));
+                    }
+                    if self.commit_seq == 0 && self.keys.ops.is_empty() {
+                        return Err(schema(
+                            "delta(0) of an Encrypted archive adds no key envelope",
+                        ));
+                    }
+                    if self.commit_seq == 0
+                        && self.keys.ops.iter().any(|o| matches!(o, KeyOp::Remove(_)))
+                    {
+                        return Err(schema("delta(0) removes a key envelope"));
+                    }
+                    if self.keys.ops.len() > 2 * MAX_KEY_ENVELOPES {
+                        return Err(schema("too many key operations in one commit"));
+                    }
+                    // Replayed from nothing, the operations must stay valid
+                    // (an add of a duplicate, a remove of a stranger, an
+                    // emptied set): judged here for the delta alone, with
+                    // removals allowed to name envelopes of earlier commits.
+                    let mut seen = BTreeSet::new();
+                    for op in &self.keys.ops {
+                        if let KeyOp::Add(id) = op {
+                            if !seen.insert(*id) {
+                                return Err(schema("a delta adds the same key envelope twice"));
+                            }
+                        }
+                    }
+                }
+                ManifestKind::Snapshot => {
+                    if !self.keys.ops.is_empty() {
+                        return Err(schema("a snapshot manifest carries key operations"));
+                    }
+                    if self.keys.state.is_empty() || self.keys.state.len() > MAX_KEY_ENVELOPES {
+                        return Err(schema(
+                            "a snapshot's key state lists between 1 and 16 envelopes",
+                        ));
+                    }
+                    if !self.keys.state.windows(2).all(|w| w[0] < w[1]) {
+                        return Err(schema(
+                            "key state is not strictly increasing by envelope ID",
+                        ));
+                    }
+                }
+            }
+        } else {
+            if !self.keys.ops.is_empty() || !self.keys.state.is_empty() {
+                return Err(schema(
+                    "key operations and key state belong to the Encrypted profile (schema 3)",
+                ));
+            }
+            if self
+                .provenance
+                .as_ref()
+                .is_some_and(|p| p.reason != RewriteReason::Collection)
+            {
+                return Err(schema(
+                    "a re-encryption reason belongs to the Encrypted profile (schema 3)",
+                ));
+            }
+        }
         // D11, shared with the binary envelope and the commit record.
         check_required_features(&self.required_features, KNOWN_REQUIRED_FEATURES, limits)?;
         Ok(())
@@ -567,7 +783,7 @@ fn retention_state_value(r: &RetentionState) -> Value {
 }
 
 fn provenance_value(p: &Provenance) -> Value {
-    Value::Map(vec![
+    let mut fields = vec![
         (0, b32(p.source_archive_id.as_bytes())),
         (
             1,
@@ -582,10 +798,16 @@ fn provenance_value(p: &Provenance) -> Value {
             2,
             Value::Array(p.collected.iter().map(|s| Value::Uint(*s)).collect()),
         ),
-    ])
+    ];
+    // Key 3 only when it says something: absent means collection, so one
+    // provenance has one encoding.
+    if p.reason == RewriteReason::Reencryption {
+        fields.push((3, Value::Uint(1)));
+    }
+    Value::Map(fields)
 }
 
-fn decode_provenance(v: &Value) -> Result<Provenance> {
+fn decode_provenance(v: &Value, version: u64) -> Result<Provenance> {
     let mut f = Fields::of(v, "provenance")?;
     let source_archive_id = ArchiveId::from_bytes(f.req(0)?.bytes32("source archive id")?);
     let commits = f
@@ -606,11 +828,23 @@ fn decode_provenance(v: &Value) -> Result<Provenance> {
         .iter()
         .map(|c| c.uint("collected sequence").map_err(MochiError::from))
         .collect::<Result<_>>()?;
+    // Key 3 exists from schema 3 on, and only to say "re-encryption" (1);
+    // 0 is the default and is never written, so it is not accepted either.
+    let reason = match (version >= ENCRYPTED_SCHEMA_VERSION, f.opt(3)) {
+        (_, None) => RewriteReason::Collection,
+        (true, Some(v)) => match v.uint("rewrite reason")? {
+            1 => RewriteReason::Reencryption,
+            0 => return Err(schema("rewrite reason 0 is the default and must be absent")),
+            n => return Err(schema(format!("unknown rewrite reason {n}"))),
+        },
+        (false, Some(_)) => return Err(schema("provenance key 3 needs manifest schema 3")),
+    };
     f.finish()?;
     Ok(Provenance {
         source_archive_id,
         commits,
         collected,
+        reason,
     })
 }
 
@@ -945,12 +1179,12 @@ impl Manifest {
         let mut f = Fields::of(&root, "manifest")?;
         let version = f.req(0)?.uint("schema version")?;
         match version {
-            SCHEMA_VERSION | RETENTION_SCHEMA_VERSION => {}
+            SCHEMA_VERSION | RETENTION_SCHEMA_VERSION | ENCRYPTED_SCHEMA_VERSION => {}
             LEGACY_SCHEMA_VERSION => {
                 return Err(MochiError::new(
                     ErrorCode::UnsupportedFeature,
                     "recovery-manifest schema 0 is the pre-batch draft (legacy, spec §26); \
-                     this build reads schemas 1 and 2",
+                     this build reads schemas 1, 2, and 3",
                 ))
             }
             version => {
@@ -1022,7 +1256,8 @@ impl Manifest {
         let mut retention_ops = Vec::new();
         let mut retention = RetentionState::default();
         let mut provenance = None;
-        if version == RETENTION_SCHEMA_VERSION {
+        let mut keys = ManifestKeys::default();
+        if version >= RETENTION_SCHEMA_VERSION {
             let v = f.req(11)?;
             match kind {
                 ManifestKind::Delta => {
@@ -1034,7 +1269,35 @@ impl Manifest {
                 }
                 ManifestKind::Snapshot => retention = decode_retention_state(v)?,
             }
-            provenance = f.opt(12).map(decode_provenance).transpose()?;
+            provenance = f
+                .opt(12)
+                .map(|v| decode_provenance(v, version))
+                .transpose()?;
+        }
+        if version == ENCRYPTED_SCHEMA_VERSION {
+            let v = f.req(13)?;
+            match kind {
+                ManifestKind::Delta => {
+                    for op in v.array("key operations")? {
+                        let t = tuple(op, 2, "key operation")?;
+                        let id = <[u8; 16]>::try_from(t[1].bytes("envelope id")?)
+                            .map_err(|_| schema("envelope id: expected exactly 16 bytes"))?;
+                        keys.ops.push(match t[0].uint("key operation kind")? {
+                            0 => KeyOp::Add(id),
+                            1 => KeyOp::Remove(id),
+                            n => return Err(schema(format!("unknown key operation kind {n}"))),
+                        });
+                    }
+                }
+                ManifestKind::Snapshot => {
+                    for id in v.array("key state")? {
+                        keys.state.push(
+                            <[u8; 16]>::try_from(id.bytes("envelope id")?)
+                                .map_err(|_| schema("envelope id: expected exactly 16 bytes"))?,
+                        );
+                    }
+                }
+            }
         }
         f.finish()?;
         let m = Manifest {
@@ -1051,11 +1314,14 @@ impl Manifest {
             retention_ops,
             retention,
             provenance,
+            keys,
         };
+        check_required_features(&m.required_features, KNOWN_REQUIRED_FEATURES, limits)?;
         if m.schema_version() != version {
             return Err(schema(
-                "schema 2 without retention data or provenance: a manifest uses schema 2 \
-                 exactly when it carries either",
+                "the manifest's schema version does not match its content: schema 3 exactly \
+                 when it lists the Encrypted required feature, schema 2 exactly when it \
+                 carries retention data or provenance, schema 1 otherwise",
             ));
         }
         m.check_structure(limits)?;
@@ -1107,6 +1373,22 @@ impl Manifest {
         seq: u64,
         transaction_id: [u8; 16],
         attributes: &std::collections::BTreeMap<FileVersionId, Attributes>,
+    ) -> Result<Manifest> {
+        Self::snapshot_from_catalog_in(catalog, archive_id, seq, transaction_id, attributes, None)
+    }
+
+    /// [`snapshot_from_catalog`](Self::snapshot_from_catalog) for an archive
+    /// of any profile. `key_state` is `Some(envelope IDs valid at this
+    /// commit, strictly increasing)` exactly for the Encrypted profile (D20
+    /// item 10): the snapshot then lists the Encrypted required feature and
+    /// carries the key state, so that it is a valid schema-3 manifest.
+    pub fn snapshot_from_catalog_in(
+        catalog: &Catalog,
+        archive_id: ArchiveId,
+        seq: u64,
+        transaction_id: [u8; 16],
+        attributes: &std::collections::BTreeMap<FileVersionId, Attributes>,
+        key_state: Option<Vec<[u8; 16]>>,
     ) -> Result<Manifest> {
         let snapshot = catalog.replay(Some(seq))?;
         let mut versions = std::collections::BTreeMap::new();
@@ -1167,7 +1449,12 @@ impl Manifest {
             retention_ops: Vec::new(),
             retention: Default::default(),
             provenance: None,
+            keys: Default::default(),
         };
+        if let Some(state) = key_state {
+            m.required_features = vec![FEATURE_ENCRYPTED];
+            m.keys.state = state;
+        }
         m.canonicalize();
         m.check_structure(&Limits::WRITER_DEFAULT)?;
         Ok(m)

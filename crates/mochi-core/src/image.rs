@@ -11,7 +11,7 @@
 //! | Record type | frame kind `METADATA_DELTA` (commit key 5, checkpoint form, key 1) |
 //! | Record schema version | [`IMAGE_RECORD_SCHEMA`] = the catalog's SQLite `user_version` |
 //! | Payload encoding | 0, SQLite 3 image |
-//! | Required features | none known in this build ([`KNOWN_IMAGE_FEATURES`]) |
+//! | Required features | none in Core; exactly `[1]` in the Encrypted profile (D20 item 4) |
 //! | Identity | archive ID, sequence, transaction ID of the checkpoint commit |
 //! | Payload budget | *S* − 592 (B.2.3), 268,434,864 bytes at the defaults |
 //!
@@ -39,6 +39,7 @@ use mochi_format::envelope::{
 };
 use mochi_format::registry::FrameKind;
 use mochi_format::repr::StoredObject;
+use mochi_format::seal::FEATURE_ENCRYPTED;
 use mochi_format::Limits;
 
 use crate::catalog::schema;
@@ -55,9 +56,9 @@ pub const IMAGE_RECORD_SCHEMA: u16 = {
 /// Image record schema versions this build reads.
 pub const IMAGE_SCHEMA_VERSIONS: &[u16] = &[IMAGE_RECORD_SCHEMA];
 
-/// Required features this build understands on a catalog image. None in
-/// 1.0 Core; unknown features are refused (D11).
-pub const KNOWN_IMAGE_FEATURES: &[u64] = &[];
+/// Required features this build understands on a catalog image: the
+/// Encrypted profile's (D20 item 4). Unknown features are refused (D11).
+pub const KNOWN_IMAGE_FEATURES: &[u64] = &[FEATURE_ENCRYPTED];
 
 /// The reader rules for a field that references a catalog image.
 pub const IMAGE_RULES: EnvelopeRules<'static> = EnvelopeRules {
@@ -69,15 +70,27 @@ pub const IMAGE_RULES: EnvelopeRules<'static> = EnvelopeRules {
 /// Wrap a published SQLite image for the checkpoint commit with `identity`,
 /// as one complete stored frame, under the reader defaults.
 ///
+/// `encrypted` lists the Encrypted profile's required feature (D20); the
+/// writer of that profile seals the frame's *payload* ([`image_payload`]) and
+/// stores it as a sealed object instead of this frame.
+///
 /// Errors: `CAPACITY_EXCEEDED` if the image exceeds the B.2.3 budget or the
 /// frame limits; `ENVELOPE_INVALID` if `image` does not start with the SQLite
 /// signature or its `user_version` is not [`IMAGE_RECORD_SCHEMA`].
-pub fn encode_image_record(image: &[u8], identity: RecordIdentity) -> Result<StoredObject> {
+pub fn encode_image_record(
+    image: &[u8],
+    identity: RecordIdentity,
+    encrypted: bool,
+) -> Result<StoredObject> {
     let envelope = BinaryEnvelope {
         record_schema_version: IMAGE_RECORD_SCHEMA,
         encoding: PayloadEncoding::SqliteImage,
         identity,
-        required_features: Vec::new(),
+        required_features: if encrypted {
+            vec![FEATURE_ENCRYPTED]
+        } else {
+            Vec::new()
+        },
     };
     let frame = encode_binary_record(
         FrameKind::MetadataDelta,
@@ -109,13 +122,47 @@ pub fn decode_image_record<'a>(
     limits: &Limits,
 ) -> Result<&'a [u8]> {
     let payload = skippable_payload(stored, FrameKind::MetadataDelta, limits)?;
+    decode_image_payload(payload, expected, limits, false)
+}
+
+/// The payload of an image frame: the binary envelope header and the SQLite
+/// image. This is the plaintext a sealed image carries (D20 item 5).
+pub fn image_payload(frame: &StoredObject) -> Result<&[u8]> {
+    frame
+        .as_bytes()
+        .get(mochi_format::registry::SKIPPABLE_HEADER_LEN..)
+        .ok_or_else(|| {
+            crate::error::MochiError::new(
+                crate::error::ErrorCode::MalformedFrame,
+                "image frame shorter than its header",
+            )
+        })
+}
+
+/// [`decode_image_record`] for a payload already extracted (or opened from a
+/// sealed object): every D11 obligation, and the required features equal
+/// `[1]` exactly when `encrypted`, else none.
+pub fn decode_image_payload<'a>(
+    payload: &'a [u8],
+    expected: &RecordIdentity,
+    limits: &Limits,
+    encrypted: bool,
+) -> Result<&'a [u8]> {
     let candidate = decode_binary_record(
         mochi_format::registry::METADATA_DELTA,
         payload,
         &IMAGE_RULES,
         limits,
     )?;
-    let (_, image) = candidate.bind(expected)?;
+    let (envelope, image) = candidate.bind(expected)?;
+    let want: &[u64] = if encrypted { &[FEATURE_ENCRYPTED] } else { &[] };
+    if envelope.required_features != want {
+        return Err(crate::error::MochiError::new(
+            crate::error::ErrorCode::RecordInvalid,
+            "the image's required features disagree with the archive's profile \
+             (the Encrypted feature is listed exactly in an Encrypted archive)",
+        ));
+    }
     Ok(image)
 }
 
@@ -146,7 +193,7 @@ mod tests {
     #[test]
     fn round_trip_and_header_layout() {
         let img = real_image();
-        let stored = encode_image_record(&img, identity(3)).unwrap();
+        let stored = encode_image_record(&img, identity(3), false).unwrap();
         let b = stored.as_bytes();
         // 8-byte skippable header, then the 80-byte envelope (n = 0).
         assert_eq!(b.len(), SKIPPABLE_HEADER_LEN + 80 + img.len());
@@ -171,7 +218,7 @@ mod tests {
     /// field, even though (by precondition) its hash matched.
     #[test]
     fn an_image_of_another_commit_is_refused() {
-        let stored = encode_image_record(&real_image(), identity(3)).unwrap();
+        let stored = encode_image_record(&real_image(), identity(3), false).unwrap();
         let wrong = [
             RecordIdentity {
                 archive_id: [8; 32],
@@ -209,7 +256,7 @@ mod tests {
 
     #[test]
     fn a_non_image_frame_is_refused() {
-        let stored = encode_image_record(&real_image(), identity(0)).unwrap();
+        let stored = encode_image_record(&real_image(), identity(0), false).unwrap();
         let mut b = stored.as_bytes().to_vec();
         b[0..4].copy_from_slice(&mochi_format::registry::RECOVERY_MANIFEST.to_le_bytes());
         let e = decode_image_record(
@@ -226,11 +273,13 @@ mod tests {
         let mut img = real_image();
         img[63] = 1; // user_version = 1, not IMAGE_RECORD_SCHEMA
         assert_eq!(
-            encode_image_record(&img, identity(0)).unwrap_err().code,
+            encode_image_record(&img, identity(0), false)
+                .unwrap_err()
+                .code,
             ErrorCode::EnvelopeInvalid
         );
         assert_eq!(
-            encode_image_record(b"not sqlite", identity(0))
+            encode_image_record(b"not sqlite", identity(0), false)
                 .unwrap_err()
                 .code,
             ErrorCode::EnvelopeInvalid

@@ -1,5 +1,7 @@
 # R5 — Cryptographic profile (DRAFT, not frozen)
 
+> **Status 2026-10-09.** Implemented (plan C11, `docs/c11-encrypted.md`); the vectors below are checked in `mochi-format`'s tests and the golden set `fixtures/golden/c11/` adds byte-exact envelope and sealed-object vectors and sixteen rejects. Still a draft until gate G10: the owner's read of this file has not happened.
+
 Ratification artifact R5 for the Encrypted profile. **Draft for review**: written
 with the design (spec Annex B.2.10, D20) before the code, because a crypto layout
 mistake is permanent once archives exist. It becomes frozen only after the

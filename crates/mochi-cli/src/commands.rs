@@ -44,10 +44,11 @@ use serde_json::{json, Value};
 
 use crate::cli::{
     AppendArgs, CheckpointArgs, CompactArgs, CreateArgs, DumpIndexArgs, ExpireArgs, GcApplyArgs,
-    GcPlanArgs, GetArgs, HealthArgs, KindArg, Level, ListArgs, ReleaseArgs, RepairApplyArgs,
-    RepairPlanArgs, RestoreTestArgs, RetainArgs, SearchArgs, SearchSnapshots, SnapshotListArgs,
-    VerifyArgs,
+    GcPlanArgs, GetArgs, HealthArgs, KindArg, Level, ListArgs, RekeyArgs, ReleaseArgs,
+    RepairApplyArgs, RepairPlanArgs, RestoreTestArgs, RetainArgs, SearchArgs, SearchSnapshots,
+    SnapshotListArgs, VerifyArgs,
 };
+use crate::passphrase::{self, Sources};
 use crate::render::{archive_path_arg, hex, path_fields, text};
 use crate::state::{HeadStore, SeenHead};
 
@@ -59,9 +60,63 @@ pub struct Env<'a> {
     pub read: ReadOptions,
     /// `None` with `--no-local-history`, or when no location is known.
     pub store: Option<HeadStore>,
+    /// Where passphrases may come from (`--passphrase-file`, the
+    /// environment switch).
+    pub pass: Sources,
+}
+
+/// Whether a command needs the passphrase of an Encrypted archive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Need {
+    /// Yes: from the sources named, else a prompt, else `KEY_UNAVAILABLE`.
+    Required,
+    /// Only if a source was named (`verify` without one runs keyless).
+    IfGiven,
+}
+
+/// Whether the head commit of `archive` says it is Encrypted. Needs no key;
+/// anything that goes wrong reads as "no" and is the command's own error to
+/// report.
+fn is_encrypted(archive: &Path, ro: &ReadOptions) -> bool {
+    let Ok(src) = open_archive(archive) else {
+        return false;
+    };
+    let Ok(loc) = locate_head(&src, &ro.limits) else {
+        return false;
+    };
+    read_commit(&src, &loc.footer, ro).is_ok_and(|(c, _)| c.encrypted())
 }
 
 impl Env<'_> {
+    /// Open the passphrase session for `archive` if it is Encrypted and the
+    /// command needs one: the named sources, else a prompt on a terminal, else
+    /// `KEY_UNAVAILABLE` from the core (exit 3) with nothing done. A Core
+    /// archive never asks.
+    fn unlock(&mut self, archive: &Path, need: Need) -> Result<()> {
+        if self.read.keys.is_some() {
+            return Ok(());
+        }
+        if need == Need::IfGiven && !self.pass.explicit() {
+            return Ok(());
+        }
+        if !is_encrypted(archive, &self.read) {
+            return Ok(());
+        }
+        let mut list = passphrase::explicit(&self.pass, self.err)?;
+        if list.is_empty() {
+            if !passphrase::can_prompt() {
+                return Err(MochiError::new(
+                    ErrorCode::KeyUnavailable,
+                    "this archive is encrypted: give --passphrase-file PATH (or run on a \
+                     terminal to be asked); a passphrase is never a command-line argument",
+                ));
+            }
+            list.push(passphrase::ask(archive, self.err)?);
+        }
+        self.read.keys = Some(mochi_core::keys::KeySession::new(list)?);
+        Ok(())
+    }
+
     fn warn(&mut self, msg: impl std::fmt::Display) {
         let _ = writeln!(self.err, "mochi: warning: {msg}");
     }
@@ -133,6 +188,10 @@ pub fn read_options(limits: &[String]) -> Result<ReadOptions> {
             "max-commit-frame-len" => &mut l.max_commit_frame_len,
             "max-decoded-object-len" => &mut l.max_decoded_object_len,
             "max-required-features" => &mut l.max_required_features,
+            "max-kdf-memory-kib" => &mut l.max_kdf_memory_kib,
+            "max-kdf-iterations" => &mut l.max_kdf_iterations,
+            "max-kdf-lanes" => &mut l.max_kdf_lanes,
+            "max-key-envelopes" => &mut l.max_key_envelopes,
             _ => return Err(invalid(format!("--limit: unknown limit {name:?}"))),
         };
         *slot = value;
@@ -266,6 +325,7 @@ fn emit_commit(
             "archive": archive.display().to_string(),
             "status": outcome.status.as_str(),
             "archive_id": archive_id.to_hex(),
+            "encrypted": env.read.keys.is_some(),
             "seq": outcome.seq,
             "commit_id": outcome.commit_id.to_hex(),
             "durability": if unconfirmed.is_some() { "directory_unconfirmed" } else { "durable" },
@@ -320,6 +380,12 @@ fn emit_commit(
                 "degraded: the new file's directory entry is not confirmed durable ({why})"
             ));
         }
+        if env.read.keys.is_some() {
+            env.line(
+                "encrypted: names, content, and sizes in this archive are sealed under a key \
+                 the passphrase unlocks. There is no recovery if every passphrase is lost",
+            );
+        }
         env.line(
             "this is a local commit in one file; keep an independent copy of anything you \
              cannot lose",
@@ -349,15 +415,36 @@ pub fn create(env: &mut Env<'_>, a: &CreateArgs) -> Result<u8> {
         Vec::new(),
         &ctx,
     )?;
+    // The passphrases the key envelopes wrap the data key under: the named
+    // sources, else a prompt asked twice. Nothing is created without one.
+    let mut read = env.read.clone();
+    if a.encrypted {
+        let mut list = passphrase::explicit(&env.pass, env.err)?;
+        if list.is_empty() {
+            if !passphrase::can_prompt() {
+                return Err(invalid(
+                    "--encrypted needs a passphrase: give --passphrase-file PATH (repeatable, \
+                     one per key envelope) or run on a terminal to be asked. Nothing was created",
+                ));
+            }
+            list.push(passphrase::ask_new(
+                &a.archive.display().to_string(),
+                env.err,
+            )?);
+        }
+        read.keys = Some(mochi_core::keys::KeySession::new(list)?);
+        env.read.keys = read.keys.clone();
+    }
     let opts = WriterOptions {
-        read: env.read,
+        read,
         chunk_size: a.chunk_size,
         zstd_level: a.compression_level,
         record_time: true,
-        profile: a.tar_compatible.then_some(Profile {
-            tar_compatible: true,
-            encrypted: false,
+        profile: (a.tar_compatible || a.encrypted).then_some(Profile {
+            tar_compatible: a.tar_compatible,
+            encrypted: a.encrypted,
         }),
+        kdf: None,
         ..WriterOptions::default()
     };
     let (w, outcome) = ArchiveWriter::create_in(
@@ -389,6 +476,7 @@ pub fn append(env: &mut Env<'_>, a: &AppendArgs) -> Result<u8> {
         .iter()
         .map(|d| archive_path_arg(d))
         .collect::<Result<_>>()?;
+    env.unlock(&a.archive, Need::Required)?;
     let (mut dir, name) = location(&a.archive)?;
     let tail = if a.truncate_tail {
         TailRepair::Truncate(TruncationWaivers {
@@ -399,7 +487,7 @@ pub fn append(env: &mut Env<'_>, a: &AppendArgs) -> Result<u8> {
         TailRepair::Refuse
     };
     let opts = WriterOptions {
-        read: env.read,
+        read: env.read.clone(),
         record_time: true,
         ..WriterOptions::default()
     };
@@ -504,6 +592,7 @@ fn open_archive(path: &Path) -> Result<OsReadStorage> {
 }
 
 pub fn list_cmd(env: &mut Env<'_>, a: &ListArgs) -> Result<u8> {
+    env.unlock(&a.archive, Need::Required)?;
     let src = open_archive(&a.archive)?;
     let head = open_selected(&src, a.sel.snapshot, &env.read)?;
     let under = a.under.as_deref().map(archive_path_arg).transpose()?;
@@ -576,6 +665,7 @@ fn dump_value_text(v: &DumpValue) -> String {
 /// opened commit, hash-verified as every open is, dumped table by table.
 /// Read-only; table names come only from the catalog's own schema.
 pub fn dump_index(env: &mut Env<'_>, a: &DumpIndexArgs) -> Result<u8> {
+    env.unlock(&a.archive, Need::Required)?;
     let src = open_archive(&a.archive)?;
     let head = open_selected(&src, a.sel.snapshot, &env.read)?;
     let source = match &head.catalog_source {
@@ -689,6 +779,7 @@ pub fn search_cmd(env: &mut Env<'_>, a: &SearchArgs) -> Result<u8> {
         SearchSnapshots::All => SnapshotScope::All,
         SearchSnapshots::Commit(s) => SnapshotScope::Commit(s),
     };
+    env.unlock(&a.archive, Need::Required)?;
     let src = open_archive(&a.archive)?;
     let head = open_head(&src, &env.read)?;
     let (progress, cancel) = job();
@@ -809,6 +900,7 @@ pub fn search_cmd(env: &mut Env<'_>, a: &SearchArgs) -> Result<u8> {
 }
 
 pub fn snapshot_list(env: &mut Env<'_>, a: &SnapshotListArgs) -> Result<u8> {
+    env.unlock(&a.archive, Need::Required)?;
     let src = open_archive(&a.archive)?;
     let history = commit_history(&src, &env.read)?;
     // Retention at the head, rebuilt from its segment's manifests (D10.10).
@@ -967,6 +1059,7 @@ fn emit_restore(
 }
 
 pub fn get(env: &mut Env<'_>, a: &GetArgs) -> Result<u8> {
+    env.unlock(&a.archive, Need::Required)?;
     let src = open_archive(&a.archive)?;
     let head = open_selected(&src, a.sel.snapshot, &env.read)?;
     let paths: Vec<ArchivePath> = a
@@ -1025,6 +1118,7 @@ pub fn get(env: &mut Env<'_>, a: &GetArgs) -> Result<u8> {
 }
 
 pub fn restore_test(env: &mut Env<'_>, a: &RestoreTestArgs) -> Result<u8> {
+    env.unlock(&a.archive, Need::Required)?;
     let src = open_archive(&a.archive)?;
     let head = open_selected(&src, a.sel.snapshot, &env.read)?;
     std::fs::create_dir(&a.destination).map_err(|e| {
@@ -1209,6 +1303,16 @@ fn print_report_body(env: &mut Env<'_>, heading: &str, skipped_label: &str, r: &
 
 pub fn verify_cmd(env: &mut Env<'_>, a: &VerifyArgs, deep: bool) -> Result<u8> {
     let command = if deep { "fsck" } else { "verify" };
+    // A key only when the user gave one: otherwise an Encrypted archive is
+    // verified without it (stored integrity; D20 item 12).
+    env.unlock(
+        &a.archive,
+        if a.ask_passphrase {
+            Need::Required
+        } else {
+            Need::IfGiven
+        },
+    )?;
     let src = open_archive(&a.archive)?;
     let anchor = if let Some(h) = &a.expected_head {
         FreshnessAnchor::User {
@@ -1237,7 +1341,7 @@ pub fn verify_cmd(env: &mut Env<'_>, a: &VerifyArgs, deep: bool) -> Result<u8> {
     };
     let opts = VerifyOptions {
         level: level(a.level),
-        read: env.read,
+        read: env.read.clone(),
         anchor,
         require_freshness: a.require_freshness,
         deep,
@@ -1430,10 +1534,15 @@ pub fn health_cmd(env: &mut Env<'_>, a: &HealthArgs) -> Result<u8> {
 // ---- retention, checkpoint, compaction, collection (plan C9) ---------------------
 
 /// Open `archive` for one new commit under its publication lock.
-fn open_writer(archive: &Path, read: ReadOptions) -> Result<ArchiveWriter<OsStorage>> {
+fn open_writer(
+    archive: &Path,
+    read: ReadOptions,
+    kdf: Option<mochi_format::kdf::KdfParams>,
+) -> Result<ArchiveWriter<OsStorage>> {
     let (mut dir, name) = location(archive)?;
     let opts = WriterOptions {
         read,
+        kdf,
         record_time: true,
         ..WriterOptions::default()
     };
@@ -1517,7 +1626,8 @@ fn require_confirm(confirm: bool, what: &str) -> Result<()> {
 }
 
 pub fn snapshot_retain(env: &mut Env<'_>, a: &RetainArgs) -> Result<u8> {
-    let w = open_writer(&a.archive, env.read)?;
+    env.unlock(&a.archive, Need::Required)?;
+    let w = open_writer(&a.archive, env.read.clone(), None)?;
     let mut tx = Transaction::new();
     tx.hold(a.label.as_bytes(), a.snapshot);
     let detail = json!({"hold": {"label": a.label, "seq": a.snapshot}});
@@ -1531,7 +1641,8 @@ pub fn snapshot_retain(env: &mut Env<'_>, a: &RetainArgs) -> Result<u8> {
 
 pub fn snapshot_expire(env: &mut Env<'_>, a: &ExpireArgs) -> Result<u8> {
     require_confirm(a.confirm, "expiring a snapshot")?;
-    let w = open_writer(&a.archive, env.read)?;
+    env.unlock(&a.archive, Need::Required)?;
+    let w = open_writer(&a.archive, env.read.clone(), None)?;
     let mut tx = Transaction::new();
     for s in &a.snapshots {
         tx.expire(*s);
@@ -1552,8 +1663,9 @@ pub fn snapshot_expire(env: &mut Env<'_>, a: &ExpireArgs) -> Result<u8> {
 }
 
 pub fn snapshot_release(env: &mut Env<'_>, a: &ReleaseArgs) -> Result<u8> {
+    env.unlock(&a.archive, Need::Required)?;
     require_confirm(a.confirm, "releasing a legal hold")?;
-    let w = open_writer(&a.archive, env.read)?;
+    let w = open_writer(&a.archive, env.read.clone(), None)?;
     let mut tx = Transaction::new();
     tx.release(a.label.as_bytes());
     let what = format!("legal hold {} released", text(a.label.as_bytes()));
@@ -1562,7 +1674,8 @@ pub fn snapshot_release(env: &mut Env<'_>, a: &ReleaseArgs) -> Result<u8> {
 }
 
 pub fn checkpoint(env: &mut Env<'_>, a: &CheckpointArgs) -> Result<u8> {
-    let mut w = open_writer(&a.archive, env.read)?;
+    env.unlock(&a.archive, Need::Required)?;
+    let mut w = open_writer(&a.archive, env.read.clone(), None)?;
     w.request_checkpoint();
     commit_maintenance(
         env,
@@ -1623,6 +1736,7 @@ pub fn gc_plan(env: &mut Env<'_>, a: &GcPlanArgs) -> Result<u8> {
         progress: &progress,
         cancel: &cancel,
     };
+    env.unlock(&a.archive, Need::Required)?;
     let src = open_archive(&a.archive)?;
     let p = gc::plan(&src, &env.read, &ctx)?;
     let value = serde_json::to_value(&p)
@@ -1709,6 +1823,7 @@ fn rewrite(
         cancel: &cancel,
     };
     let saved = plan.map(read_plan).transpose()?;
+    env.unlock(archive, Need::Required)?;
     // Checked first so that naming the source itself (whose lock is about
     // to be taken) reads as what it is. Publication refuses an existing
     // name again, without a race (D13).
@@ -1724,7 +1839,7 @@ fn rewrite(
     let (mut out_dir, out_name) = location(output)?;
     // The source's publication lock is held from here until the new archive
     // is published, so no commit can land in between (D18).
-    let w = open_writer(archive, env.read)?;
+    let w = open_writer(archive, env.read.clone(), None)?;
     let keep = match &saved {
         None => Keep::Every,
         Some((value, archive_id, head)) => {
@@ -1753,6 +1868,10 @@ fn rewrite(
         }
     };
     let options = CompactOptions {
+        // An Encrypted source is opened with the passphrases given, and the
+        // new archive is wrapped under those same ones (D20 item 10).
+        read: env.read.clone(),
+        kdf: None,
         verify_content: !no_verify_content,
         ..CompactOptions::default()
     };
@@ -1819,9 +1938,14 @@ fn rewrite(
             ));
         }
         env.line(format!(
-            "{} chunks ({} stored bytes) copied byte for byte; {} file versions{}",
+            "{} chunks ({} stored bytes) {}; {} file versions{}",
             report.chunks_copied,
             report.stored_bytes_copied,
+            if report.resealed {
+                "opened and sealed again under the new archive's key"
+            } else {
+                "copied byte for byte"
+            },
             report.file_versions,
             match report.versions_verified {
                 Some(n) => format!(", {n} read back and verified"),
@@ -2014,6 +2138,7 @@ pub fn repair_plan(env: &mut Env<'_>, a: &RepairPlanArgs) -> Result<u8> {
         progress: &progress,
         cancel: &cancel,
     };
+    env.unlock(&a.archive, Need::Required)?;
     let src = open_archive(&a.archive)?;
     let p = repair::plan(&src, &env.read, &ctx)?;
     let value = serde_json::to_value(&p)
@@ -2058,6 +2183,7 @@ pub fn repair_apply(env: &mut Env<'_>, a: &RepairApplyArgs) -> Result<u8> {
         progress: &progress,
         cancel: &cancel,
     };
+    env.unlock(&a.archive, Need::Required)?;
     let bytes = std::fs::read(&a.plan)
         .map_err(|e| MochiError::new(ErrorCode::IoError, format!("{}: {e}", a.plan.display())))?;
     let approved: RepairPlan = serde_json::from_slice(&bytes).map_err(|e| {
@@ -2080,6 +2206,7 @@ pub fn repair_apply(env: &mut Env<'_>, a: &RepairApplyArgs) -> Result<u8> {
     let src = open_archive(&a.archive)?;
     let options = RepairOptions {
         accept_retention_loss: a.accept_retention_loss,
+        kdf: None,
         ..RepairOptions::default()
     };
     let report = repair::apply(
@@ -2206,6 +2333,226 @@ pub fn repair_apply(env: &mut Env<'_>, a: &RepairApplyArgs) -> Result<u8> {
         ));
     }
     Ok(report.exit_code)
+}
+
+// ---- rekey (C11) ---------------------------------------------------------------
+
+fn kdf_text(k: &mochi_format::kdf::KdfParams) -> String {
+    format!(
+        "argon2id m={} MiB t={} p={}",
+        k.memory_kib / 1024,
+        k.iterations,
+        k.lanes
+    )
+}
+
+/// The new passphrases of `--add-passphrase` and `--reencrypt`: the named
+/// files, else a prompt asked twice.
+fn new_passphrases(
+    env: &mut Env<'_>,
+    a: &RekeyArgs,
+) -> Result<Vec<mochi_format::secret::Passphrase>> {
+    let named = Sources {
+        files: a.new_passphrase_file.clone(),
+        env: false,
+    };
+    let mut list = passphrase::explicit(&named, env.err)?;
+    if list.is_empty() {
+        if !passphrase::can_prompt() {
+            return Err(invalid(
+                "a new passphrase is needed: give --new-passphrase-file PATH or run on a \
+                 terminal to be asked. Nothing was done",
+            ));
+        }
+        list.push(passphrase::ask_new(
+            &a.archive.display().to_string(),
+            env.err,
+        )?);
+    }
+    Ok(list)
+}
+
+pub fn rekey(env: &mut Env<'_>, a: &RekeyArgs) -> Result<u8> {
+    use mochi_core::rekey;
+    if a.list {
+        let src = open_archive(&a.archive)?;
+        let envelopes = rekey::list(&src, &env.read)?;
+        let archive_id = commit_history(&src, &env.read)?
+            .pop()
+            .map(|h| h.commit.archive_id.to_hex());
+        if env.json {
+            let items: Vec<Value> = envelopes
+                .iter()
+                .map(|e| {
+                    json!({
+                        "envelope_id": e.envelope_id,
+                        "created_at_seq": e.created_at_seq,
+                        "kdf": {
+                            "algorithm": "argon2id",
+                            "memory_kib": e.kdf.memory_kib,
+                            "iterations": e.kdf.iterations,
+                            "lanes": e.kdf.lanes,
+                        },
+                    })
+                })
+                .collect();
+            env.emit_json(&json!({
+                "command": "rekey",
+                "action": "list",
+                "archive": a.archive.display().to_string(),
+                "archive_id": archive_id,
+                "envelopes": items,
+                "exit_code": exit::OK,
+            }));
+        } else {
+            env.line(format!(
+                "{} key envelope{} valid at the head of {}:",
+                envelopes.len(),
+                if envelopes.len() == 1 { "" } else { "s" },
+                a.archive.display()
+            ));
+            for e in &envelopes {
+                env.line(format!(
+                    "  {}  written by commit {}  {}",
+                    e.envelope_id,
+                    e.created_at_seq,
+                    kdf_text(&e.kdf)
+                ));
+            }
+        }
+        return Ok(exit::OK);
+    }
+
+    if a.reencrypt {
+        return reencrypt_cmd(env, a);
+    }
+
+    let remove: Vec<[u8; 16]> = a
+        .remove_passphrase
+        .iter()
+        .map(|s| rekey::parse_envelope_id(s))
+        .collect::<Result<_>>()?;
+    if !a.add_passphrase && remove.is_empty() {
+        return Err(invalid(
+            "choose one of --list, --add-passphrase, --remove-passphrase ENVELOPE_ID, or \
+             --reencrypt -o NEW_ARCHIVE",
+        ));
+    }
+    env.unlock(&a.archive, Need::Required)?;
+    if !is_encrypted(&a.archive, &env.read) {
+        return Err(invalid(format!(
+            "{} is not an Encrypted archive: it has no key envelopes to change",
+            a.archive.display()
+        )));
+    }
+    let add = if a.add_passphrase {
+        new_passphrases(env, a)?
+    } else {
+        Vec::new()
+    };
+    let added = add.len();
+    let tx = rekey::rewrap_transaction(add, remove.clone())?;
+    let w = open_writer(&a.archive, env.read.clone(), None)?;
+    let what = format!(
+        "key envelopes changed: {added} added, {} removed; the data key and the data are \
+         unchanged. Removing an envelope is not revocation: the envelope stays in the file's \
+         history, and any copy made before still opens with that passphrase",
+        remove.len()
+    );
+    let detail = json!({
+        "added": added,
+        "removed": remove.iter().map(|id| hex(id)).collect::<Vec<_>>(),
+        "revocation": false,
+    });
+    commit_maintenance(env, "rekey", &a.archive, w, tx, &what, detail)
+}
+
+fn reencrypt_cmd(env: &mut Env<'_>, a: &RekeyArgs) -> Result<u8> {
+    let Some(output) = a.output.as_deref() else {
+        return Err(invalid("--reencrypt needs --output NEW_ARCHIVE"));
+    };
+    env.unlock(&a.archive, Need::Required)?;
+    if !is_encrypted(&a.archive, &env.read) {
+        return Err(invalid(format!(
+            "{} is not an Encrypted archive: there is nothing to re-encrypt",
+            a.archive.display()
+        )));
+    }
+    let new = new_passphrases(env, a)?;
+    let (progress, cancel) = job();
+    let ctx = JobContext {
+        progress: &progress,
+        cancel: &cancel,
+    };
+    if std::fs::symlink_metadata(output).is_ok() {
+        return Err(MochiError::new(
+            ErrorCode::DestinationExists,
+            format!(
+                "{} exists; a new archive never replaces anything. Nothing was written",
+                output.display()
+            ),
+        ));
+    }
+    let (mut out_dir, out_name) = location(output)?;
+    let w = open_writer(&a.archive, env.read.clone(), None)?;
+    let report = mochi_core::rekey::reencrypt(
+        &w,
+        &mut out_dir,
+        &out_name,
+        Box::new(OsIds),
+        env.read.clone(),
+        new,
+        None,
+        &ctx,
+    )?;
+    if let Err(e) = w.close() {
+        env.warn(format!("releasing the source archive's lock: {e}"));
+    }
+    let code = if report.durability_unconfirmed.is_none() {
+        exit::OK
+    } else {
+        exit::DEGRADED
+    };
+    if env.json {
+        let mut v = serde_json::to_value(&report).map_err(|e| {
+            MochiError::new(ErrorCode::IoError, format!("encoding the report: {e}"))
+        })?;
+        if let Value::Object(m) = &mut v {
+            m.insert("command".into(), json!("rekey"));
+            m.insert("action".into(), json!("reencrypt"));
+            m.insert("source".into(), json!(a.archive.display().to_string()));
+            m.insert("output".into(), json!(output.display().to_string()));
+            m.insert("revocation".into(), json!(false));
+            m.insert("exit_code".into(), json!(code));
+        }
+        env.emit_json(&v);
+    } else {
+        env.line(format!(
+            "wrote {} ({} bytes, archive {}): {} snapshot{} re-encrypted under a new data key \
+             and the new passphrase{}",
+            output.display(),
+            report.new_len,
+            report.new_archive_id,
+            report.commits.len(),
+            if report.commits.len() == 1 { "" } else { "s" },
+            if a.new_passphrase_file.len() > 1 {
+                "s"
+            } else {
+                ""
+            },
+        ));
+        if let Some(why) = &report.durability_unconfirmed {
+            env.line(format!(
+                "degraded: the new file's directory entry is not confirmed durable ({why})"
+            ));
+        }
+        env.line(format!(
+            "the source {} is unchanged and kept, and still opens with its old passphrases. \
+             Re-encryption does not recall copies already made",
+            a.archive.display()
+        ));
+    }
+    Ok(code)
 }
 
 #[cfg(test)]

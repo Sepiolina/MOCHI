@@ -92,9 +92,13 @@ check; `verify`, appending, baseline recovery, and `fsck` do.
   and the **key operations** (manifest key 13) as the audit record. The data key does not
   change and no data is rewritten. The set never becomes empty.
 * **Removal is not revocation.** The removed envelope's frame stays in the file's
-  history, and any earlier copy of the archive still opens with it. The head does not
-  open with a removed passphrase, even through a session that already holds the data key.
-  Output and documentation never say "revoked" or "secure".
+  history, and a rewrap keeps the data key, so the removed passphrase still yields the
+  data key from this very file (and from any copy), and that key decrypts content
+  appended **after** the removal too. `mochi` refuses a removed passphrase at the head,
+  even through a session that already holds the data key, but that is the tool's policy,
+  not a cryptographic barrier (`c11_rekey.rs` asserts the key still reaches later
+  content). To keep a passphrase away from new content, `rekey --reencrypt` into a new
+  file and retire the old one. Output and documentation never say "revoked" or "secure".
 * `rekey ARCHIVE --reencrypt -o NEW --new-passphrase-file P` writes a **new archive**
   through the compaction path: new archive ID, new data key, every snapshot kept. Its
   audit record is delta(0)'s provenance with reason *re-encryption*; a collection or
@@ -124,7 +128,7 @@ back or withhold commits; freshness (D8) still applies. It leaks, and documents:
 
 Nothing in the CLI or the desktop app calls the result "safe", "secure", or "backed up".
 
-## Decisions made in the implementation (for review)
+## Decisions made in the implementation (accepted at the R5 freeze, 2026-10-11)
 
 1. **Self-unlocking low-level reads.** `read_bound_manifest` and `check_image` unlock
    from the commit's own envelopes when the session has not opened the archive yet, so

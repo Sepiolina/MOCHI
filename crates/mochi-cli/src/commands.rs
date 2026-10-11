@@ -2456,7 +2456,9 @@ pub fn rekey(env: &mut Env<'_>, a: &RekeyArgs) -> Result<u8> {
     let what = format!(
         "key envelopes changed: {added} added, {} removed; the data key and the data are \
          unchanged. Removing an envelope is not revocation: the envelope stays in the file's \
-         history, and any copy made before still opens with that passphrase",
+         history, so the removed passphrase still yields the data key from this file and from \
+         any copy, and that key also decrypts content added later. Only `rekey --reencrypt` \
+         writes a file under a new data key",
         remove.len()
     );
     let detail = json!({

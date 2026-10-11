@@ -26,7 +26,8 @@
 //! contain an envelope the session already opened derives again. A passphrase
 //! removed by `rekey --remove-passphrase` therefore does not open the head, and
 //! it still opens an older commit that listed its envelope (removal is not
-//! revocation; B.2.10 item 10).
+//! revocation; B.2.10 item 10). That refusal is policy, not cryptography: the
+//! data key the older envelope yields is the head's too.
 
 use std::sync::{Arc, Mutex};
 

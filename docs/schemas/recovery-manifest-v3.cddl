@@ -1,4 +1,6 @@
-; MOCHI recovery manifest, schema version 3 (DRAFT; ratification items R3, R5).
+; MOCHI recovery manifest, schema version 3 (ratification items R3, R5). Key 13 and
+; the provenance reason are FROZEN with R5 (2026-10-11); the rest is restated
+; from R3's draft and freezes with R3.
 ; Decisions: spec Annex B.2.10 (D20), rule 6 and 10; Annex B D10 item 3
 ; ("key-envelope references join both manifest kinds in the phases that
 ; introduce them, each as a new manifest schema version"), D18.

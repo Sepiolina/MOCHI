@@ -14,8 +14,13 @@
 //!   reason *re-encryption*. Never in place.
 //!
 //! **Removal is not revocation.** The removed envelope's frame stays in the
-//! file's history, and any earlier copy of the archive still opens with it.
-//! Re-encryption does not recall copies already made. Nothing here, and no
+//! file's history, and a rewrap keeps the data key, so the removed passphrase
+//! still yields the data key from this very file (and from any copy), and the
+//! key decrypts content appended after the removal too. Refusing it at the
+//! head ([`crate::keys::unlock_commit`]) is the tool's policy, not a
+//! cryptographic barrier. Only [`reencrypt`] writes content under a key the
+//! removed passphrase does not reach, and it does not recall copies already
+//! made. Nothing here, and no
 //! caller's wording, may call either "revoked" or "secure".
 
 use std::sync::Arc;

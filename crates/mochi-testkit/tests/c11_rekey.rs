@@ -8,6 +8,7 @@
 
 use std::collections::BTreeSet;
 
+use mochi_core::catalog::namespace::NamespaceOp;
 use mochi_core::commit::Metadata;
 use mochi_core::compact::read_provenance;
 use mochi_core::manifest::{KeyOp, ManifestKind, RewriteReason};
@@ -219,6 +220,86 @@ fn removing_an_envelope_closes_the_head_to_that_passphrase_but_is_not_revocation
     );
 }
 
+/// The strict head open is the tool's policy, not a cryptographic barrier.
+/// A rewrap keeps the data key, and the removed envelope stays in the file, so
+/// the removed passphrase still yields the data key from this very file, and
+/// that key opens content written **after** the removal. Only `--reencrypt`
+/// (a new data key, in a new file) excludes a passphrase from new content
+/// (R5 review, 2026-10-11).
+#[test]
+fn a_removed_passphrase_still_reads_content_appended_after_the_removal() {
+    let s = archive(&[A]);
+    let mut w = lock(&s, &[A], 5);
+    rewrap(&mut w, vec![pass(B)], vec![], &Job::new().ctx()).unwrap();
+    w.close().unwrap();
+    let a_envelope = envelope_ids(&s)
+        .into_iter()
+        .find(|id| {
+            let scratch = SimStorage::from_bytes(s.contents());
+            let mut w = lock(&scratch, &[B], 6);
+            rewrap(
+                &mut w,
+                vec![],
+                vec![parse_envelope_id(id).unwrap()],
+                &Job::new().ctx(),
+            )
+            .unwrap();
+            w.close().unwrap();
+            open_head(&scratch, &keyed_read(&[A])).is_err()
+        })
+        .expect("one envelope is A's");
+
+    let mut w = lock(&s, &[B], 7);
+    rewrap(
+        &mut w,
+        vec![],
+        vec![parse_envelope_id(&a_envelope).unwrap()],
+        &Job::new().ctx(),
+    )
+    .unwrap();
+    let mut tx = Transaction::new();
+    put(&mut tx, "written-after-removal", 42);
+    w.commit(tx, &Job::new().ctx()).unwrap();
+    w.close().unwrap();
+    assert_eq!(
+        open_head(&s, &keyed_read(&[A])).unwrap_err().code,
+        ErrorCode::KeyUnavailable
+    );
+
+    // A opens commit 0 of the same file through the envelope it still lists,
+    // and the data key it gets opens the head's manifest, which names the file
+    // written after A was removed.
+    let o = keyed_read(&[A]);
+    let history = commit_history(&s, &o).unwrap();
+    let (first, head) = (history.first().unwrap(), history.last().unwrap());
+    read_bound_manifest(
+        &s,
+        &first.commit,
+        &first.commit.delta_manifest,
+        first.commit_offset,
+        ManifestKind::Delta,
+        &o,
+    )
+    .unwrap();
+    let delta = read_bound_manifest(
+        &s,
+        &head.commit,
+        &head.commit.delta_manifest,
+        head.commit_offset,
+        ManifestKind::Delta,
+        &o,
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            delta.ops.as_slice(),
+            [NamespaceOp::Put { path: p, .. }] if *p == path("written-after-removal")
+        ),
+        "{:?}",
+        delta.ops
+    );
+}
+
 #[test]
 fn a_rewrap_that_would_leave_nothing_or_names_nothing_writes_nothing() {
     let s = archive(&[A]);
@@ -343,6 +424,9 @@ enum Step {
     /// ciphertext must differ.
     PutAgain,
     Reopen,
+    /// A commit that dies before its footer: the torn tail is truncated on
+    /// reopen and the same content is written again.
+    CrashAndRetry(u64),
     AddPassphrase,
 }
 
@@ -352,6 +436,7 @@ fn steps() -> impl Strategy<Value = Vec<Step>> {
             (0u64..4).prop_map(Step::Put),
             Just(Step::PutAgain),
             Just(Step::Reopen),
+            (0u64..4).prop_map(Step::CrashAndRetry),
             Just(Step::AddPassphrase),
         ],
         1..8,
@@ -361,12 +446,14 @@ fn steps() -> impl Strategy<Value = Vec<Step>> {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(16))]
 
-    /// Over writes, repeated plaintext, reopen, rewraps, and re-encryption,
-    /// every 24-byte nonce in the file, and in the re-encrypted copy, is
-    /// distinct (D20 item 2: fresh random nonces, no counters).
+    /// Over writes, repeated plaintext, reopen, a crash and retry, rewraps,
+    /// and re-encryption, every 24-byte nonce in the file, in the commits a
+    /// crash lost, and in the re-encrypted copy, is distinct (D20 item 2:
+    /// fresh random nonces, no counters; gate G10).
     #[test]
     fn nonces_are_never_reused(plan in steps()) {
-        let s = archive(&[A]);
+        let mut s = archive(&[A]);
+        let mut lost: Vec<[u8; 24]> = Vec::new();
         let mut w = lock(&s, &[A], 2);
         let mut n = 0u64;
         let mut added = 0u32;
@@ -390,6 +477,37 @@ proptest! {
                     seed += 1;
                     w = lock(&s, &[A], seed);
                 }
+                Step::CrashAndRetry(k) => {
+                    // The attempt runs on a copy to completion, so its nonces
+                    // can be read back; the crash keeps a third of its bytes,
+                    // which ends before the attempt's footer.
+                    w.close().unwrap();
+                    let before = nonces(&s);
+                    let attempt = SimStorage::from_bytes(s.contents());
+                    seed += 1;
+                    let mut aw = lock(&attempt, &[A], seed);
+                    let mut tx = Transaction::new();
+                    put(&mut tx, &format!("c{n}"), k);
+                    aw.commit(tx, &Job::new().ctx()).unwrap();
+                    aw.close().unwrap();
+                    lost.extend(nonces(&attempt).into_iter().filter(|x| !before.contains(x)));
+                    let committed = s.contents().len();
+                    let keep = committed + (attempt.contents().len() - committed) / 3;
+                    s = SimStorage::from_bytes(attempt.contents()[..keep].to_vec());
+                    seed += 1;
+                    let (retry, truncated) = ArchiveWriter::open_append(
+                        s.clone(),
+                        Box::new(SeqIds::new(seed)),
+                        encrypted_options(&[A]),
+                        TailPolicy::TruncateWithoutQuarantine,
+                    )
+                    .unwrap();
+                    prop_assert!(truncated.is_some());
+                    w = retry;
+                    let mut tx = Transaction::new();
+                    put(&mut tx, &format!("c{n}"), k);
+                    w.commit(tx, &Job::new().ctx()).unwrap();
+                }
                 Step::AddPassphrase => {
                     added += 1;
                     rewrap(&mut w, vec![pass(&format!("extra {added}"))], vec![], &Job::new().ctx())
@@ -412,7 +530,8 @@ proptest! {
         drop(w);
         let out = dir.file("new.mochi").unwrap();
         let (old, new) = (nonces(&s), nonces(&out));
-        let all: BTreeSet<[u8; 24]> = old.iter().chain(new.iter()).copied().collect();
-        prop_assert_eq!(all.len(), old.len() + new.len());
+        let all: BTreeSet<[u8; 24]> =
+            old.iter().chain(new.iter()).chain(lost.iter()).copied().collect();
+        prop_assert_eq!(all.len(), old.len() + new.len() + lost.len());
     }
 }

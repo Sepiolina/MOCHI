@@ -417,8 +417,9 @@ pub struct RekeyArgs {
     #[arg(long, conflicts_with = "reencrypt")]
     pub add_passphrase: bool,
     /// Remove the key envelope with this ID (a rewrap; see --list). This is
-    /// NOT revocation: the envelope stays in the file's history and any copy
-    /// made before still opens with that passphrase. Repeatable.
+    /// NOT revocation: the envelope stays in the file's history, so the
+    /// removed passphrase still yields the data key, which also decrypts
+    /// content added later. Only --reencrypt writes a new data key. Repeatable.
     #[arg(long, value_name = "ENVELOPE_ID", conflicts_with = "reencrypt")]
     pub remove_passphrase: Vec<String>,
     /// Write a new archive (`--output`) under a new data key and the new

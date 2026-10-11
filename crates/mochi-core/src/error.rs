@@ -162,6 +162,12 @@ pub enum ErrorCode {
     /// and never a `verify` finding. Messages and reports never contain the
     /// passphrase. Added in C11.
     KeyUnavailable,
+    /// Verification, informational only: a key envelope of the head declares
+    /// an Argon2id cost below the MOCHI writer default (memory below 65,536
+    /// KiB or fewer than 3 passes). Readers enforce no minimum, so this is
+    /// never an error and changes no dimension's status or the exit code
+    /// (Annex B.2.10 D20 item 14, decided at the R5 freeze). Added after C11.
+    KdfCostBelowDefault,
 }
 
 impl ErrorCode {
@@ -208,6 +214,7 @@ impl ErrorCode {
         ErrorCode::FreshnessFailed,
         ErrorCode::ProfileViolation,
         ErrorCode::KeyUnavailable,
+        ErrorCode::KdfCostBelowDefault,
     ];
 
     /// The stable string form. Independent of serde so it cannot drift silently;
@@ -255,6 +262,7 @@ impl ErrorCode {
             ErrorCode::FreshnessFailed => "FRESHNESS_FAILED",
             ErrorCode::ProfileViolation => "PROFILE_VIOLATION",
             ErrorCode::KeyUnavailable => "KEY_UNAVAILABLE",
+            ErrorCode::KdfCostBelowDefault => "KDF_COST_BELOW_DEFAULT",
         }
     }
 }
@@ -388,6 +396,8 @@ mod tests {
         "PROFILE_VIOLATION",
         // Appended in C11.
         "KEY_UNAVAILABLE",
+        // Appended at the R5 freeze (D20 item 14).
+        "KDF_COST_BELOW_DEFAULT",
     ];
 
     #[test]

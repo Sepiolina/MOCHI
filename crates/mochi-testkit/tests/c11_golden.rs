@@ -449,7 +449,17 @@ fn the_archive_vector_keeps_verifying_keyed_and_keyless() {
                 &Job::new().ctx(),
             )
             .report;
-            assert!(r.findings.is_empty(), "{pass} {level:?}: {:?}", r.findings);
+            // The vector's two envelopes use the test KDF, below the writer
+            // default: one informational finding each (D20 item 14), and
+            // nothing else.
+            assert_eq!(r.findings.len(), 2, "{pass} {level:?}: {:?}", r.findings);
+            assert!(
+                r.findings
+                    .iter()
+                    .all(|f| f.code == mochi_core::ErrorCode::KdfCostBelowDefault),
+                "{pass} {level:?}: {:?}",
+                r.findings
+            );
             assert_eq!(r.dimensions[&Dimension::KeyAvailability], Status::Pass);
         }
     }

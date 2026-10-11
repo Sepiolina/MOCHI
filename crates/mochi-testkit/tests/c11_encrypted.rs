@@ -13,7 +13,7 @@ use mochi_core::publish::{
     open_head, ArchiveWriter, ReadOptions, TailPolicy, Transaction, WriterOptions,
 };
 use mochi_core::read::{list, read_file};
-use mochi_core::report::Report;
+use mochi_core::report::{Report, Severity};
 use mochi_core::status::{Dimension, Status, VerificationLevel};
 use mochi_core::verify::{verify, VerifyOptions};
 use mochi_core::ErrorCode;
@@ -297,12 +297,21 @@ fn verify_with_the_passphrase_passes_every_level_and_key_availability() {
     for level in LEVELS {
         let r = run_verify(&s, level, reader(PASS));
         assert!(!r.operational_error, "{level:?}: {:?}", r.findings);
-        assert!(r.findings.is_empty(), "{level:?}: {:?}", r.findings);
+        assert!(
+            r.findings
+                .iter()
+                .all(|f| f.code == ErrorCode::KdfCostBelowDefault),
+            "{level:?}: {:?}",
+            r.findings
+        );
         assert_eq!(dim(&r, Dimension::KeyAvailability), Status::Pass);
         let deep = !matches!(
             level,
             VerificationLevel::Structural | VerificationLevel::Referential
         );
+        if deep {
+            assert_eq!(r.exit_code, exit::OK, "{level:?}");
+        }
         assert_eq!(
             dim(&r, Dimension::Integrity),
             if deep { Status::Pass } else { Status::Unknown },
@@ -363,6 +372,49 @@ fn verify_without_a_passphrase_checks_stored_integrity_and_says_what_it_did_not_
         let r = run_verify(&s, level, ReadOptions::default());
         assert_eq!(dim(&r, Dimension::Integrity), Status::Unknown);
     }
+}
+
+/// D20 item 14 (decided at the R5 freeze, open item c): an envelope of the
+/// head whose Argon2id cost is below the writer default gets one
+/// informational finding, with and without the key, naming the declared and
+/// the default cost. It changes no dimension and no exit code: the test
+/// archives use `TEST_KDF` (m = 64 KiB, t = 2), and the keyed run above still
+/// passes with exit 0. The boundary is unit-tested in `verify::keyless`.
+#[test]
+fn an_envelope_below_the_writer_default_kdf_cost_is_an_informational_finding() {
+    let s = two_commit_archive();
+    for read in [reader(PASS), ReadOptions::default()] {
+        let keyed = read.keys.is_some();
+        let r = run_verify(&s, VerificationLevel::StoredIntegrity, read);
+        let found: Vec<_> = r
+            .findings
+            .iter()
+            .filter(|f| f.code == ErrorCode::KdfCostBelowDefault)
+            .collect();
+        assert_eq!(found.len(), 1, "keyed {keyed}: {:?}", r.findings);
+        let f = found[0];
+        assert_eq!(f.severity, Severity::Info);
+        assert_eq!(f.observed.as_deref(), Some("m = 64 KiB, t = 2, p = 1"));
+        assert_eq!(
+            f.expected.as_deref(),
+            Some("at least m = 65536 KiB, t = 3, p = 4")
+        );
+        let msg = f.message.as_deref().unwrap();
+        assert!(msg.contains("below the MOCHI writer default"), "{msg}");
+        assert!(!msg.to_lowercase().contains("weak"), "{msg}");
+        assert_eq!(dim(&r, Dimension::Integrity), Status::Pass, "keyed {keyed}");
+        if keyed {
+            assert_eq!(r.exit_code, exit::OK);
+        }
+    }
+    // Reported at every level, structural included, under its stable code.
+    let json = serde_json::to_string(&run_verify(
+        &s,
+        VerificationLevel::Structural,
+        ReadOptions::default(),
+    ))
+    .unwrap();
+    assert!(json.contains("KDF_COST_BELOW_DEFAULT"), "{json}");
 }
 
 #[test]

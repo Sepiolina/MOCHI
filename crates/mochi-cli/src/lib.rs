@@ -87,7 +87,8 @@ pub fn exit_code_for(code: ErrorCode) -> u8 {
         | ErrorCode::NameCollision
         | ErrorCode::NameUnsupported
         | ErrorCode::AttributeNotRestored
-        | ErrorCode::KeyUnavailable => exit::ERROR,
+        | ErrorCode::KeyUnavailable
+        | ErrorCode::KdfCostBelowDefault => exit::ERROR,
     }
 }
 

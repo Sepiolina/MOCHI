@@ -1,0 +1,111 @@
+/* The compact window (plan D6, owner decision 2026-10-16): one column, no
+   chrome. Only the colour tokens of styles.css; spec §23.3 gives success
+   styling to nothing here, so a result is plain text. */
+.quick {
+  max-width: none;
+  margin: 0;
+  padding: 1rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.quick h1 {
+  font-size: 1.05rem;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.quick p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.quick .note {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.quick .actions {
+  margin: 0.25rem 0 0;
+  justify-content: flex-end;
+}
+.quick progress {
+  width: 100%;
+}
+.quick label {
+  display: block;
+}
+.quick input {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 0.25rem;
+  font: inherit;
+}
+.quick {
+  overflow-y: auto;
+}
+.quick .warning {
+  color: var(--fg);
+}
+.quick .result-list {
+  grid-template-columns: minmax(4rem, 7rem) minmax(0, 1fr);
+}
+
+/* The Add form (owner decision 2026-10-20): a WinRAR-style form in the compact window. */
+.quick-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.quick-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+.quick-row input {
+  flex: 1;
+  margin-top: 0.25rem;
+}
+.quick-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 0.5rem;
+}
+.quick-form select {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 0.25rem;
+  font: inherit;
+}
+.quick-form .quick-check input,
+.quick-form input[type="checkbox"] {
+  display: inline;
+  width: auto;
+  margin: 0 0.25rem 0 0;
+}
+.quick-mochi {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.quick-form .hint {
+  align-self: flex-start;
+}
+
+/* After an extraction (owner request 2026-11-09): "Open the folder when done", and Rename and
+   Move to… for the folder "Extract to new folder" made. */
+.quick .quick-check input {
+  display: inline;
+  width: auto;
+  margin: 0 0.25rem 0 0;
+}
+.quick-rename {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.quick-rename .quick-row {
+  display: flex;
+}

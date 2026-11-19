@@ -1,0 +1,67 @@
+import type { Catalogue } from "../types";
+import type { quick as enQuick } from "../en/quick";
+// The compact window of the shell's quick verbs (plan D6, owner decision 2026-10-16).
+// Wording follows spec §23.3: a new archive is a local commit, not a backup; an extraction is
+// not a verification; a cancelled extraction keeps what it already wrote.
+export const quick = {
+  "quick.titleExtractHere": "正在解压 {name}",
+  "quick.titleExtractToFolder": "正在将 {name} 解压到新文件夹",
+  "quick.titleAdd": "正在将 {name} 添加到新的压缩文件",
+  "quick.titleAddMore": "正在将 {name} 等另外 {n} 项添加到新的压缩文件",
+  "quick.passphraseNeeded": "{name} 已加密。请输入口令以解压。",
+  "quick.passphraseWrong": "该口令无法打开 {name}。请重新输入。",
+  "quick.passphrase": "口令",
+  "quick.passphraseSubmit": "解压",
+  "quick.cancelling": "正在取消…",
+  "quick.doneExtract": "已将 {parts} 解压到 {name}",
+  "quick.extractNote":
+    "每个解压出的文件在保留之前，都已对照压缩文件中记录的哈希进行检查。解压不等于测试压缩文件。",
+  "quick.doneAdd": "已创建压缩文件：{name} · {parts}",
+  "quick.lineNotAdded": "{n} 项未添加",
+  "quick.lineNotExtracted": "{n} 项未解压",
+  "quick.firstReason": "第一个原因：{note}",
+  "quick.rowLocation": "位置",
+  "quick.rowFiles": "文件",
+  "quick.rowFolders": "文件夹",
+  "quick.rowSize": "大小",
+  "quick.rowStatus": "状态",
+  "quick.rowFolderEntry": "磁盘上的文件夹项目",
+  "quick.notConfirmed": "未确认",
+  "quick.degradedMark": "DEGRADED",
+  "quick.rowNotStored": "未存入",
+  "quick.rowNotExtracted": "未解压",
+  "quick.fallbackOne":
+    "没有写入任何内容：有 {n} 个项目会与 {destination} 中已有的内容冲突。解压方案已在主窗口中打开，请在那里选择处理方式。",
+  "quick.fallbackMany":
+    "没有写入任何内容：有 {n} 个项目会与 {destination} 中已有的内容冲突。解压方案已在主窗口中打开，请在那里选择处理方式。",
+  "quick.cancelledExtract":
+    "已取消。已解压的文件仍留在文件夹中，每个都是完整的。正在写入的文件已被丢弃。",
+  "quick.waiting": "正在等待任务…",
+  "quick.formTitle": "将 {name} 添加到压缩文件",
+  "quick.formTitleMore": "将 {name} 等另外 {n} 项添加到压缩文件",
+  "quick.formName": "压缩文件名",
+  "quick.formBrowse": "浏览…",
+  "quick.formFolder": "所在文件夹：{folder}",
+  "quick.formLevel": "压缩方式",
+  "quick.formLevelNone": "不压缩",
+  "quick.formEncrypt": "用口令加密",
+  "quick.formPassphrase": "口令",
+  "quick.formRepeat": "再输入一次",
+  "quick.formRecovery": "额外修复数据",
+  "quick.formOk": "确定",
+  "quick.formPlain":
+    "这会生成一个其他程序也能打开的普通文件。口令和额外修复数据只适用于 .mochi。",
+  "quick.formFailed": "无法继续。",
+  "quick.doneExport": "已将 {parts} 写入 {name}",
+  "quick.rowFileSize": "文件大小",
+  "quick.rowFormat": "格式",
+  "quick.exportNote": "MOCHI 使用该格式对应的工具写出了此文件，写出后没有再检查该文件。",
+  "quick.showFolder": "在文件夹中显示",
+  "quick.openWhenDone": "完成后打开文件夹",
+  "quick.openedFolder": "已在文件管理器中打开该文件夹。",
+  "quick.folderName": "文件夹名称",
+  "quick.rename": "重命名",
+  "quick.moveTo": "移动到…",
+  "quick.renamed": "已重命名。文件夹现在位于 {location}",
+  "quick.moved": "已移动。文件夹现在位于 {location}",
+} satisfies Catalogue<typeof enQuick>;

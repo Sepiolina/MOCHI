@@ -1,0 +1,12 @@
+[Nemo Action]
+# Nemo (Linux Mint Cinnamon): a right-click entry on folders. Installed to
+# /usr/share/nemo/actions/mochi-find.nemo_action. Other file managers ignore it.
+Name=Find in MOCHI archives
+Name[th]=ค้นหาในไฟล์บีบอัด MOCHI
+Name[zh_CN]=在 MOCHI 压缩文件中查找
+Comment=Search the file names inside every MOCHI archive in the selected folders
+Exec=mochi-desktop --find -- %F
+Icon-Name=mochi-desktop
+Selection=any
+Extensions=dir;
+Quote=double

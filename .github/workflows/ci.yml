@@ -1,0 +1,684 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Supported platforms (plan O11): Ubuntu 22.04 is the floor (webkit2gtk 4.1,
+        # glibc for the .deb), 24.04 the current LTS. GitHub's Windows runners are
+        # Windows Server; client-only behaviour goes on the release checklist.
+        os: [ubuntu-22.04, ubuntu-24.04, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # ubuntu-22.04 and ubuntu-24.04 share a job name and `runner.os`; without
+          # this the 22.04 job restores 24.04's build scripts (glibc 2.39).
+          key: ${{ matrix.os }}
+      - name: Desktop app build dependencies (Ubuntu; webkit2gtk 4.1, plan O11)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev
+      # D8: the pinned foreign-format corpus is also extracted by independent
+      # tools (7-Zip, Info-ZIP unzip, GNU tar) and compared byte for byte.
+      # Ubuntu requires them (MOCHI_REQUIRE_TOOLS); Windows has 7-Zip and
+      # bsdtar preinstalled and skips what it lacks (unzip).
+      - name: Independent extractors for the foreign-format corpus (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y --no-install-recommends p7zip-full unzip
+          echo "MOCHI_REQUIRE_TOOLS=1" >> "$GITHUB_ENV"
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Tests
+        run: cargo test --workspace --locked
+      # Spec B.2.17 items 2 and 7: the writer lock on Windows is a one-byte
+      # LockFileEx at offset 2^62 of the archive. Whether a filesystem accepts
+      # a byte-range lock that far past the end of a file is a property of the
+      # filesystem, and users keep archives on USB sticks (FAT32, exFAT). The
+      # runner's own volume is NTFS; this step makes small VHDs with diskpart,
+      # formats FAT32 and exFAT (both must work) and tries ReFS (the runner may
+      # refuse to format it; that is logged as a warning and the step goes on),
+      # then runs one focused test on each volume through MOCHI_LOCK_TEST_DIR:
+      # create, append, read while a writer holds the lock, and a second writer
+      # gets LOCK_CONFLICT.
+      - name: Writer lock on other filesystems (Windows; FAT32, exFAT, ReFS, NTFS)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $testName = 'q54_windows_writer_lock_on_the_volume_named_by_the_environment'
+          $results = @()
+          $failed = $false
+
+          function Invoke-LockTest([string]$label, [string]$dir) {
+            Write-Host "::group::writer lock on $label ($dir)"
+            $env:MOCHI_LOCK_TEST_DIR = $dir
+            # Out-Host: a function returns everything its commands print; only $ok may be returned.
+            cargo test --locked -p mochi-testkit --test q54_writer_lock $testName -- --nocapture --exact | Out-Host
+            $ok = ($LASTEXITCODE -eq 0)
+            Remove-Item Env:MOCHI_LOCK_TEST_DIR
+            Write-Host '::endgroup::'
+            return $ok
+          }
+
+          function New-TestVolume([string]$name, [string]$fs, [int]$sizeMb, [string]$letter) {
+            $vhd = Join-Path $env:RUNNER_TEMP "$name.vhd"
+            $script = Join-Path $env:RUNNER_TEMP "$name.diskpart.txt"
+            @(
+              "create vdisk file=`"$vhd`" maximum=$sizeMb type=expandable",
+              "select vdisk file=`"$vhd`"",
+              'attach vdisk',
+              'create partition primary',
+              "format fs=$fs quick label=MOCHI",
+              "assign letter=$letter"
+            ) | Set-Content -Encoding ascii $script
+            Write-Host "::group::diskpart: $name ($fs, $sizeMb MiB)"
+            diskpart /s $script | Out-Host
+            Write-Host '::endgroup::'
+            if (-not (Test-Path "${letter}:\")) { return $null }
+            return (Get-Volume -DriveLetter $letter).FileSystem
+          }
+
+          # NTFS: the runner's own temp volume.
+          $tempDrive = $env:RUNNER_TEMP.Substring(0, 1)
+          $ntfsName = (Get-Volume -DriveLetter $tempDrive).FileSystem
+          Write-Host "runner temp volume ${tempDrive}: is $ntfsName"
+          $ok = Invoke-LockTest "runner temp volume ($ntfsName)" (Join-Path $env:RUNNER_TEMP 'lock-ntfs\t')
+          $results += "| runner temp volume | $ntfsName | $(if ($ok) {'pass'} else {'FAIL'}) |"
+          if (-not $ok) { $failed = $true }
+
+          # FAT32 and exFAT must format and must pass; ReFS may be refused.
+          $volumes = @(
+            @{ Name = 'fat32'; Fs = 'fat32'; Want = 'FAT32'; Mb = 64;   Letter = 'R'; Required = $true },
+            @{ Name = 'exfat'; Fs = 'exfat'; Want = 'exFAT'; Mb = 64;   Letter = 'S'; Required = $true },
+            @{ Name = 'refs';  Fs = 'refs';  Want = 'ReFS';  Mb = 2048; Letter = 'T'; Required = $false }
+          )
+          foreach ($v in $volumes) {
+            $got = New-TestVolume $v.Name $v.Fs $v.Mb $v.Letter
+            if ($null -eq $got) {
+              if ($v.Required) {
+                Write-Host "::error::could not create a $($v.Want) volume with diskpart"
+                $results += "| $($v.Want) | not created | FAIL |"
+                $failed = $true
+              } else {
+                Write-Host "::warning::$($v.Want) is not available on this runner (format was refused); not tested"
+                $results += "| $($v.Want) | not available on this runner (format refused) | not run |"
+              }
+              continue
+            }
+            if ($got -ne $v.Want) {
+              Write-Host "::error::expected $($v.Want), the volume reports $got"
+              $results += "| $($v.Want) | volume reports $got | FAIL |"
+              $failed = $true
+              continue
+            }
+            $ok = Invoke-LockTest "$got" "$($v.Letter):\t"
+            $results += "| $got | $got | $(if ($ok) {'pass'} else {'FAIL'}) |"
+            if (-not $ok) { $failed = $true }
+          }
+
+          $summary = @('### Writer lock (one byte at offset 2^62) per filesystem', '', '| volume | filesystem | result |', '| --- | --- | --- |') + $results
+          $summary | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          $summary | ForEach-Object { Write-Host $_ }
+          if ($failed) { exit 1 }
+      # ts-rs writes the IPC types while the tests run (plan O1); the
+      # checked-in copies must be exactly what the Rust types produce.
+      - name: Generated IPC types are fresh
+        shell: bash
+        run: |
+          git status --porcelain -- apps/mochi-desktop/ui/src/ipc/generated
+          test -z "$(git status --porcelain -- apps/mochi-desktop/ui/src/ipc/generated)" || {
+            echo "::error::apps/mochi-desktop/ui/src/ipc/generated is stale: run cargo test -p mochi-desktop and commit the result"
+            git diff -- apps/mochi-desktop/ui/src/ipc/generated
+            exit 1
+          }
+      - name: AGENTS.md invariants
+        shell: bash
+        run: bash ci/check-invariants.sh
+      # R6: the vectors come from an independent Python implementation of
+      # the parity suite; regenerating them must reproduce the checked-in
+      # file, which the Rust tests read (tests/r6_vectors.rs).
+      - name: R6 vectors reproduce (independent implementation)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python3 -m venv "$RUNNER_TEMP/r6"
+          "$RUNNER_TEMP/r6/bin/pip" install --quiet blake3==1.0.8
+          "$RUNNER_TEMP/r6/bin/python" docs/ratification/R6-vectors/gen_vectors.py \
+            | diff - docs/ratification/R6-vectors/vectors.json
+
+  ui:
+    # Desktop frontend (plan D0, O1, K9): Node 24 LTS, pnpm from
+    # `packageManager`, frozen lockfile; lint (react text-only rules as
+    # errors), strict typecheck, unit tests, production build.
+    name: desktop ui
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: apps/mochi-desktop/ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Enable pnpm (corepack, the version in package.json)
+        run: corepack enable
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Lint
+        run: pnpm lint
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Unit tests
+        run: pnpm test
+      - name: Build
+        run: pnpm build
+
+  ui-windows:
+    # Audit F13: the UI unit tests (including the partial-coverage case of spec
+    # §23.3 #8) also run on Windows. A separate job, so the name of the
+    # `desktop ui` check above does not change. Tests only; no product change.
+    name: desktop ui tests (windows-latest)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: apps/mochi-desktop/ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Enable pnpm (corepack, the version in package.json)
+        run: corepack enable
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Unit tests
+        run: pnpm test
+
+  e2e:
+    # Plan D0 exit: the built app streams a sample job's progress and cancels
+    # it cleanly; plan D1 exit: it browses snapshots, hostile names stay text,
+    # and a 100,000-entry folder pages; driven through tauri-driver on every supported platform
+    # (O11). GitHub's Windows runners are Windows Server; client-only
+    # behaviour goes on the release checklist.
+    name: desktop e2e (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e-${{ matrix.os }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Enable pnpm (corepack, the version in package.json)
+        run: corepack enable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Desktop app and WebDriver dependencies (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev \
+            webkit2gtk-driver xvfb dbus
+      - name: Install tauri-driver
+        run: cargo install tauri-driver --locked
+      - name: Install msedgedriver matching the runner's WebView2 (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo install --git https://github.com/chippers/msedgedriver-tool --rev 8c4b34f51b45f5cf08013366d703de464ab871d1 --locked
+          mkdir -p "$RUNNER_TEMP/edgedriver"
+          cd "$RUNNER_TEMP/edgedriver" && msedgedriver-tool
+          ls -la "$RUNNER_TEMP/edgedriver"
+          echo "MOCHI_NATIVE_DRIVER=$RUNNER_TEMP/edgedriver/msedgedriver.exe" >> "$GITHUB_ENV"
+      - name: Build the UI
+        working-directory: apps/mochi-desktop/ui
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+      - name: Build the app with the UI embedded
+        # `e2e`: test builds only; lets msedgedriver configure WebView2 (src/automation.rs).
+        run: cargo build --locked -p mochi-desktop --features custom-protocol,e2e
+      - name: Build the foreign-format helper next to the app (D8)
+        # The app starts mochi-foreign-helper from its own directory; the
+        # foreign-archive spec needs it there.
+        run: cargo build --locked -p mochi-foreign
+      - name: Build the command-line tool (the D4 spec's oracle)
+        run: cargo build --locked -p mochi-cli
+      - name: Build the user guide the F8 help spec opens
+        shell: bash
+        run: python3 -I packaging/guide.py target/guide
+      - name: Write the archives the D1 browse spec opens
+        shell: bash
+        run: cargo run --locked --release -p mochi-testkit --example d1_browse_fixtures -- target/d1-fixtures
+      - name: Install the E2E runner
+        working-directory: apps/mochi-desktop/e2e
+        run: pnpm install --frozen-lockfile
+      - name: Run the E2E tests (Ubuntu, under Xvfb and a session bus)
+        # The D6 single-instance spec needs a session D-Bus (the plugin's
+        # transport on Linux); a desktop session has one, the runner does not.
+        if: runner.os == 'Linux'
+        working-directory: apps/mochi-desktop/e2e
+        run: dbus-run-session -- xvfb-run -a pnpm test
+      # Pre-flight: start the app the way msedgedriver does (remote debugging
+      # on, its own user data folder) and check that WebView2 writes
+      # DevToolsActivePort there and answers on the port. Without the `e2e`
+      # feature it does not (Tauri's own WebView2 options win), which is the
+      # "DevToolsActivePort file doesn't exist" a WebDriver session reports.
+      - name: Check WebView2 accepts WebDriver's settings (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $udf = Join-Path $env:RUNNER_TEMP "wv2-preflight"
+          New-Item -ItemType Directory -Force $udf | Out-Null
+          $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"
+          $env:WEBVIEW2_USER_DATA_FOLDER = $udf
+          $p = Start-Process -FilePath target\debug\mochi-desktop.exe -PassThru `
+            -RedirectStandardOutput "$env:RUNNER_TEMP\app-out.txt" -RedirectStandardError "$env:RUNNER_TEMP\app-err.txt"
+          Start-Sleep -Seconds 15
+          $alive = -not $p.HasExited
+          "app alive after 15 s: $alive"
+          $port = Get-ChildItem -Path $udf -Recurse -Filter DevToolsActivePort -ErrorAction SilentlyContinue
+          "DevToolsActivePort found: $([bool]$port)"
+          $ok = $false
+          try { (Invoke-WebRequest -UseBasicParsing http://127.0.0.1:9222/json/version -TimeoutSec 5).Content; $ok = $true } catch { "no DevTools endpoint on 9222: $($_.Exception.Message)" }
+          if ($alive) { Stop-Process -Id $p.Id -Force }
+          "--- app stderr"; Get-Content "$env:RUNNER_TEMP\app-err.txt" -ErrorAction SilentlyContinue
+          if (-not ($alive -and $ok)) { exit 1 }
+      - name: Run the E2E tests (Windows)
+        if: runner.os == 'Windows'
+        working-directory: apps/mochi-desktop/e2e
+        run: pnpm test
+
+  fuzz-smoke:
+    name: fuzz smoke (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # `seeds`: corpus directories, relative to fuzz/. `args`: extra
+        # libFuzzer flags. The first seven targets are unchanged.
+        include:
+          - { target: frame_walker,    seeds: "../fixtures/golden/c1 ../fixtures/golden/c2 ../fixtures/golden/c3 ../fixtures/golden/c4", args: "" }
+          - { target: footer,          seeds: "../fixtures/golden/c1 ../fixtures/golden/c2 ../fixtures/golden/c3 ../fixtures/golden/c4", args: "" }
+          - { target: envelope,        seeds: "../fixtures/golden/c1 ../fixtures/golden/c2 ../fixtures/golden/c3 ../fixtures/golden/c4", args: "" }
+          - { target: object_decode,   seeds: "../fixtures/golden/c1 ../fixtures/golden/c2 ../fixtures/golden/c3 ../fixtures/golden/c4", args: "" }
+          - { target: catalog_image,   seeds: "../fixtures/golden/c1 ../fixtures/golden/c2 ../fixtures/golden/c3 ../fixtures/golden/c4 ../fixtures/golden/b2", args: "" }
+          - { target: cbor_decode,     seeds: "../fixtures/golden/c1 ../fixtures/golden/c2 ../fixtures/golden/c3 ../fixtures/golden/c4", args: "" }
+          - { target: manifest_decode, seeds: "../fixtures/golden/c1 ../fixtures/golden/c2 ../fixtures/golden/c3 ../fixtures/golden/c4", args: "" }
+          # T11/T12 (approved 2026-10-04): whole archives, including the
+          # delta-segment vectors whose heads exercise the segment
+          # assertions. Archives reach ~150 KB, above libFuzzer's default
+          # max_len.
+          - { target: archive_open,      seeds: "../fixtures/golden/c5 ../fixtures/golden/c11 ../fixtures/golden/c12", args: "-max_len=400000" }
+          # Their own vectors: commit records (c5/*.bin; d29/*.bin, schema 4), descriptors (b2).
+          - { target: commit_decode,     seeds: "../fixtures/golden/c5 ../fixtures/golden/d29", args: "" }
+          - { target: descriptor_decode, seeds: "../fixtures/golden/b2", args: "" }
+          # C10 (D19): the TAR-compatible profile's stream parser.
+          - { target: tar_stream,        seeds: "../fixtures/golden/c10", args: "-max_len=100000" }
+          # C11 (D20): key envelopes and sealed objects.
+          - { target: key_envelope,      seeds: "../fixtures/golden/c11", args: "" }
+          - { target: sealed_object,     seeds: "../fixtures/golden/c11", args: "" }
+          # C12 (D21): parity frames and reconstruction.
+          - { target: parity_frame,      seeds: "../fixtures/golden/c12", args: "-max_len=4096" }
+          # C8 step 7 (D23): the bounded salvage scan over whole archives.
+          - { target: salvage_scan,      seeds: "../fixtures/golden/c5 ../fixtures/golden/c11 ../fixtures/golden/c12 ../fixtures/fuzz-regressions/salvage_scan", args: "-max_len=400000" }
+          # D8: the foreign-format listing paths and the helper protocol decoder.
+          - { target: foreign_zip,       seeds: "../fixtures/foreign", args: "-max_len=100000" }
+          - { target: foreign_tar,       seeds: "../fixtures/foreign", args: "-max_len=100000" }
+          - { target: foreign_targz,     seeds: "../fixtures/foreign", args: "-max_len=100000" }
+          - { target: foreign_tarzst,    seeds: "../fixtures/foreign", args: "-max_len=100000" }
+          - { target: foreign_sevenz,    seeds: "../fixtures/foreign/7z ../fixtures/foreign", args: "-max_len=100000" }
+          - { target: foreign_rar,       seeds: "../fixtures/foreign/rar ../fixtures/foreign", args: "-max_len=100000" }
+          - { target: foreign_protocol,  seeds: "../fixtures/foreign", args: "-max_len=4096" }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly toolchain
+        run: rustup toolchain install nightly --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      # libFuzzer requires every corpus directory on its command line to
+      # exist, and corpus/ is gitignored, so a fresh checkout lacks it.
+      # Without this step every target fails at once with "The required
+      # directory ... does not exist" (exit 1); found 2026-10-04 by running
+      # the job's commands locally, and true of the original seven targets.
+      - name: Create the working corpus directory
+        working-directory: fuzz
+        run: mkdir -p corpus/${{ matrix.target }}
+      # Deterministic: every seed is executed once (-runs=0), so the
+      # exerciser's assertions run on every vector before any mutation.
+      # For archive_open that includes the two valid delta-head archives;
+      # the stable test job additionally asserts those come back
+      # `OpenedDelta` (c5_golden, fuzz_smoke_over_mutated_inputs), proving
+      # the segment assertions are reached, not just built.
+      - name: Execute every seed once
+        working-directory: fuzz
+        run: cargo +nightly fuzz run ${{ matrix.target }} corpus/${{ matrix.target }} ${{ matrix.seeds }} -- -runs=0 ${{ matrix.args }}
+      - name: Fuzz 60 seconds, seeded from the golden vectors
+        working-directory: fuzz
+        run: cargo +nightly fuzz run ${{ matrix.target }} corpus/${{ matrix.target }} ${{ matrix.seeds }} -- -max_total_time=60 ${{ matrix.args }}
+      # libFuzzer writes the crashing input to fuzz/artifacts/<target>/. The
+      # runner is discarded, so without this a crash found by the random
+      # phase cannot be reproduced or minimised (run 38952433601 lost its
+      # input). Add the file to fixtures/fuzz-regressions/<target>/ once fixed.
+      - name: Keep the crashing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/**
+          if-no-files-found: ignore
+          retention-days: 30
+
+  powercut:
+    # Gate G7 (spec Annex B.2.6): power loss at every step of D13 creation,
+    # on ext4 over dm-flakey, separate from the process-crash tests in
+    # t22_creation.rs. Needs root and the dm-flakey module, which GitHub's
+    # Ubuntu runners provide (linux-modules-extra if not loaded).
+    name: power loss (${{ matrix.os }}, dm-flakey)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+      - name: Build the power-cut helper
+        run: cargo build --locked -p mochi-testkit --example g7_powercut
+      - name: Load dm-flakey
+        run: |
+          command -v dmsetup || { sudo apt-get update && sudo apt-get install -y dmsetup; }
+          sudo modprobe dm-flakey || {
+            sudo apt-get update
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+            sudo modprobe dm-flakey
+          }
+      - name: Cut power at every creation step
+        run: sudo bash ci/g7-powercut.sh target/debug/examples/g7_powercut
+
+  casefold:
+    # Plan C6: case-insensitive destination detection and the collision
+    # preflight on a real case-folding filesystem (ext4 casefold over a
+    # loop file). Needs root for the mount and a kernel with CONFIG_UNICODE,
+    # which GitHub's Ubuntu runners have.
+    name: restore to ext4 casefold (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+      - name: Build the test
+        run: cargo test --locked -p mochi-testkit --test c6_restore_races --no-run
+      - name: Mount ext4 with casefold
+        run: |
+          truncate -s 64M "$RUNNER_TEMP/cf.img"
+          mkfs.ext4 -q -O casefold "$RUNNER_TEMP/cf.img"
+          sudo mkdir -p /mnt/cf
+          sudo mount -o loop "$RUNNER_TEMP/cf.img" /mnt/cf
+          sudo mkdir /mnt/cf/d
+          sudo chattr +F /mnt/cf/d
+          sudo chown "$(id -u):$(id -g)" /mnt/cf/d
+          lsattr -d /mnt/cf/d
+      - name: Detect case-insensitivity and preflight collisions
+        env:
+          MOCHI_CASEFOLD_DIR: /mnt/cf/d
+        run: cargo test --locked -p mochi-testkit --test c6_restore_races -- --ignored --exact c6_casefold_destination
+
+  tar-interop:
+    # Plan C10 (spec 7.2, Annex B.2.9 D19 rule 10): a TAR-compatible archive
+    # decoded by the reference zstd CLI and extracted by GNU tar and by
+    # bsdtar (libarchive). The versions printed here are the only ones the
+    # compatibility claim in docs/dev/tar-compatible-profile.md may name.
+    name: tar interop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+      - name: Install zstd and bsdtar (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zstd libarchive-tools
+      - name: Install zstd (Windows, if the image lacks it)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: command -v zstd || choco install zstandard -y --no-progress
+      - name: Build mochi
+        run: cargo build --locked -p mochi-cli
+      - name: Extract with each tool
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            # Git for Windows' GNU tar first on PATH in bash; bsdtar is the
+            # system tar.exe (libarchive). Both by explicit path.
+            mochi="$PWD/target/debug/mochi.exe"
+            gnu=/usr/bin/tar
+            bsd=/c/Windows/System32/tar.exe
+          else
+            mochi="$PWD/target/debug/mochi"
+            gnu=tar
+            bsd=bsdtar
+          fi
+          # Windows may install zstd after this shell started; refresh PATH.
+          export PATH="$PATH:/c/ProgramData/chocolatey/bin"
+          bash ci/tar-interop.sh "$mochi" zstd "$gnu" "$bsd" | tee "$RUNNER_TEMP/interop.txt"
+          { echo '### tar interop (${{ matrix.os }})'; echo '```'; sed -n '/^== versions/,/^== mochi verify/p' "$RUNNER_TEMP/interop.txt" | sed '$d'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+  doc-nightly:
+    # Stable rustdoc ignores the error code in `compile_fail,E0308`; nightly
+    # enforces it. The C2 representation-type guarantees (repr.rs) depend on
+    # each block failing for the *intended* reason.
+    name: compile_fail doctests (codes enforced)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly toolchain
+        run: rustup toolchain install nightly --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Doctests with error codes checked
+        run: cargo +nightly test --doc -p mochi-format
+
+
+  r9-interop:
+    # Gate G14 (spec Annex B.2.6, Annex B.1 D7): the independent read-only
+    # verifier in interop/pyverify, written from the specification alone. It
+    # shares no code with the Rust crates. The job installs the hash-pinned
+    # dependencies, runs the verifier's own tests (R5 and R6 vectors, the
+    # per-phase golden verdicts, truncation at every byte), and diffs the
+    # verifier's summary of every R8 case against the reference summary,
+    # failing on any mismatch and printing the list. Results and the record of
+    # every disagreement: docs/ratification/R9-interop-results.md.
+    name: r9 interop (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            python: "3.10"
+          - os: ubuntu-24.04
+            python: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install the pinned dependencies and the verifier
+        run: |
+          python -m venv "$RUNNER_TEMP/r9"
+          "$RUNNER_TEMP/r9/bin/pip" install --quiet --require-hashes -r interop/pyverify/requirements.txt
+          "$RUNNER_TEMP/r9/bin/pip" install --quiet --no-deps interop/pyverify
+          "$RUNNER_TEMP/r9/bin/python" -I -c "import sqlite3, sys; print(sys.version); print('sqlite', sqlite3.sqlite_version)"
+      - name: pytest
+        working-directory: interop/pyverify
+        run: '"$RUNNER_TEMP/r9/bin/python" -m pytest -q --durations=5'
+      - name: Summaries of the R8 golden set against the reference summaries
+        run: |
+          # The golden set exists (G13): a missing directory fails the job, it is never skipped.
+          status=0
+          "$RUNNER_TEMP/r9/bin/python" interop/pyverify/tools/compare_r8.py fixtures/golden/r8 > "$RUNNER_TEMP/r9-compare.txt" || status=$?
+          cat "$RUNNER_TEMP/r9-compare.txt"
+          { echo '### r9 interop (${{ matrix.os }}, Python ${{ matrix.python }})'; echo '```'; cat "$RUNNER_TEMP/r9-compare.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+  package:
+    # Plan D7 (first slice), O11, O23: UNSIGNED installers, each with the foreign-format helper (D8, T16). Windows NSIS (per-user,
+    # WebView2 bootstrapper) and an Ubuntu .deb built on 22.04 (declares
+    # libwebkit2gtk-4.1-0). The build generates the full third-party license list
+    # and fails on a license outside packaging/about.toml. Signing and the updater
+    # need owner-provided keys: docs/dev/packaging.md. Both uploads are workflow
+    # artifacts only; nothing is published.
+    name: package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            bundle: deb
+          - os: windows-latest
+            bundle: nsis
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: package-${{ matrix.os }}
+      - uses: actions/setup-python@v5
+        with:
+          # packaging/licenses.py needs tomllib (3.11+); 22.04's system Python is 3.10.
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Enable pnpm (corepack, the version in package.json)
+        run: corepack enable
+      - name: Desktop app build dependencies (Ubuntu 22.04; webkit2gtk 4.1, plan O11)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev
+      - name: Install cargo-about and the Tauri CLI (pinned)
+        # Both are MIT OR Apache-2.0 tools that run at build time only.
+        run: |
+          cargo install cargo-about --version 0.9.2 --locked --features cli
+          cargo install tauri-cli --version 2.12.2 --locked
+      - name: Build the installer (license list, UI, bundle)
+        shell: bash
+        run: packaging/build-installer.sh ${{ matrix.bundle }}
+      # --- Signing placeholder (docs/dev/packaging.md; NOT active) -------------
+      # Windows: sign the setup exe with the owner's code-signing certificate,
+      # e.g. bundle.windows.signCommand / certificateThumbprint, with secrets
+      # such as WINDOWS_CERTIFICATE supplied by the owner. Never commit keys.
+      # Updater: TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) from secrets.
+      # ------------------------------------------------------------------------
+      - name: Smoke check the .deb (metadata, dependency, contents, install, ldd, remove)
+        if: matrix.bundle == 'deb'
+        run: |
+          deb=$(ls target/release/bundle/deb/*.deb)
+          packaging/smoke-deb.sh --install "$deb"
+      - name: Smoke check the installer (silent per-user install, uninstall)
+        if: matrix.bundle == 'nsis'
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem target\release\bundle\nsis\*-setup.exe).FullName
+          packaging\smoke-nsis.ps1 -Setup $setup
+      - name: Collect the installer and its license list
+        shell: bash
+        run: |
+          mkdir -p target/installer-out
+          cp target/release/bundle/${{ matrix.bundle }}/*.deb target/release/bundle/${{ matrix.bundle }}/*-setup.exe target/installer-out/ 2>/dev/null || true
+          cp target/packaging/THIRD-PARTY-LICENSES.txt target/installer-out/
+          ls -l target/installer-out
+          [ "$(ls target/installer-out | wc -l)" = 2 ]
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mochi-installer-${{ matrix.bundle }}-unsigned
+          path: target/installer-out/*
+          if-no-files-found: error
+      - name: Rehearse the release path with a throwaway updater key (T13)
+        # Proves that createUpdaterArtifacts writes a .sig that names the app version, that
+        # latest.json can be made from it, and that nothing here needs the owner's secrets.
+        # The key is generated here, is not the owner's, and is discarded with the runner.
+        shell: bash
+        run: |
+          cargo tauri signer generate --ci --password rehearsal --write-keys "$RUNNER_TEMP/rehearsal.key"
+          export MOCHI_UPDATER_ARTIFACTS=1
+          export TAURI_SIGNING_PRIVATE_KEY="$(cat "$RUNNER_TEMP/rehearsal.key")"
+          export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=rehearsal
+          packaging/build-installer.sh ${{ matrix.bundle }}
+          version=$(python3 -I -c "import json;print(json.load(open('apps/mochi-desktop/src-tauri/tauri.conf.json'))['version'])")
+          shopt -s nullglob
+          files=(target/release/bundle/${{ matrix.bundle }}/*.deb target/release/bundle/${{ matrix.bundle }}/*-setup.exe)
+          [ "${#files[@]}" = 1 ] || { echo "::error::expected exactly one installer"; exit 1; }
+          python3 -I packaging/latest_json.py check --version "$version" "${files[@]}"
+      - name: Packaging scripts (latest.json)
+        if: matrix.bundle == 'deb'
+        run: python3 -I -m unittest discover -s packaging -p 'test_*.py'
+
+  package-ubuntu-24:
+    # The 22.04-built .deb must also install and run its libraries on the
+    # current LTS (O11: both Ubuntu releases are supported).
+    name: package smoke (ubuntu-24.04)
+    needs: package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: mochi-installer-deb-unsigned
+          path: installer
+      - name: Smoke check the .deb on 24.04
+        run: |
+          deb=$(ls installer/*.deb)
+          packaging/smoke-deb.sh --install "$deb"

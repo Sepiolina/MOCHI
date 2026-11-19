@@ -1,0 +1,170 @@
+[package]
+name = "mochi-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+mochi-testkit = { path = "../crates/mochi-testkit" }
+mochi-foreign = { path = "../crates/mochi-foreign" }
+
+# Standalone workspace: cargo-fuzz needs nightly and must not affect the main build.
+[workspace]
+
+[[bin]]
+name = "frame_walker"
+path = "fuzz_targets/frame_walker.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "footer"
+path = "fuzz_targets/footer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "envelope"
+path = "fuzz_targets/envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "object_decode"
+path = "fuzz_targets/object_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "catalog_image"
+path = "fuzz_targets/catalog_image.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cbor_decode"
+path = "fuzz_targets/cbor_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "manifest_decode"
+path = "fuzz_targets/manifest_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "commit_decode"
+path = "fuzz_targets/commit_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "archive_open"
+path = "fuzz_targets/archive_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "descriptor_decode"
+path = "fuzz_targets/descriptor_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tar_stream"
+path = "fuzz_targets/tar_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "key_envelope"
+path = "fuzz_targets/key_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sealed_object"
+path = "fuzz_targets/sealed_object.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parity_frame"
+path = "fuzz_targets/parity_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "salvage_scan"
+path = "fuzz_targets/salvage_scan.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "foreign_zip"
+path = "fuzz_targets/foreign_zip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "foreign_tar"
+path = "fuzz_targets/foreign_tar.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "foreign_targz"
+path = "fuzz_targets/foreign_targz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "foreign_tarzst"
+path = "fuzz_targets/foreign_tarzst.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "foreign_protocol"
+path = "fuzz_targets/foreign_protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "foreign_sevenz"
+path = "fuzz_targets/foreign_sevenz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "foreign_rar"
+path = "fuzz_targets/foreign_rar.rs"
+test = false
+doc = false
+bench = false

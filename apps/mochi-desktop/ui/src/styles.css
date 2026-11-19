@@ -1,0 +1,3704 @@
+/* A desktop window, not a web page: one fixed frame (the title bar, which
+   holds the toolbar; the path bar, the list, a status bar), compact rows, icons instead of words, and dialogs over
+   the list. Neutral styling throughout: spec §23.3 allows success styling
+   only for a verification PASS. The one success style is .status-pass (D4),
+   given only to a PASS status; everything else stays neutral. Browsing (D1)
+   shows recorded facts and warnings, never a green state. */
+:root {
+  /* Colour tokens (plan D7 accessibility). Every colour in this file comes from
+     here, so that src/a11y/contrast.test.ts can check each pairing against
+     WCAG 2.1 AA (4.5:1 for text, 3:1 for focus rings and control borders).
+     Text tokens must hold on all three surfaces below. */
+  --bg: #f7f4ef;
+  --surface: #fdfcfa;
+  --accent-bg: #efe6db;
+  --fg: #3a2e26;
+  --muted: #6b5d53;
+  --error: #82071e;
+  --warning: #8a5a00;
+  /* The muted brown of the primary button, and of links. */
+  --accent: #7a5a46;
+  --accent-hover: #634735;
+  /* A hairline between areas, and the stronger edge of a control. */
+  --border: #e3dcd2;
+  --border-strong: #8f7f70;
+  /* Status badges: text on a strong fill. */
+  --pass: #1a7f37;
+  --fail: #82071e;
+  --on-strong: #ffffff;
+  /* The title bar's Close button under the pointer (the Windows 11 red), with
+     --on-strong for its glyph. */
+  --close-hover: #c42b1c;
+  /* The keyboard focus ring. */
+  --focus: #8a3b12;
+  /* File-type icons in a listing: decorative, and never a status colour. */
+  --icon-folder: #9a6a14;
+  --icon-image: #3a6ea5;
+  --icon-audio: #8a3d9e;
+  --icon-video: #1f6a8a;
+  --icon-archive: #7a5c2e;
+  --icon-code: #3d6b2f;
+  --icon-sheet: #2b7a78;
+  --icon-pdf: #b03a2e;
+  /* Motion (owner request 2026-11-14): short, eased, and off when Settings or the system
+     says so (the end of this file). Durations only; no colour here. */
+  --dur-1: 90ms;
+  --dur-2: 160ms;
+  --dur-3: 240ms;
+  --ease-1: cubic-bezier(0.2, 0.7, 0.2, 1);
+  /* Elevation: a hairline shadow for controls, a soft one for menus, a deep one for windows. */
+  --shadow-1: 0 1px 2px color-mix(in srgb, var(--fg) 12%, transparent);
+  --shadow-2: 0 1px 2px color-mix(in srgb, var(--fg) 8%, transparent), 0 8px 24px color-mix(in srgb, var(--fg) 14%, transparent);
+  --shadow-3: 0 2px 6px color-mix(in srgb, var(--fg) 10%, transparent), 0 18px 48px color-mix(in srgb, var(--fg) 24%, transparent);
+  /* Latin first; Thai and Chinese glyphs fall through to the system fonts named
+     after it. No remote fonts (the CSP is strict). */
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, Ubuntu, Cantarell, "Noto Sans", "Leelawadee UI",
+    "Noto Sans Thai", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC",
+    "Source Han Sans SC", "WenQuanYi Micro Hei", sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--fg);
+  background: var(--bg);
+  accent-color: var(--accent);
+}
+/* With the language set, name the right script's fonts first so that shared Han
+   characters use the Simplified Chinese forms and Thai gets a Thai face. */
+:root:lang(th) {
+  font-family: "Leelawadee UI", "Noto Sans Thai", "Noto Sans Thai UI", "Segoe UI", system-ui, Ubuntu, Cantarell,
+    "Noto Sans", sans-serif;
+}
+:root:lang(zh-CN) {
+  font-family: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC",
+    "Source Han Sans SC", "WenQuanYi Micro Hei", system-ui, Ubuntu, Cantarell, "Noto Sans", sans-serif;
+}
+html,
+body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+body {
+  background: var(--bg);
+  /* A desktop window: the chrome is not text to select, and the pointer is an arrow. */
+  user-select: none;
+  cursor: default;
+}
+input,
+textarea,
+pre,
+.hash,
+.json,
+.prose,
+.result-list dd,
+.details dd,
+[data-testid="extract-destination"],
+[data-testid="foreign-destination"] {
+  user-select: text;
+}
+body.drag-preparing,
+body.drag-preparing * {
+  cursor: progress !important;
+}
+/* Thin scroll bars, only where a list or a dialog scrolls; the window never does.
+   Text that is cut short with an ellipsis uses `overflow: clip`, not `hidden`:
+   the same look, and WebKit's WebDriver still reads the text (the E2E specs). */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border: 2px solid transparent;
+  border-radius: 5px;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
+  background-clip: padding-box;
+}
+[hidden] {
+  display: none !important;
+}
+main {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+h1,
+h2,
+h3,
+h4 {
+  line-height: 1.25;
+  font-weight: 600;
+}
+h2 {
+  font-size: 1.15rem;
+  margin: 0 0 0.75rem;
+}
+h3 {
+  font-size: 1rem;
+  margin: 0.75rem 0 0.4rem;
+}
+h4 {
+  font-size: 0.95rem;
+  margin: 0.5rem 0 0.25rem;
+}
+p {
+  margin: 0.4rem 0;
+}
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.6rem 0;
+}
+/* Buttons: quiet by default (a hairline edge on the surface); the one primary
+   action per dialog is filled with the accent. */
+button {
+  font: inherit;
+  min-height: 1.85rem;
+  padding: 0.2rem 0.85rem;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  cursor: default;
+}
+button:hover:not(:disabled):not(.primary) {
+  background: var(--accent-bg);
+}
+button:disabled {
+  color: var(--muted);
+  border-color: var(--border);
+}
+button.primary {
+  color: var(--on-strong);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+button.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+button.primary:disabled {
+  color: var(--muted);
+  background: var(--bg);
+  border-color: var(--border);
+}
+/* A button that is only an icon: no edge until it is pointed at. */
+button.icon-button {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 1.85rem;
+  height: 1.85rem;
+  min-height: 0;
+  padding: 0;
+  color: var(--muted);
+  background: none;
+  border-color: transparent;
+}
+button.icon-button:hover:not(:disabled) {
+  color: var(--fg);
+  background: var(--accent-bg);
+}
+/* An icon button that cannot act fades, as a toolbar button does (`button.tool:disabled`):
+   its colour alone is already the muted one. */
+button.icon-button:disabled {
+  opacity: 0.55;
+}
+.icon {
+  flex: none;
+}
+input:not([type="checkbox"]):not([type="radio"]),
+select,
+textarea {
+  font: inherit;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 0.2rem 0.45rem;
+  min-height: 1.85rem;
+  box-sizing: border-box;
+}
+label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+fieldset {
+  margin: 0.5rem 0;
+  padding: 0.4rem 0.75rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+legend {
+  padding: 0 0.25rem;
+  color: var(--muted);
+}
+.progress {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+progress {
+  width: 12rem;
+  height: 0.6rem;
+}
+[role="status"] {
+  min-height: 1.4em;
+}
+.hash {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+.error {
+  color: var(--error);
+}
+.warning {
+  border-left: 3px solid var(--warning);
+  padding-left: 0.5rem;
+}
+.escaped {
+  color: var(--muted);
+  font-size: 0.85em;
+}
+.name {
+  white-space: pre;
+}
+.meta {
+  font-size: 0.9em;
+  color: var(--muted);
+}
+.note {
+  font-size: 0.92em;
+  color: var(--muted);
+}
+.link {
+  color: var(--accent);
+  background: none;
+  border: 1px solid transparent;
+  padding: 0.1rem 0.25rem;
+  text-align: left;
+  text-decoration: underline;
+  min-height: 0;
+}
+summary {
+  cursor: default;
+}
+details.technical > summary,
+details.options > summary {
+  color: var(--muted);
+}
+details.options,
+details.technical {
+  margin: 0.5rem 0;
+}
+/* A note kept out of the way: an "i" whose tooltip holds the words. */
+.hint {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  color: var(--muted);
+}
+.hint .icon {
+  width: 16px;
+  height: 16px;
+}
+
+/* ---- The frame: toolbar, path bar, list, status bar ------------------------- */
+.browser {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+/* The window's one title bar (release 0.9.10): the operating system draws
+   none (src-tauri/src/frame.rs). Icon and title, the toolbar, then minimize,
+   maximize/restore and close as on Windows 11: 46-pixel-wide buttons the full
+   height of the bar, Close red under the pointer. The same on Ubuntu. Its
+   empty part moves the window (TitleBar.tsx). */
+.titlebar {
+  position: relative;
+  z-index: 25;
+  display: flex;
+  flex: none;
+  align-items: center;
+  height: 2.9rem;
+  padding-left: 0.5rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.titlebar .titlebar-icon {
+  width: 2.1rem;
+  height: 1.6rem;
+  margin-right: 0.3rem;
+}
+.titlebar-title {
+  flex: 0 1 auto;
+  min-width: 2.5rem;
+  max-width: min(16rem, 24vw);
+  margin: 0 0.6rem 0 0;
+  font-size: 1em;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: clip;
+  text-overflow: ellipsis;
+}
+/* An inactive window's bar is quieter, as the system's is. */
+.titlebar[data-focused="false"] .titlebar-title {
+  color: var(--muted);
+}
+.titlebar[data-focused="false"] .titlebar-icon {
+  opacity: 0.6;
+}
+.toolbar {
+  display: flex;
+  flex: 1 1 auto;
+  align-self: stretch;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+.window-controls {
+  display: flex;
+  flex: none;
+  align-self: stretch;
+  /* At the right edge even when nothing else on the bar grows (the compact window). */
+  margin-left: auto;
+  padding-left: 0.4rem;
+}
+button.caption {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  color: var(--fg);
+  background: none;
+  border: 0;
+  border-radius: 0;
+}
+button.caption:hover:not(:disabled) {
+  background: var(--accent-bg);
+}
+button.caption:active {
+  background: var(--border);
+}
+button.caption-close:hover:not(:disabled),
+button.caption-close:active {
+  color: var(--on-strong);
+  background: var(--close-hover);
+}
+button.caption:focus-visible {
+  outline-offset: -3px;
+}
+.titlebar[data-focused="false"] button.caption:not(:hover) {
+  color: var(--muted);
+}
+.tool-cell,
+.menu-cell {
+  display: contents;
+}
+.toolbar-sep {
+  width: 1px;
+  height: 1.5rem;
+  margin: 0 0.3rem;
+  background: var(--border);
+}
+.toolbar-spacer {
+  flex: 1;
+}
+button.tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.35rem;
+  height: 2.35rem;
+  min-height: 0;
+  padding: 0;
+  color: var(--fg);
+  background: none;
+  border-color: transparent;
+  border-radius: 5px;
+}
+button.tool .icon {
+  width: 22px;
+  height: 22px;
+}
+button.tool:hover:not(:disabled),
+button.tool[aria-expanded="true"] {
+  background: var(--accent-bg);
+  border-color: var(--border);
+}
+button.tool:disabled {
+  color: var(--muted);
+  opacity: 0.55;
+  border-color: transparent;
+}
+/* Icon and text (owner request 2026-11-10). The words show whenever every one of them fits
+   (useToolbarLabels measures it and sets data-labels); otherwise the bar is icons only, as
+   before, and the words stay the buttons' accessible names. */
+.toolbar:not([data-labels="off"]) button.tool:has(.tool-label) {
+  gap: 0.4rem;
+  width: auto;
+  height: 2rem;
+  padding: 0 0.65rem 0 0.5rem;
+  border-radius: 7px;
+}
+.toolbar:not([data-labels="off"]) button.tool:has(.tool-label) .icon {
+  width: 18px;
+  height: 18px;
+}
+.tool-label {
+  font-size: 0.93em;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.toolbar[data-labels="off"] .tool-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+/* With the words on, the search field and the archive's name keep a usable width: the words
+   are the first thing to go when the window narrows, not the field or the title. */
+.titlebar:has(.toolbar:not([data-labels="off"])) .titlebar-title {
+  flex-shrink: 0;
+}
+.toolbar:not([data-labels="off"]) .searchbox {
+  min-width: 10rem;
+}
+button.tool {
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+button.tool:active:not(:disabled) {
+  background: var(--border);
+}
+/* The search field, at the right of the toolbar. */
+.searchbox {
+  position: relative;
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  width: min(15rem, 26vw);
+  min-width: 7rem;
+  margin: 0 0.35rem;
+  color: var(--muted);
+}
+.searchbox > .icon {
+  position: absolute;
+  left: 0.45rem;
+  width: 16px;
+  height: 16px;
+  pointer-events: none;
+}
+.searchbox input[type="search"] {
+  width: 100%;
+  padding-left: 1.85rem;
+  padding-right: 1.7rem;
+  background: var(--bg);
+  border-color: var(--border-strong);
+  border-radius: 5px;
+}
+.searchbox input[type="search"]::-webkit-search-cancel-button {
+  display: none;
+}
+.searchbox[data-disabled] {
+  opacity: 0.6;
+}
+button.searchbox-clear {
+  position: absolute;
+  right: 0.15rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  min-height: 0;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  background: none;
+  border-color: transparent;
+}
+.more {
+  position: relative;
+  display: flex;
+}
+.menu {
+  position: absolute;
+  top: calc(100% + 2px);
+  right: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  /* As wide as its longest item: a label never wraps under its icon, a key is never cut. */
+  width: max-content;
+  min-width: 14rem;
+  max-width: min(24rem, calc(100vw - 1rem));
+  padding: 0.25rem;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--fg) 18%, transparent);
+}
+.menu hr {
+  width: 100%;
+  margin: 0.25rem 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+button.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  white-space: nowrap;
+  width: 100%;
+  min-height: 1.9rem;
+  padding: 0.15rem 0.6rem;
+  text-align: left;
+  color: var(--fg);
+  background: none;
+  border-color: transparent;
+}
+button.menu-item .icon {
+  width: 16px;
+  height: 16px;
+  color: var(--muted);
+}
+/* The key that reaches a menu item without the menu (Ctrl+N, Delete, F1). */
+.menu-key {
+  margin-left: auto;
+  padding-left: 1.5rem;
+  color: var(--muted);
+  font-size: 0.9em;
+  white-space: nowrap;
+}
+button.menu-item:hover:not(:disabled):not([aria-disabled="true"]),
+button.menu-item:focus-visible:not([aria-disabled="true"]) {
+  background: var(--accent-bg);
+}
+button.menu-item:disabled,
+button.menu-item[aria-disabled="true"] {
+  color: var(--muted);
+}
+/* The path bar: folders, back, forward and up, the archive and its version, where you are,
+   and Close at the far right. */
+.pathbar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 0.2rem;
+  height: 2.1rem;
+  padding: 0 0.5rem;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.pathbar button.icon-button .icon {
+  width: 18px;
+  height: 18px;
+}
+/* Pushed to the end of the bar whatever its width; the bar never wraps, the crumbs give way. */
+.pathbar .pathbar-close {
+  margin-left: auto;
+}
+.path-meta {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  max-width: 40%;
+  margin-left: 0.2rem;
+  white-space: nowrap;
+}
+.path-title {
+  overflow: clip;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+.badge {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0 0.35rem;
+  font-size: 0.85em;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+.badge .icon {
+  width: 14px;
+  height: 14px;
+}
+.badge-warn {
+  color: var(--fg);
+  border-color: var(--warning);
+  border-style: dashed;
+}
+/* An archive condition the user should know of: a small mark with the words as its tooltip. */
+.path-warn {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 1.15rem;
+  height: 1.15rem;
+  font-weight: 700;
+  font-size: 0.85em;
+  color: var(--on-strong);
+  background: var(--warning);
+  border-radius: 50%;
+}
+.versions {
+  position: relative;
+  flex: none;
+}
+button.version-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.1rem;
+  min-height: 1.5rem;
+  padding: 0 0.35rem;
+  color: var(--muted);
+  background: none;
+  border-color: transparent;
+}
+button.version-button:disabled {
+  color: var(--muted);
+  border-color: transparent;
+}
+button.version-button[aria-expanded="true"] {
+  color: var(--fg);
+  background: var(--accent-bg);
+  border-color: var(--border);
+}
+button.version-button .icon {
+  width: 14px;
+  height: 14px;
+  transition: transform 120ms ease;
+}
+button.version-button[aria-expanded="true"] .icon {
+  transform: rotate(180deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  button.version-button .icon {
+    transition: none;
+  }
+}
+/* The version list. The versions button sits at the right end of the path bar, so the
+   list hangs from the button's right edge and grows leftwards: anchored at its left it ran
+   past the window's edge. Its size is bounded by the window whatever the language. */
+.popover {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  width: max-content;
+  min-width: 16rem;
+  max-width: min(24rem, calc(100vw - 1rem));
+  max-height: min(22rem, calc(100vh - 7rem));
+  padding: 0.25rem;
+  white-space: normal;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow:
+    0 1px 2px color-mix(in srgb, var(--fg) 10%, transparent),
+    0 8px 24px color-mix(in srgb, var(--fg) 16%, transparent);
+}
+.popover[hidden] {
+  display: none;
+}
+.popover-head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.3rem 0.6rem 0.35rem;
+  margin-bottom: 0.2rem;
+  font-size: 0.85em;
+  font-weight: 600;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.popover-count {
+  min-width: 1.25rem;
+  padding: 0 0.35rem;
+  text-align: center;
+  font-weight: 400;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.popover .timeline {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.crumbs {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  min-width: 0;
+  margin-left: 0.25rem;
+  overflow: clip;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.crumb-part {
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  min-width: 1.6rem;
+}
+/* The root and the folder on screen keep their width; the ones between give way first. */
+.crumb-part.keep {
+  flex-shrink: 0;
+  min-width: 0;
+}
+.crumb-sep {
+  flex: none;
+}
+button.crumb {
+  min-height: 1.5rem;
+  min-width: 0;
+  max-width: 14rem;
+  overflow: clip;
+  text-overflow: ellipsis;
+  padding: 0 0.3rem;
+  color: var(--fg);
+  background: none;
+  border-color: transparent;
+}
+.crumb-part.keep button.crumb {
+  max-width: 16rem;
+}
+button.crumb[aria-current="location"] {
+  font-weight: 600;
+}
+.nav-buttons {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 0.1rem;
+}
+/* The ".." row: pinned under the column header, drawn like a folder row. `.entry` (later in
+   this file) says `height: 100%`, which in this flex column made the row as tall as the list and
+   left the rows none: the selector is raised to win over it. */
+.entry.up-row {
+  height: 26px;
+  flex: none;
+  padding-right: calc(0.6rem + var(--sbw, 0px));
+  border-bottom: 1px solid var(--border);
+}
+.entry.up-row .kind {
+  display: inline-flex;
+}
+/* The middle of the window. Dialogs open over it; it never scrolls itself. */
+.stage {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.stage-mochi,
+.foreign-stage {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+.stage-foreign {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  min-height: 0;
+}
+.stage-foreign:has(> .foreign-stage:not([hidden])) {
+  flex: 1;
+}
+.stage [role="status"]:empty {
+  min-height: 0;
+}
+.workspace {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.listing {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--surface);
+}
+.list-empty {
+  margin: 0;
+  padding: 1.5rem;
+  text-align: center;
+  color: var(--muted);
+}
+.folders,
+.info {
+  flex: none;
+  box-sizing: border-box;
+  overflow: auto;
+  padding: 0.5rem 0.65rem;
+  background: var(--bg);
+}
+.folders {
+  width: 14rem;
+  border-right: 1px solid var(--border);
+}
+.info {
+  width: 16rem;
+  border-left: 1px solid var(--border);
+}
+.timeline,
+.tree {
+  margin: 0;
+  padding: 0;
+}
+.timeline {
+  list-style: none;
+}
+/* One version: a check for the one on screen, its name, and when it was written below it. */
+.timeline .commit {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 0;
+  text-align: left;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: none;
+  padding: 0.35rem 0.6rem 0.35rem 0.4rem;
+}
+.timeline li + li {
+  margin-top: 1px;
+}
+.commit-mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 1.4em;
+  color: var(--accent);
+}
+.commit-mark .icon {
+  width: 14px;
+  height: 14px;
+}
+.commit-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 0.05rem;
+}
+.commit .seq {
+  color: var(--fg);
+  white-space: nowrap;
+}
+.commit .meta {
+  overflow-wrap: anywhere;
+}
+.timeline .commit.current {
+  border-color: transparent;
+  background: var(--accent-bg);
+}
+.timeline .commit.current .seq {
+  font-weight: 600;
+}
+.commit.current,
+.tree-label.current,
+.entry.selected {
+  border: 1px solid var(--accent);
+  background: var(--accent-bg);
+}
+/* A selected row: the fill and a bar at its start, so that a run of selected
+   rows reads as one block. */
+.entry.selected {
+  border-color: transparent;
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.tree ul {
+  list-style: none;
+  margin: 0;
+  padding-left: 0.85rem;
+}
+.tree-row {
+  display: flex;
+  align-items: center;
+}
+.twisty,
+.tree-label {
+  min-height: 1.5rem;
+  background: none;
+  border: 1px solid transparent;
+  padding: 0 0.25rem;
+  text-align: left;
+}
+.twisty {
+  width: 1.4rem;
+  min-width: 1.4rem;
+  color: var(--muted);
+}
+.twisty:disabled {
+  border-color: transparent;
+}
+/* The file table: a header row, then compact rows. Name, Size and Type (and
+   Folder, for search results) share these columns. */
+.table-head,
+.entry {
+  display: grid;
+  grid-template-columns: 1.25rem minmax(0, 1fr) 6rem 4.5rem;
+  column-gap: 0.5rem;
+  align-items: center;
+}
+.table-head.with-folder,
+.vtable:has(.with-folder) .entry {
+  grid-template-columns: 1.25rem minmax(0, 1fr) minmax(0, 0.8fr) 6rem 4.5rem;
+}
+.table-head {
+  height: 1.7rem;
+  padding: 0 0.6rem;
+  padding-right: calc(0.6rem + var(--sbw, 0px));
+  font-size: 0.92em;
+  color: var(--muted);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.col-name {
+  grid-column: 1 / 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+.col-size,
+.size {
+  text-align: right;
+}
+.vtable {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+.vlist {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* The rubber band is positioned in the scrolling content; dragging over the
+     rows must not select their text. */
+  position: relative;
+  user-select: none;
+}
+/* The rubber band of a file list: a translucent rectangle, never in the way of the pointer. */
+.marquee-band {
+  position: absolute;
+  pointer-events: none;
+  box-sizing: border-box;
+  border: 1px solid var(--accent);
+  background: var(--accent-bg);
+  opacity: 0.75;
+  z-index: 2;
+}
+.vspacer {
+  position: relative;
+}
+.vrow {
+  position: absolute;
+  left: 0;
+  right: 0;
+  box-sizing: border-box;
+}
+.entry {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding: 0 0.6rem;
+  font: inherit;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 0;
+  text-align: left;
+}
+.entry:hover:not(.selected) {
+  background: var(--bg);
+}
+.entry-name {
+  min-width: 0;
+  overflow: clip;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.size,
+.type,
+.folder {
+  overflow: clip;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.kind {
+  display: inline-flex;
+  align-items: center;
+}
+.kind .icon {
+  width: 18px;
+  height: 18px;
+}
+/* A file-type icon is an outline with a faint fill, in one colour per kind. */
+.file-icon {
+  color: var(--muted);
+}
+.file-icon .fill {
+  fill: currentColor;
+  fill-opacity: 0.16;
+}
+.file-icon-folder {
+  color: var(--icon-folder);
+}
+.file-icon-image {
+  color: var(--icon-image);
+}
+.file-icon-audio {
+  color: var(--icon-audio);
+}
+.file-icon-video {
+  color: var(--icon-video);
+}
+.file-icon-archive {
+  color: var(--icon-archive);
+}
+.file-icon-code {
+  color: var(--icon-code);
+}
+.file-icon-sheet {
+  color: var(--icon-sheet);
+}
+.file-icon-pdf {
+  color: var(--icon-pdf);
+}
+.caret {
+  color: var(--muted);
+}
+.loading {
+  color: var(--muted);
+  padding: 0 0.6rem;
+}
+.details h3 {
+  margin: 0.1rem 0 0.4rem;
+  font-size: 1rem;
+  overflow-wrap: anywhere;
+}
+.details h3 .name {
+  white-space: pre-wrap;
+}
+.details dl,
+.info dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.2rem 0.6rem;
+  margin: 0;
+}
+.details dt {
+  color: var(--muted);
+}
+.details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.info details.technical dl {
+  grid-template-columns: minmax(0, 1fr);
+}
+/* The status bar: counts on the left, then what a job is doing or did. */
+.statusbar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 0.75rem;
+  /* Tall enough for the selection's buttons, so the bar does not grow when they appear. */
+  height: 2.25rem;
+  padding: 0 0.6rem;
+  overflow: clip;
+  font-size: 0.92em;
+  color: var(--muted);
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+.statusbar-count {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+/* The selection's actions, beside "N selected" (owner request 2026-11-10). */
+.selection-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  animation: selection-in 140ms ease-out;
+}
+@keyframes selection-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .selection-bar {
+    animation: none;
+  }
+}
+button.selection-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  height: 1.65rem;
+  min-height: 0;
+  padding: 0 0.6rem 0 0.45rem;
+  font-size: 1em;
+  color: var(--fg);
+  white-space: nowrap;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+button.selection-action .icon {
+  width: 15px;
+  height: 15px;
+  color: var(--muted);
+}
+button.selection-action:hover:not(:disabled) {
+  background: var(--accent-bg);
+  border-color: var(--border-strong);
+}
+button.selection-action:active:not(:disabled) {
+  background: var(--border);
+}
+button.selection-action[aria-pressed="true"] {
+  background: var(--accent-bg);
+  border-color: var(--border-strong);
+}
+button.selection-action:disabled {
+  color: var(--muted);
+  opacity: 0.55;
+}
+.statusbar .selection-clear {
+  margin-left: 0.1rem;
+}
+/* A narrow window keeps the buttons and drops their words (still their accessible names). */
+@media (max-width: 48rem) {
+  button.selection-action {
+    padding: 0 0.4rem;
+  }
+  button.selection-action > span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+}
+.statusbar-text {
+  white-space: nowrap;
+}
+.statusbar-status {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  min-width: 0;
+}
+.statusbar p {
+  margin: 0;
+}
+.statusbar [role="status"] {
+  min-height: 0;
+}
+.statusbar .progress {
+  flex: none;
+  gap: 0.4rem;
+  white-space: nowrap;
+}
+.statusbar progress {
+  width: 8rem;
+}
+.statusbar .icon-button {
+  width: 1.4rem;
+  height: 1.4rem;
+}
+.status-line,
+.statusbar-error {
+  min-width: 0;
+  overflow: clip;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.statusbar-error {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  color: var(--error);
+}
+.statusbar-error-text {
+  overflow: clip;
+  text-overflow: ellipsis;
+}
+.row-flag {
+  color: var(--muted);
+}
+/* In a narrow window the folder tree and the details lie over the list
+   instead of squeezing it. */
+@media (max-width: 56rem) {
+  .workspace {
+    position: relative;
+  }
+  .folders,
+  .info {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    z-index: 3;
+    width: min(17rem, 80%);
+  }
+  .folders {
+    left: 0;
+  }
+  .info {
+    right: 0;
+  }
+}
+@media (max-width: 44rem) {
+  .table-head,
+  .entry {
+    grid-template-columns: 1.25rem minmax(0, 1fr) 5.5rem;
+  }
+  .col-type,
+  .type,
+  .col-folder,
+  .folder {
+    display: none;
+  }
+  .searchbox {
+    width: 9rem;
+  }
+}
+
+/* ---- Dialogs ----------------------------------------------------------------
+   A panel the user opened (create, add, remove, extract, a passphrase) is a
+   small dialog over the list, as in a desktop app. Inside a tool it stays in
+   the tool's own flow. */
+.dialog-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: color-mix(in srgb, var(--fg) 22%, transparent);
+}
+.dialog {
+  box-sizing: border-box;
+  width: min(32rem, 100%);
+  max-height: calc(100vh - 2rem);
+  overflow: auto;
+  padding: 0.75rem 1rem 0.85rem;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px color-mix(in srgb, var(--fg) 30%, transparent);
+}
+.dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+.dialog-head h3 {
+  margin: 0;
+  font-size: 1.05rem;
+  overflow-wrap: anywhere;
+}
+.dialog-actions {
+  justify-content: flex-end;
+  margin-bottom: 0;
+}
+.dialog-actions .hint {
+  margin-right: auto;
+}
+.dialog dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.25rem 0.75rem;
+  margin: 0.5rem 0;
+}
+.dialog dt {
+  color: var(--muted);
+}
+.dialog dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+/* "Extract to...": a folder field with Browse..., recent folders, a check box. */
+.extract-to {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.extract-to .note {
+  margin: 0;
+}
+.extract-to-row {
+  display: flex;
+  gap: 0.4rem;
+}
+.extract-to-row input {
+  flex: 1;
+  min-width: 0;
+}
+.extract-to-recent ul {
+  margin: 0.15rem 0 0;
+  padding: 0;
+  list-style: none;
+  max-height: 9rem;
+  overflow: auto;
+}
+.extract-to-recent li button {
+  max-width: 100%;
+  overflow: clip;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.extract-to-check {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+/* What OK will do with the folder typed (owner request 2026-11-10). It keeps its height
+   while the folder is looked at again, so the window does not jump as the user types. */
+.extract-to .extract-to-preview {
+  min-height: 1.4em;
+  overflow-wrap: anywhere;
+}
+.extract-to-preview[data-state="invalid"] {
+  color: var(--fg);
+}
+/* The tools of the More menu: one at a time, in a larger window with a close
+   button and its own scrolling. */
+.tool-sheet {
+  position: relative;
+  width: min(46rem, 100%);
+  max-height: min(40rem, calc(100vh - 2rem));
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+.dialog-close {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  z-index: 1;
+}
+.dialog-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0.85rem 1.1rem 1rem;
+}
+.tool-pane > section > h2:first-child {
+  margin-right: 2.5rem;
+}
+.tool-pane [role="status"]:empty {
+  min-height: 0;
+}
+.tool-pane .dialog-layer {
+  position: static;
+  display: block;
+  padding: 0;
+  background: none;
+}
+.tool-pane .dialog {
+  width: auto;
+  max-height: none;
+  margin: 0.5rem 0;
+  box-shadow: none;
+  border-color: var(--border);
+}
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.85rem;
+  margin: 0.5rem 0;
+}
+.panel fieldset {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+}
+
+/* ---- D2: create and add ------------------------------------------------------
+   Neutral, as everywhere: a commit is LOCAL_COMMITTED, which is not a
+   verification result, so nothing here is green (spec §23.3 #2, #6). */
+.writer,
+.extractor {
+  margin: 0;
+}
+.writer [role="status"]:empty {
+  min-height: 0;
+}
+.staged {
+  list-style: none;
+  margin: 0.4rem 0;
+  padding: 0;
+  max-height: 12rem;
+  overflow: auto;
+}
+.dialog .staged {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+}
+.staged li {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  min-height: 1.6rem;
+  padding: 0 0.25rem 0 0.5rem;
+}
+.staged li .name {
+  flex: 1;
+  min-width: 0;
+  overflow: clip;
+  text-overflow: ellipsis;
+}
+.kind-label {
+  flex: none;
+  width: 3.5rem;
+  overflow: clip;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.9em;
+  color: var(--muted);
+}
+.unstage .icon {
+  width: 14px;
+  height: 14px;
+}
+.drop-target {
+  margin: 0.4rem 0;
+  padding: 1.25rem 0.75rem;
+  text-align: center;
+  color: var(--muted);
+  border: 1px dashed var(--border-strong);
+  border-radius: 6px;
+}
+.save-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+}
+.save-row h4 {
+  flex: none;
+  margin: 0;
+  font-weight: 400;
+  color: var(--muted);
+}
+.save-row [data-testid="save-location"] {
+  flex: 1;
+  min-width: 0;
+  overflow: clip;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Files dragged over the window: the whole window is the target. */
+.drop-overlay {
+  position: fixed;
+  inset: 0.5rem;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  font-size: 1.2rem;
+  color: var(--fg);
+  background: color-mix(in srgb, var(--accent-bg) 85%, transparent);
+  border: 2px dashed var(--accent);
+  border-radius: 10px;
+  pointer-events: none;
+}
+
+/* ---- D3: extract ------------------------------------------------------------
+   Neutral: an extraction is not a verification, so nothing here is green
+   (spec §23.3 #2). Lists of names are text only. */
+.extractor .staged li {
+  flex-wrap: wrap;
+}
+
+/* ---- D4: test, health, and repair -------------------------------------------
+   Only .status-pass may look like success, and only PASS gets it
+   (check/messages.ts statusClass, tested). FAIL is marked as a failure;
+   DEGRADED, UNKNOWN, OVERDUE, and UNSUPPORTED stay neutral with an outline. */
+.status {
+  display: inline-block;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 0.85em;
+  padding: 0 0.4rem;
+  border: 1px solid var(--muted);
+  border-radius: 3px;
+}
+.status-pass {
+  color: var(--on-strong);
+  background: var(--pass);
+  border-color: var(--pass);
+}
+.status-fail {
+  color: var(--on-strong);
+  background: var(--error);
+  border-color: var(--error);
+}
+.status-attention {
+  color: var(--fg);
+  background: var(--surface);
+  border-style: dashed;
+}
+.checker fieldset {
+  margin: 0.75rem 0;
+}
+.dimensions {
+  border-collapse: collapse;
+  margin: 0.5rem 0;
+}
+.dimensions th,
+.dimensions td {
+  text-align: left;
+  padding: 0.15rem 0.75rem 0.15rem 0;
+}
+.prose {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.json {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 20rem;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 0.5rem;
+}
+.report-facts dd {
+  margin-left: 1rem;
+}
+.update-notes {
+  max-height: 16rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---- D7: accessibility ------------------------------------------------------ */
+/* A visible focus ring on everything the keyboard can reach. Rows and list
+   buttons sit inside scrolling boxes, so their ring is drawn inside them. */
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+.entry:focus-visible,
+.commit:focus-visible,
+.tree-label:focus-visible,
+.twisty:focus-visible,
+.menu-item:focus-visible,
+.searchbox input:focus-visible {
+  outline-offset: -3px;
+}
+/* Headings take focus from code (a dialog that opened); that is not a tab
+   stop, so it needs a marker but not a heavy one. */
+h2:focus-visible,
+h3:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+/* A status is its word first; the glyph and the border style repeat it for
+   people who cannot tell the colours apart. The second declaration gives the
+   glyph an empty spoken alternative where the engine supports it. */
+.status::before {
+  content: attr(data-mark) " ";
+  content: attr(data-mark) " " / "";
+}
+/* Windows high-contrast and other forced-colour modes drop our colours; keep
+   the selection and the status shapes visible. */
+@media (forced-colors: active) {
+  .titlebar {
+    border-bottom-color: CanvasText;
+  }
+  button.caption:hover:not(:disabled),
+  button.caption-close:hover:not(:disabled) {
+    forced-color-adjust: none;
+    color: HighlightText;
+    background: Highlight;
+  }
+  .commit.current,
+  .timeline .commit.current,
+  .tree-label.current,
+  .entry.selected {
+    border: 2px solid Highlight;
+  }
+  .status {
+    border: 2px solid CanvasText;
+  }
+  .status-attention {
+    border-style: dashed;
+  }
+}
+
+/* ---- D10: the start screen ------------------------------------------------ */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+/* A hidden heading that code moves focus to (the fallback after a panel
+   closes) shows itself while it has focus, so the focus ring is not clipped. */
+.sr-only:focus {
+  position: static;
+  width: auto;
+  height: auto;
+  margin: 0;
+  overflow: visible;
+  clip: auto;
+  white-space: normal;
+}
+/* The mascot is a decorative background on an empty element: never an img, so
+   a page that holds hostile names has no img in it at all. */
+.mascot-face {
+  flex: none;
+  width: 3.5rem;
+  height: 2.5rem;
+  background: url("./assets/mochi.png") center / contain no-repeat;
+}
+.mascot-hero {
+  display: block;
+  width: min(8rem, 22vh);
+  aspect-ratio: 480 / 398;
+  background: url("./assets/mochi-hero.png") center / contain no-repeat;
+}
+.start {
+  box-sizing: border-box;
+  width: min(30rem, 100%);
+  margin: auto;
+  padding: 1rem;
+  overflow: hidden;
+}
+.drop-zone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 1rem;
+  text-align: center;
+  border: 2px dashed var(--border);
+  border-radius: 10px;
+}
+.drop-zone-title {
+  margin: 0;
+  color: var(--muted);
+}
+.big-actions {
+  display: flex;
+  justify-content: center;
+  gap: 0.5rem;
+  margin: 0.85rem 0;
+}
+button.big {
+  display: flex;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.4rem;
+  padding: 0.3rem 1rem;
+}
+.big-title {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  gap: 0.45rem;
+  font-weight: 600;
+}
+.recent-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.recent-head h3 {
+  margin: 0;
+  font-size: 0.92em;
+  font-weight: 600;
+  color: var(--muted);
+}
+.recent-list {
+  list-style: none;
+  margin: 0.2rem 0 0;
+  padding: 0;
+}
+button.recent-item {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 1.75rem;
+  padding: 0 0.5rem;
+  text-align: left;
+  background: none;
+  border-color: transparent;
+}
+.recent-name {
+  overflow: clip;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.step {
+  margin: 0.5rem 0;
+}
+.help .actions {
+  margin: 0.5rem 0;
+}
+.help p {
+  color: var(--muted);
+}
+
+/* ---- Results: one short line in the status bar, details in a side panel -----
+   A finished create, add, remove, or extract is one line with its actions on
+   the same row. Neutral by design: nothing here is a verification, so nothing
+   is green (spec §23.3 #2). A line that is partial gets the warning bar, and
+   the Details button carries a badge while the panel holds anything that is
+   not fully good. */
+.result.has-result {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-width: 0;
+}
+.result-text {
+  min-width: 0;
+  overflow: clip;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+.result-text p {
+  display: inline;
+  margin: 0;
+}
+.result-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 0.1rem;
+}
+.result-actions .icon-button {
+  color: var(--fg);
+}
+.result-details-button {
+  position: relative;
+}
+/* A small solid dot on the corner of the Details button: there is a note in
+   the panel that needs a look. The accessible name says how many. */
+.result-badge {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 0.55rem;
+  height: 0.55rem;
+  box-sizing: border-box;
+  background: var(--warning);
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+}
+.result-inline-toggle {
+  position: relative;
+  align-self: flex-start;
+  padding: 0.2rem 1.4rem 0.2rem 0.75rem;
+}
+.result-inline-toggle .result-badge {
+  top: 50%;
+  right: 0.5rem;
+  margin-top: -0.275rem;
+}
+.result-inline {
+  max-height: 14rem;
+  overflow: auto;
+  padding: 0.25rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+/* The side panel: non-modal, over the right edge of the window. */
+.result-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 1.75rem;
+  z-index: 35;
+  box-sizing: border-box;
+  width: min(22rem, 100vw);
+  overflow: auto;
+  padding: 0.6rem 0.85rem 0.85rem;
+  color: var(--fg);
+  font-size: 1rem;
+  white-space: normal;
+  background: var(--surface);
+  border-left: 1px solid var(--border-strong);
+  box-shadow: -6px 0 18px color-mix(in srgb, var(--fg) 14%, transparent);
+}
+.result-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.result-drawer-head h3 {
+  margin: 0;
+}
+.result-list {
+  display: grid;
+  grid-template-columns: minmax(5rem, 8rem) minmax(0, 1fr);
+  gap: 0.45rem 0.85rem;
+  margin: 0.75rem 0;
+}
+.result-list dt {
+  color: var(--muted);
+}
+.result-list dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.result-sub {
+  display: block;
+  color: var(--muted);
+  font-size: 0.9em;
+}
+.result-reason {
+  display: block;
+  color: var(--muted);
+}
+.result-items {
+  margin: 0.25rem 0 0;
+  padding-left: 1rem;
+  max-height: 12rem;
+  overflow: auto;
+}
+.result-items li {
+  display: list-item;
+}
+/* A dimension that is not fully good: a bar and the word for it, never colour alone. */
+.result-list dd.result-caution {
+  border-left: 3px solid var(--warning);
+  padding-left: 0.5rem;
+}
+.result-list dd.result-caution .result-reason {
+  color: var(--fg);
+}
+.result-items .name {
+  white-space: pre-wrap;
+}
+.statusbar .result-text.warning {
+  padding-left: 0.4rem;
+}
+@media (max-width: 30rem) {
+  .result-list {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.1rem;
+  }
+  .result-list dd {
+    margin-bottom: 0.5rem;
+  }
+}
+@media (forced-colors: active) {
+  .result-badge {
+    forced-color-adjust: none;
+    background: Highlight;
+    border-color: Canvas;
+  }
+}
+
+/* ---- The compact window of the shell's quick verbs ---------------------------- */
+.quick {
+  padding: 0.75rem 1rem;
+}
+/* Its own title bar above the content, which scrolls alone. */
+.quick-window {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+}
+.quick-window > .quick {
+  flex: 1;
+  min-height: 0;
+}
+/* The right-click menu of a file list: a fixed menu at the pointer. */
+.context-menu {
+  z-index: 60;
+  min-width: 12rem;
+}
+.context-menu hr {
+  margin: 0.2rem 0;
+}
+
+/* ---- Test result verdict --------------------------------------------------- */
+.verdict {
+  border-left: 0.35rem solid var(--border);
+  padding: 0.25rem 0.75rem;
+  margin: 0 0 0.5rem;
+}
+.verdict p {
+  margin: 0.2rem 0;
+}
+.verdict-title {
+  font-size: 1.15em;
+}
+.verdict-pass {
+  border-left-color: var(--fg);
+}
+.verdict-fail {
+  border-left-color: var(--error);
+}
+.verdict-title::before {
+  content: attr(data-mark) " ";
+}
+.verdict-attention {
+  border-left-style: dashed;
+}
+
+/* ---- MOCHI Find -------------------------------------------------------------
+   Folders to search, a name box, a status line, what was not searched, and the
+   matches. The window is wider while Find is shown. Archive paths and entry
+   names are text only (the strings come from the disk and from archives). */
+.tool-sheet:has([data-tool="find"]:not([hidden])) {
+  width: min(62rem, 100%);
+}
+.finder {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.find-header h2 {
+  margin: 0 2.5rem 0.15rem 0;
+}
+.find-intro,
+.find-none,
+.find-status,
+.find-note {
+  margin: 0;
+  color: var(--muted);
+}
+.find-note {
+  font-size: 0.92em;
+}
+
+/* The two steps, Where and What: quiet cards with a numbered badge, so the order reads at a glance. */
+.find-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.65rem 0.8rem 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-1);
+}
+.find-card-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  min-height: 1.9rem;
+}
+.find-card-head h3 {
+  margin: 0;
+  font-size: 1em;
+  font-weight: 600;
+}
+.find-step {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 1.35rem;
+  height: 1.35rem;
+  font-size: 0.85em;
+  font-weight: 700;
+  color: var(--on-strong);
+  background: var(--accent);
+  border-radius: 50%;
+}
+.find-card-head > :last-child {
+  margin-left: auto;
+}
+
+/* A switch: a checkbox drawn as a track and knob; the label says what it does. */
+.find-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  cursor: pointer;
+}
+.find-toggle input {
+  appearance: none;
+  position: relative;
+  flex: none;
+  width: 2.1rem;
+  height: 1.15rem;
+  margin: 0;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease-1), border-color var(--dur-2) var(--ease-1);
+}
+.find-toggle input::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: calc(1.15rem - 6px);
+  height: calc(1.15rem - 6px);
+  background: var(--border-strong);
+  border-radius: 50%;
+  transition: transform var(--dur-2) var(--ease-1), background var(--dur-2) var(--ease-1);
+}
+.find-toggle input:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.find-toggle input:checked::after {
+  background: var(--on-strong);
+  transform: translateX(0.95rem);
+}
+.find-toggle input:disabled,
+.find-toggle input:disabled + span {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.find-scopes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.find-scopes li {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+  padding: 0.15rem 0.25rem 0.15rem 0.5rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.find-scopes li .icon {
+  color: var(--icon-folder);
+}
+.find-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.find-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}
+.find-actions button,
+.find-actionbar button.primary {
+  display: inline-flex;
+  align-items: center;
+}
+.find-actions .icon,
+.find-actionbar .icon {
+  margin-right: 0.3rem;
+}
+
+/* One name or a list: a two-part segmented control. */
+.find-segmented {
+  display: inline-flex;
+  padding: 2px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+.find-segmented button {
+  min-height: 1.6rem;
+  padding: 0 0.75rem;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  border-radius: 5px;
+  transition: background var(--dur-1) var(--ease-1), color var(--dur-1) var(--ease-1);
+}
+.find-segmented button:hover:not(.on) {
+  color: var(--fg);
+  background: var(--accent-bg);
+}
+.find-segmented button.on {
+  color: var(--fg);
+  font-weight: 600;
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
+}
+.finder .searchbox {
+  width: 100%;
+  margin: 0;
+}
+
+/* The list of names: a roomy text area, a bar under it, and the names as chips. */
+.find-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.find-list-text {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 6.5rem;
+  max-height: 16rem;
+  resize: vertical;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, "Ubuntu Mono", "DejaVu Sans Mono", monospace;
+  font-size: 0.95em;
+  line-height: 1.5;
+}
+.find-list-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.9rem;
+}
+.find-list-count {
+  font-weight: 600;
+}
+.find-list-left {
+  color: var(--warning);
+  font-size: 0.92em;
+}
+.find-list-tools {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.9rem;
+  margin-left: auto;
+}
+.find-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--muted);
+}
+.find-inline select {
+  color: var(--fg);
+}
+.find-check-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+}
+.find-check-label input {
+  margin: 0;
+}
+.find-chips {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  max-height: 5.4rem;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+}
+.find-chip {
+  max-width: 16rem;
+  padding: 0.05rem 0.55rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.92em;
+  background: var(--accent-bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  animation: mochi-fade var(--dur-2) var(--ease-1);
+}
+.find-chip.more {
+  color: var(--muted);
+  background: none;
+}
+.find-options {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.2rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+}
+.find-options .find-show {
+  margin-left: auto;
+}
+
+.find-progress {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+}
+.find-incomplete {
+  border: 1px solid var(--border-strong);
+  border-left: 4px solid var(--warning);
+  border-radius: 4px;
+  padding: 0.4rem 0.7rem;
+}
+.find-incomplete p,
+.find-incomplete ul {
+  margin: 0.2rem 0;
+}
+.find-incomplete ul {
+  padding-left: 1.2rem;
+}
+.find-incomplete-head {
+  font-weight: 600;
+  color: var(--warning);
+}
+.find-incomplete details ul,
+.find-report details ul {
+  list-style: none;
+  padding-left: 0;
+  max-height: 9rem;
+  overflow: auto;
+}
+.find-incomplete details li,
+.find-report details li {
+  display: flex;
+  gap: 0.6rem;
+  min-width: 0;
+}
+.find-reason {
+  flex: none;
+  max-width: 55%;
+  color: var(--muted);
+}
+
+/* What each name found: one chip per name with its count; a name not found is dashed and says
+   so in words (never green: finding a name is not a check that passed, spec §23.3). Pressing a
+   chip shows only that name's matches. */
+.find-terms {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.find-terms-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.8rem;
+}
+.find-terms-head h3 {
+  margin: 0;
+  font-size: 1em;
+}
+.find-terms-score {
+  font-weight: 600;
+}
+.find-terms-missing {
+  color: var(--warning);
+  font-weight: 600;
+}
+.find-terms-head button.link:last-child {
+  margin-left: auto;
+}
+.find-term-list {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  max-height: 7.5rem;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+}
+button.find-term {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  max-width: 18rem;
+  min-height: 1.6rem;
+  padding: 0 0.25rem 0 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+button.find-term.all {
+  padding-right: 0.6rem;
+}
+button.find-term:hover:not(:disabled):not(.on) {
+  border-color: var(--border-strong);
+  background: var(--accent-bg);
+}
+button.find-term.on {
+  color: var(--on-strong);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+button.find-term:disabled {
+  color: var(--warning);
+  background: none;
+  border-style: dashed;
+  border-color: var(--border-strong);
+  opacity: 1;
+}
+.find-term-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.find-term-count {
+  flex: none;
+  min-width: 1.2rem;
+  padding: 0 0.4rem;
+  font-size: 0.85em;
+  font-weight: 600;
+  text-align: center;
+  color: var(--fg);
+  background: var(--surface);
+  border-radius: 999px;
+}
+button.find-term.on .find-term-count {
+  color: var(--accent);
+}
+button.find-term:disabled .find-term-count {
+  color: var(--warning);
+  font-weight: 400;
+  background: none;
+}
+
+/* The matches: a tick box per row, then the row itself (a button: click picks, double click or
+   Enter opens, Space ticks). */
+.find-results {
+  max-height: 22rem;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.find-results ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.find-head,
+.find-row {
+  display: grid;
+  grid-template-columns: 1.9rem minmax(0, 1fr);
+  align-items: center;
+}
+.find-check-cell {
+  display: grid;
+  place-items: center;
+  align-self: stretch;
+}
+.find-check-cell input {
+  margin: 0;
+  cursor: pointer;
+}
+.find-head-cols,
+.find-hit {
+  display: grid;
+  grid-template-columns: 1.25rem minmax(0, 1.2fr) minmax(0, 0.8fr) minmax(0, 0.8fr) 5.5rem 9.5rem;
+  column-gap: 0.5rem;
+  align-items: center;
+}
+.find-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  min-height: 1.85rem;
+  font-size: 0.92em;
+  color: var(--muted);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.find-head-cols {
+  padding-right: 0.6rem;
+}
+.find-spacer {
+  list-style: none;
+}
+.find-row-wait .find-wait {
+  padding-left: 1.6rem;
+  color: var(--muted);
+}
+.find-row {
+  box-sizing: border-box;
+  height: 30px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  transition: background var(--dur-1) var(--ease-1);
+}
+.find-row:hover {
+  background: var(--bg);
+}
+.find-row.checked {
+  background: color-mix(in srgb, var(--accent-bg) 65%, var(--surface));
+}
+.find-hit {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  padding: 0 0.6rem 0 0;
+  font: inherit;
+  text-align: left;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 0;
+}
+.find-hit:hover:not(.selected) {
+  background: none;
+}
+.find-hit.selected {
+  background: var(--accent-bg);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.find-hit .entry-name {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+.find-term-tag {
+  flex: none;
+  max-width: 8rem;
+  padding: 0 0.4rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.82em;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.find-archive,
+.when {
+  overflow: clip;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+/* Every loaded match is ticked: offer every match (Rust finds them again for the retrieve). */
+.find-tick-all {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.6rem;
+  margin: 0;
+  padding: 0.4rem 0.6rem;
+  background: var(--accent-bg);
+  border-radius: 6px;
+}
+
+/* What is ticked, and Retrieve: stays in reach at the bottom of the sheet while the list scrolls. */
+.find-actionbar {
+  position: sticky;
+  bottom: -1px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.6rem 0.5rem 0.8rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-2);
+}
+.find-actionbar-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--muted);
+}
+.find-actionbar[data-active="true"] .find-actionbar-text {
+  color: var(--fg);
+}
+.find-actionbar-from {
+  color: var(--muted);
+}
+.find-selected {
+  color: var(--muted);
+}
+.find-selected p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Retrieve found files: where to, as choice cards, then progress and the report. */
+.dialog.find-retrieve {
+  width: min(36rem, 100%);
+}
+.find-retrieve-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+.find-retrieve-what {
+  margin: 0;
+  padding: 0.4rem 0.6rem;
+  font-weight: 600;
+  background: var(--accent-bg);
+  border-radius: 6px;
+}
+.find-field {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.find-field legend {
+  margin-bottom: 0.3rem;
+  padding: 0;
+  font-weight: 600;
+}
+.find-retrieve-folder,
+.find-choice {
+  box-sizing: border-box;
+  width: 100%;
+}
+.find-retrieve-folder {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.3rem 0.3rem 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+}
+.find-retrieve-folder .icon {
+  color: var(--icon-folder);
+}
+.find-choices {
+  display: grid;
+  gap: 0.35rem;
+}
+.find-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: border-color var(--dur-1) var(--ease-1), background var(--dur-1) var(--ease-1);
+}
+.find-choice:hover {
+  border-color: var(--border-strong);
+}
+.find-choice:has(input:checked) {
+  background: color-mix(in srgb, var(--accent-bg) 60%, var(--surface));
+  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.find-choice input {
+  margin: 0.15rem 0 0;
+}
+.find-choice-title {
+  display: block;
+  font-weight: 600;
+}
+.find-choice-note {
+  display: block;
+  color: var(--muted);
+  font-size: 0.92em;
+}
+.find-retrieve-note,
+.find-report-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.92em;
+}
+.find-retrieve-done {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.find-report {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.find-report p {
+  margin: 0;
+}
+.find-report-head {
+  font-size: 1.05em;
+  font-weight: 600;
+}
+.find-report-dest {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--muted);
+}
+.find-report-warn {
+  color: var(--warning);
+  font-weight: 600;
+}
+.find-report-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 14rem;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.find-report-list > li {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 0.1rem 0.75rem;
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+.find-report-list > li:last-child {
+  border-bottom: 0;
+}
+.find-report-list > li > details {
+  grid-column: 1 / -1;
+}
+.find-report-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.find-report-line {
+  color: var(--muted);
+}
+.find-report-list > li[data-state="changed"] .find-report-line,
+.find-report-list > li[data-state="failed"] .find-report-line {
+  color: var(--warning);
+}
+.find-retrieve-stopped {
+  margin: 0;
+  color: var(--warning);
+}
+
+@media (max-width: 44rem) {
+  .find-head-cols,
+  .find-hit {
+    grid-template-columns: 1.25rem minmax(0, 1fr) minmax(0, 0.8fr) 5.5rem;
+  }
+  .find-head-cols > :nth-child(3),
+  .find-head-cols > :nth-child(6),
+  .find-hit > :nth-child(3),
+  .find-hit > :nth-child(6) {
+    display: none;
+  }
+  .find-options .find-show,
+  .find-list-tools {
+    margin-left: 0;
+  }
+}
+
+/* The transfer card of a running job (create, add, extract, write ZIP/tar): a header, a big
+   percentage, a thick bar with Pause and Cancel at its end, then how much is done and how much is
+   left. Neutral by design (spec §23.3: only a verification PASS is green): the bar is the accent
+   while running, the warning amber while paused, and the error red once the job has failed, and
+   every state also says so in words. The fill takes `color`, so each state is one token. */
+.transfer {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+  padding: 0.75rem 1rem 0.85rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.transfer p {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.transfer-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+.transfer[data-state="paused"] .transfer-title {
+  color: var(--warning);
+}
+.transfer[data-state="error"] .transfer-title {
+  color: var(--error);
+}
+.transfer-percent {
+  font-size: 1.9rem;
+  font-weight: 600;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+.transfer-subtitle,
+.transfer-time {
+  color: var(--muted);
+}
+.transfer-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0.35rem 0 0.2rem;
+}
+.transfer progress {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+  height: 8px;
+  border: 0;
+  border-radius: 4px;
+  appearance: none;
+  overflow: clip;
+  background: var(--border);
+  color: var(--accent);
+}
+.transfer[data-state="paused"] progress {
+  color: var(--warning);
+}
+.transfer[data-state="error"] progress {
+  color: var(--error);
+}
+.transfer progress::-webkit-progress-bar {
+  background: var(--border);
+  border-radius: 4px;
+}
+.transfer progress::-webkit-progress-value {
+  background: currentColor;
+  border-radius: 4px;
+  transition: width 0.15s linear;
+}
+.transfer progress::-moz-progress-bar {
+  background: currentColor;
+  border-radius: 4px;
+}
+/* A bar with no value (nothing counted yet, or no total): a band sliding along the track. */
+.transfer progress:not([value]) {
+  background-image: linear-gradient(90deg, transparent, currentColor, transparent);
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  animation: transfer-slide 1.4s ease-in-out infinite;
+}
+@keyframes transfer-slide {
+  from {
+    background-position: -40% 0;
+  }
+  to {
+    background-position: 140% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .transfer progress:not([value]) {
+    animation: none;
+    background-position: 30% 0;
+  }
+  .transfer progress::-webkit-progress-value {
+    transition: none;
+  }
+}
+.transfer .icon-button {
+  color: var(--fg);
+}
+.transfer-size {
+  font-variant-numeric: tabular-nums;
+}
+.transfer-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  margin-top: 0.25rem;
+  color: var(--error);
+  font-weight: 500;
+}
+.transfer-error .icon {
+  margin-top: 0.1rem;
+}
+button.transfer-retry {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  justify-self: start;
+  margin-top: 0.4rem;
+}
+/* In the status bar the card is one line: the bar, its buttons, and the words that go with them. */
+.statusbar .transfer {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  white-space: nowrap;
+}
+.statusbar .transfer-title,
+.statusbar .transfer-percent,
+.statusbar .transfer-subtitle {
+  display: none;
+}
+.statusbar .transfer-bar {
+  flex: none;
+  margin: 0;
+}
+.statusbar .transfer progress {
+  flex: none;
+  width: 8rem;
+}
+.statusbar .transfer-size,
+.statusbar .transfer-time {
+  overflow: clip;
+  text-overflow: ellipsis;
+}
+.statusbar .transfer-error {
+  margin: 0;
+  overflow: clip;
+  text-overflow: ellipsis;
+}
+.statusbar button.transfer-retry {
+  min-height: 0;
+  margin: 0;
+  padding: 0 0.5rem;
+}
+
+/* "Files already exist" (owner decision 2026-11-11): one question, its names, its choices. */
+/* Wide enough for its five buttons on one row in a default-sized window; they wrap below that. */
+.dialog:has(.choices) {
+  width: min(46rem, 100%);
+}
+.choices {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+.choices-title {
+  margin: 0;
+  font-size: 1.05em;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.choices-sub,
+.choices-note {
+  margin: 0;
+  color: var(--muted);
+}
+.choices-list {
+  max-height: 10.5rem;
+  margin: 0;
+  padding: 0.3rem 0;
+  overflow: auto;
+  list-style: none;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+.choices-list li,
+.choices-cannot li {
+  padding: 0.15rem 0.7rem;
+  overflow: clip;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.choices-dir {
+  color: var(--muted);
+}
+.choices-more {
+  color: var(--muted);
+}
+.choices-cannot summary {
+  color: var(--muted);
+  cursor: default;
+}
+.choices-cannot ul {
+  max-height: 8rem;
+  margin: 0.35rem 0 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+.choices-why {
+  margin-left: 0.6rem;
+  color: var(--muted);
+}
+.choices-actions {
+  flex-wrap: wrap;
+}
+.choices-actions > :first-child {
+  margin-right: auto;
+}
+.choices-elsewhere {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+}
+.choices-dot {
+  color: var(--muted);
+}
+/* The choice that moves the user's files away: red text, never the default. */
+button.destructive {
+  color: var(--error);
+}
+button.destructive:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--error) 10%, transparent);
+  border-color: var(--error);
+}
+
+/* ---- Reading an archive (owner report 2026-11-12) ---------------------------
+   While Rust reads an archive (slow on a network drive, or for a very large one)
+   the window below the title bar is covered: the pointer and the keyboard stop
+   here, and the title bar's own buttons stay usable. The notice fades in after a
+   moment, so a quick open does not flash; the cover itself is there at once. */
+.opening-layer {
+  position: fixed;
+  inset: 2.9rem 0 0 0;
+  z-index: 45;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+  cursor: progress;
+  animation: opening-in 160ms ease-out 250ms both;
+}
+.opening-card {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  max-width: min(28rem, 100%);
+  padding: 0.85rem 1.1rem;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px color-mix(in srgb, var(--fg) 22%, transparent);
+}
+.opening-card p {
+  margin: 0;
+}
+.opening-card:focus-visible {
+  outline-offset: 3px;
+}
+/* The toolbar takes nothing meanwhile (it is inert), and looks it. */
+.toolbar[inert] {
+  opacity: 0.45;
+}
+.opening-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.spinner {
+  flex: none;
+  box-sizing: border-box;
+  width: 1.6rem;
+  height: 1.6rem;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes opening-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 2.4s;
+  }
+  .opening-layer {
+    animation: none;
+  }
+}
+
+/* ---- Settings (owner request 2026-11-12) ------------------------------------
+   One section at a time: a list of sections on the left, the section on the
+   right. Each setting is a row of a card: its name and a one-line description,
+   its control on the right; longer words are behind the "i". A check box that
+   turns something on or off is drawn as a switch (still a check box). */
+.tool-sheet:has([data-tool="settings"]:not([hidden])) {
+  width: min(50rem, 100%);
+  height: min(36rem, calc(100vh - 2rem));
+}
+.settings h2 {
+  margin: 0 2.5rem 0.6rem 0;
+}
+.settings-layout {
+  display: grid;
+  grid-template-columns: 11.5rem minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+.settings-tabs {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.settings-tab {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  min-height: 2.1rem;
+  padding: 0.25rem 0.6rem;
+  text-align: left;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+}
+.settings-tab .icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--muted);
+}
+.settings-tab[aria-selected="true"] {
+  font-weight: 600;
+  background: var(--accent-bg);
+  border-color: var(--border);
+}
+.settings-tab[aria-selected="true"] .icon {
+  color: var(--accent);
+}
+.settings-panel-title {
+  margin: 0.15rem 0 0.65rem;
+  font-size: 1.05rem;
+}
+.setting-group + .setting-group {
+  margin-top: 0.9rem;
+}
+.setting-group-heading {
+  margin: 0 0 0.35rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.setting-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.setting-card > * + * {
+  border-top: 1px solid var(--border);
+}
+.setting-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  min-height: 2.6rem;
+  margin: 0;
+  padding: 0.6rem 0.85rem;
+}
+.setting-text {
+  flex: 1;
+  min-width: 0;
+}
+.setting-title {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-weight: 600;
+}
+.setting-title label {
+  cursor: default;
+}
+.setting-description {
+  margin: 0.15rem 0 0;
+  font-size: 0.92em;
+  color: var(--muted);
+}
+.setting-control {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.setting-control.actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+/* A row whose actions are wider than its words: the actions go below. */
+.setting-row.setting-stack {
+  flex-wrap: wrap;
+}
+.setting-row.setting-stack .setting-text {
+  flex-basis: 100%;
+}
+.setting-row.setting-stack .setting-control {
+  flex: 1;
+  justify-content: flex-start;
+}
+/* A fieldset row (radio buttons): the floated legend is laid out like a title. */
+.setting-fieldset {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 1rem;
+  border: none;
+  border-radius: 0;
+  min-width: 0;
+}
+.setting-fieldset > legend {
+  float: left;
+  grid-column: 1;
+  padding: 0;
+}
+.setting-fieldset > .setting-description {
+  grid-column: 1;
+}
+.setting-fieldset > .setting-control {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+.setting-choices {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+}
+.setting-choice {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.setting-folder {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.85rem;
+  background: var(--bg);
+}
+.setting-folder[data-active="false"] .setting-folder-path {
+  color: var(--muted);
+}
+.setting-folder-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 0.9em;
+  user-select: text;
+}
+.setting-warning {
+  margin: 0;
+  padding: 0.45rem 0.85rem 0.6rem;
+  font-size: 0.92em;
+  color: var(--warning);
+}
+.setting-intro {
+  margin: 0 0 0.75rem;
+  color: var(--muted);
+}
+.setting-error {
+  margin: 0;
+  padding: 0.5rem 0.85rem;
+  color: var(--error);
+}
+/* On or off: a check box drawn as a switch. The ring is the control's border
+   (3:1 on every surface), the knob moves right and fills when on. */
+input[type="checkbox"].switch {
+  appearance: none;
+  position: relative;
+  flex: none;
+  box-sizing: border-box;
+  width: 2.35rem;
+  height: 1.3rem;
+  margin: 0;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  transition: background-color 120ms ease;
+}
+input[type="checkbox"].switch::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0.18rem;
+  width: 0.82rem;
+  height: 0.82rem;
+  background: var(--border-strong);
+  border-radius: 50%;
+  transform: translateY(-50%);
+  transition: left 120ms ease, background-color 120ms ease;
+}
+input[type="checkbox"].switch:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+input[type="checkbox"].switch:checked::before {
+  left: calc(100% - 0.82rem - 0.18rem);
+  background: var(--on-strong);
+}
+input[type="checkbox"].switch:disabled {
+  opacity: 0.55;
+}
+@media (prefers-reduced-motion: reduce) {
+  input[type="checkbox"].switch,
+  input[type="checkbox"].switch::before {
+    transition: none;
+  }
+}
+@media (max-width: 40rem) {
+  .settings-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .settings-tabs {
+    position: static;
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+  .settings-tab {
+    width: auto;
+  }
+}
+
+/* ---- The archive Info window (owner request 2026-11-14) ------------------------------
+   A tall bar for the ratio beside the facts, as in WinRAR's Info tab. The bar is the accent,
+   never a status colour: a ratio is a fact, not a result. */
+.info-dialog {
+  width: min(30rem, 100%);
+}
+.info-body {
+  display: flex;
+  gap: 1.15rem;
+  margin-top: 0.35rem;
+}
+.info-meter {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.45rem;
+  width: 3.2rem;
+}
+.info-meter-track {
+  position: relative;
+  flex: 1;
+  width: 1.5rem;
+  min-height: 12rem;
+  overflow: hidden;
+  background: var(--accent-bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.info-meter-fill {
+  position: absolute;
+  inset: auto 0 0;
+  background: linear-gradient(to top, var(--accent), color-mix(in srgb, var(--accent) 65%, var(--surface)));
+  border-radius: 999px;
+  transform-origin: bottom;
+  animation: mochi-grow calc(var(--dur-3) * 3) var(--ease-1) both;
+}
+.info-meter-label {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+.info-facts {
+  flex: 1;
+  min-width: 0;
+}
+.info-kind {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  margin: 0 0 0.6rem;
+}
+.info-kind strong {
+  font-size: 1rem;
+}
+.info-name {
+  overflow: clip;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.dialog dl.info-list {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.32rem 1rem;
+  margin: 0;
+}
+.dialog .info-list dt {
+  color: var(--muted);
+}
+.dialog .info-list dd {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  user-select: text;
+}
+.info-facts hr,
+.scan-result hr {
+  margin: 0.6rem 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+/* The archive comment (spec Annex B.2.19): archive text, shown as written. */
+.info-comment-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.info-comment-head h4 {
+  margin: 0;
+  font-size: 0.92em;
+  color: var(--muted);
+}
+.info-comment-text {
+  max-height: 9rem;
+  margin: 0.35rem 0 0;
+  padding: 0.45rem 0.6rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.info-comment-editor textarea {
+  width: 100%;
+  margin-top: 0.35rem;
+  resize: vertical;
+  white-space: pre-wrap;
+}
+.info-comment-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.85em;
+}
+.info-comment-meta .note {
+  margin: 0;
+}
+
+/* ---- Scan for viruses (owner request 2026-11-14) -------------------------------------
+   Labels above full-width fields, as in WinRAR's window. The scanner's report is neutral:
+   no success styling for "no threats reported" (spec §23.3); a report that needs reading
+   gets the warning edge. */
+.scan-dialog {
+  width: min(34rem, 100%);
+}
+.scan-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.scan-form > label,
+.scan-row-head label {
+  margin-top: 0.5rem;
+  font-weight: 500;
+}
+.scan-form select,
+.scan-form input {
+  width: 100%;
+}
+.scan-form input {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 0.92em;
+}
+.scan-row-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.scan-form .note {
+  margin: 0.35rem 0 0;
+}
+.scan-running progress {
+  width: 100%;
+  margin: 0.4rem 0 0.2rem;
+}
+.scan-verdict {
+  margin: 0.2rem 0 0.5rem;
+  padding: 0.6rem 0.8rem;
+  font-weight: 600;
+  background: var(--accent-bg);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+}
+.scan-verdict.scan-attention {
+  border-left-color: var(--warning);
+}
+.scan-partial {
+  padding-left: 0.6rem;
+  border-left: 3px dashed var(--warning);
+}
+.scan-output {
+  margin: 0.5rem 0;
+}
+.scan-output summary {
+  cursor: default;
+  font-weight: 500;
+}
+.scan-output pre {
+  max-height: 12rem;
+  margin: 0.4rem 0 0;
+  padding: 0.5rem 0.65rem;
+  overflow: auto;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+/* ---- Refinement (owner request 2026-11-14) -------------------------------------------
+   One layer over the rules above: softer corners, real elevation for menus and windows,
+   eased hover and press feedback, and short entrance animations. Every animation here is
+   an entrance (nothing waits for one to finish), so turning motion off loses nothing. */
+button,
+input:not([type="checkbox"]):not([type="radio"]),
+select,
+textarea {
+  border-radius: 6px;
+  transition:
+    background-color var(--dur-1) var(--ease-1),
+    border-color var(--dur-1) var(--ease-1),
+    color var(--dur-1) var(--ease-1),
+    box-shadow var(--dur-2) var(--ease-1),
+    opacity var(--dur-2) var(--ease-1),
+    transform var(--dur-1) var(--ease-1);
+}
+input:not([type="checkbox"]):not([type="radio"]):hover:not(:disabled),
+select:hover:not(:disabled),
+textarea:hover:not(:disabled) {
+  border-color: var(--fg);
+}
+input:not([type="checkbox"]):not([type="radio"]):focus,
+select:focus,
+textarea:focus {
+  border-color: var(--accent);
+}
+fieldset {
+  border-radius: 8px;
+}
+button.primary:not(:disabled) {
+  box-shadow: var(--shadow-1);
+}
+/* Words beside the toolbar's icons at the default window width with Info and Scan added:
+   a little less padding per button, and a search field that may narrow a little more. */
+.toolbar:not([data-labels="off"]) button.tool:has(.tool-label) {
+  gap: 0.35rem;
+  padding: 0 0.5rem 0 0.42rem;
+}
+.toolbar:not([data-labels="off"]) .searchbox {
+  min-width: 9rem;
+}
+/* A press sinks a little: the buttons a person aims at, not the rows of a list. */
+button.primary:active:not(:disabled),
+button.big:active:not(:disabled),
+.actions button:active:not(:disabled),
+button.tool:active:not(:disabled),
+button.icon-button:active:not(:disabled),
+button.selection-action:active:not(:disabled) {
+  transform: scale(0.97);
+}
+.dialog-actions {
+  gap: 0.5rem;
+  margin-top: 0.9rem;
+}
+.dialog-actions button {
+  min-width: 5.5rem;
+}
+.dialog {
+  padding: 0.9rem 1.15rem 1rem;
+  border-color: var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-3);
+}
+.dialog-head {
+  margin-bottom: 0.6rem;
+}
+.dialog-head h3 {
+  font-size: 1.08rem;
+  letter-spacing: -0.005em;
+}
+.menu,
+.popover {
+  border-color: var(--border);
+  border-radius: 9px;
+  box-shadow: var(--shadow-2);
+}
+button.menu-item {
+  border-radius: 5px;
+}
+.entry,
+button.crumb,
+button.recent-item,
+.tree-label,
+.timeline .commit {
+  transition: background-color var(--dur-1) var(--ease-1);
+}
+button.recent-item {
+  border-radius: 6px;
+}
+.drop-zone {
+  transition:
+    border-color var(--dur-2) var(--ease-1),
+    background-color var(--dur-2) var(--ease-1);
+}
+.drop-zone:hover {
+  border-color: var(--border-strong);
+}
+
+/* Entrances. */
+@keyframes mochi-fade {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes mochi-pop {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+}
+@keyframes mochi-drop {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+@keyframes mochi-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+}
+@keyframes mochi-grow {
+  from {
+    transform: scaleY(0);
+  }
+}
+.dialog-layer {
+  animation: mochi-fade var(--dur-2) var(--ease-1);
+}
+.dialog-layer > .dialog,
+.dialog-layer > .tool-sheet {
+  animation: mochi-pop var(--dur-3) var(--ease-1);
+}
+.tool-pane .dialog-layer,
+.tool-pane .dialog-layer > .dialog {
+  animation: none;
+}
+.menu,
+.popover {
+  transform-origin: top right;
+  animation: mochi-drop var(--dur-2) var(--ease-1);
+}
+.settings-panel,
+.start {
+  animation: mochi-rise var(--dur-3) var(--ease-1);
+}
+.settings-panel {
+  animation-name: mochi-fade;
+}
+.selection-bar {
+  animation: mochi-fade var(--dur-2) var(--ease-1);
+}
+
+/* Motion off: by the user's choice (Settings, General), or by the system's reduce-motion
+   setting while the choice is "As the system". "On" keeps motion whatever the system says. */
+:root[data-motion="off"] *,
+:root[data-motion="off"] *::before,
+:root[data-motion="off"] *::after {
+  animation: none !important;
+  transition: none !important;
+  scroll-behavior: auto !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="on"]) *,
+  :root:not([data-motion="on"]) *::before,
+  :root:not([data-motion="on"]) *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}

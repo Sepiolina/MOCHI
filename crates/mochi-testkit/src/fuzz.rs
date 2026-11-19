@@ -1,0 +1,1184 @@
+//! Parser exercisers shared by the cargo-fuzz targets (`fuzz/`) and the
+//! deterministic smoke test. A panic here is a finding: every function asserts
+//! the invariants the framing layer promises for *any* input.
+
+use mochi_core::catalog::{Catalog, CatalogLimits};
+use mochi_core::manifest::Manifest;
+use mochi_format::cbor::{self, CborLimits};
+use mochi_format::codec::{decode_object, Protection};
+use mochi_format::envelope::{
+    decode_binary_record, encode_binary_record, image_payload_budget, EnvelopeRules,
+    BINARY_ENVELOPE_FIXED_LEN,
+};
+use mochi_format::footer::{validate_footer, validate_footer_at_eof};
+use mochi_format::frame::{walk_frame, FrameDetail, Frames};
+use mochi_format::registry::FrameKind;
+use mochi_format::repr::StoredObject;
+use mochi_format::Limits;
+
+/// Small limits so hostile inputs finish quickly; the point is bounded work.
+pub fn fuzz_limits() -> Limits {
+    Limits {
+        max_skippable_payload: 1 << 16,
+        max_frame_len: 1 << 20,
+        max_blocks_per_frame: 4096,
+        max_window_size: 1 << 24,
+        max_commit_frame_len: 1 << 16,
+        max_decoded_object_len: 1 << 20,
+        max_required_features: 64,
+        ..Limits::default()
+    }
+}
+
+/// Frame walker: spans are contiguous, in bounds, and never empty.
+pub fn exercise_walker(data: &[u8]) {
+    let limits = fuzz_limits();
+    let mut expected_start = 0u64;
+    for item in Frames::new(data, 0, limits) {
+        match item {
+            Ok(span) => {
+                assert_eq!(span.offset, expected_start);
+                assert!(span.len >= 8 || span.kind == FrameKind::ZstdData);
+                assert!(span.len > 0 && span.end() <= data.len() as u64);
+                if let FrameDetail::Skippable { payload_len } = span.detail {
+                    assert_eq!(span.len, 8 + u64::from(payload_len));
+                }
+                expected_start = span.end();
+            }
+            Err(_) => break,
+        }
+    }
+    // Arbitrary start offsets must be safe too (scanners probe candidates).
+    for offset in 0..data.len().min(256) as u64 {
+        let _ = walk_frame(data, offset, &limits);
+    }
+    let _ = walk_frame(data, u64::MAX, &limits);
+}
+
+/// Footer validation at EOF and at every candidate footer frame.
+pub fn exercise_footer(data: &[u8]) {
+    let limits = fuzz_limits();
+    let _ = validate_footer_at_eof(data, &limits);
+    for item in Frames::new(data, 0, limits) {
+        match item {
+            Ok(span) if span.kind == FrameKind::CommitFooter => {
+                if let Ok(v) = validate_footer(data, span.offset, &limits) {
+                    // An accepted footer names a range fully before itself.
+                    assert!(v.fields.commit_offset + v.fields.commit_len <= v.footer_offset);
+                }
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    let _ = validate_footer(data, u64::MAX, &limits);
+}
+
+/// Features the envelope exerciser treats as known, so accepted inputs can
+/// carry some (the build itself knows none).
+const FUZZ_KNOWN_FEATURES: &[u64] = &[1, 2, 3, 1 << 40];
+
+fn exercise_binary_payload(magic: u32, payload: &[u8], limits: &Limits) {
+    let rules = EnvelopeRules {
+        kind: FrameKind::MetadataDelta,
+        schema_versions: &[0, 1, 7],
+        known_features: FUZZ_KNOWN_FEATURES,
+    };
+    let Ok(candidate) = decode_binary_record(magic, payload, &rules, limits) else {
+        return;
+    };
+    let env = candidate.unbound_envelope().clone();
+    let n = env.required_features.len();
+    assert!(n <= 64);
+    assert!(env.required_features.windows(2).all(|w| w[0] < w[1]));
+    let (bound, body) = candidate
+        .bind(&env.identity)
+        .expect("a candidate binds to its own identity");
+    assert_eq!(bound, env);
+    assert_eq!(
+        body.len() + BINARY_ENVELOPE_FIXED_LEN + 8 * n,
+        payload.len()
+    );
+    assert!(body.len() as u64 <= image_payload_budget(limits));
+    // Canonical: re-encoding what was accepted gives back the same bytes, so
+    // no byte of an accepted header is free.
+    let frame = encode_binary_record(
+        FrameKind::MetadataDelta,
+        &env,
+        body,
+        FUZZ_KNOWN_FEATURES,
+        limits,
+    )
+    .expect("the writer accepts what the reader accepted");
+    assert_eq!(&frame[8..], payload);
+}
+
+/// Binary envelopes (spec Annex B.2.2) on every skippable payload, and on
+/// the raw input itself.
+pub fn exercise_envelope(data: &[u8]) {
+    let limits = fuzz_limits();
+    if data.len() >= 4 {
+        let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        exercise_binary_payload(magic, &data[4..], &limits);
+        exercise_binary_payload(mochi_format::registry::METADATA_DELTA, data, &limits);
+    }
+    for item in Frames::new(data, 0, limits) {
+        match item {
+            Ok(span) => {
+                if let FrameDetail::Skippable { .. } = span.detail {
+                    let start = (span.offset + 8) as usize;
+                    let end = span.end() as usize;
+                    exercise_binary_payload(span.magic, &data[start..end], &limits);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+/// Object decoding (C2, spec §9.1, §9.3). The first two bytes pick the
+/// expected decoded length; the rest is the stored object. Whatever the input,
+/// decoding either fails or yields *exactly* the expected length: never a
+/// short, padded, or overlong success, and never unbounded work or memory.
+pub fn exercise_object_decode(data: &[u8]) {
+    let limits = fuzz_limits();
+    let (expected, stored) = match data {
+        [a, b, rest @ ..] => (u64::from(u16::from_le_bytes([*a, *b])), rest),
+        _ => (0, data),
+    };
+    let stored = StoredObject::from_loaded(stored.to_vec());
+    for want in [expected, expected.saturating_mul(16), 0] {
+        if let Ok(decoded) = decode_object(&stored, Protection::None, want, &limits) {
+            assert_eq!(decoded.len(), want);
+        }
+    }
+    // Also decode the raw input with no length prefix stripped, since the
+    // golden vectors used as seeds are bare frames.
+    let bare = StoredObject::from_loaded(data.to_vec());
+    for want in [0, 5, 10, 4096] {
+        if let Ok(decoded) = decode_object(&bare, Protection::None, want, &limits) {
+            assert_eq!(decoded.len(), want);
+        }
+    }
+}
+
+/// Catalog images (C3, spec §10.5, §22.1). Any input either is refused or
+/// opens to a catalog that passes full verification and replays; never a
+/// panic, never a half-open catalog.
+pub fn exercise_catalog_image(data: &[u8]) {
+    let limits = CatalogLimits {
+        max_image_len: 1 << 20,
+    };
+    if let Ok(catalog) = Catalog::open_image(data, &limits) {
+        assert!(catalog.verify().is_ok());
+        assert!(catalog.replay(None).is_ok());
+    }
+    exercise_compressed_image(data);
+}
+
+/// Payload encoding 2 (B.2.2): `data` as a Zstandard-compressed image
+/// payload, and as a whole skippable-frame payload (envelope included). A
+/// decode either fails or yields a SQLite image within the bound; no input
+/// allocates beyond it, and nothing panics.
+fn exercise_compressed_image(data: &[u8]) {
+    use mochi_format::envelope::{
+        decode_binary_record, decode_image, image_payload_budget, BinaryEnvelope, EnvelopeRules,
+        PayloadEncoding, RecordIdentity,
+    };
+    // A small reader limit keeps each execution cheap; the bound scales with it.
+    let limits = Limits {
+        max_skippable_payload: 592 + (1 << 20),
+        ..Limits::default()
+    };
+    let identity = RecordIdentity {
+        archive_id: [1; 32],
+        commit_sequence: 0,
+        transaction_id: [2; 16],
+    };
+    let envelope = BinaryEnvelope {
+        record_schema_version: 1,
+        encoding: PayloadEncoding::ZstdSqliteImage,
+        identity,
+        required_features: Vec::new(),
+    };
+    if let Ok(image) = decode_image(&envelope, data, &limits) {
+        assert!(image.len() as u64 <= image_payload_budget(&limits));
+        assert!(image.starts_with(&mochi_format::registry::SQLITE_IMAGE_SIGNATURE));
+    }
+    let rules = EnvelopeRules {
+        kind: mochi_format::registry::FrameKind::MetadataDelta,
+        schema_versions: &[1],
+        known_features: &[],
+    };
+    if let Ok(candidate) = decode_binary_record(
+        mochi_format::registry::METADATA_DELTA,
+        data,
+        &rules,
+        &limits,
+    ) {
+        if let Ok((env, payload)) = candidate.bind(&identity) {
+            if let Ok(image) = decode_image(&env, payload, &limits) {
+                assert!(image.len() as u64 <= image_payload_budget(&limits));
+            }
+        }
+    }
+}
+
+/// Canonical CBOR (C4, spec D2). Whatever the input, decoding either fails or
+/// yields a value that re-encodes to exactly the input bytes.
+pub fn exercise_cbor(data: &[u8]) {
+    let limits = CborLimits {
+        max_depth: 32,
+        max_items: 1 << 16,
+    };
+    if let Ok(v) = cbor::decode(data, &limits) {
+        assert_eq!(cbor::encode(&v).ok().as_deref(), Some(data));
+    }
+}
+
+/// The shape rules of manifest schema 1 that anything accepted must obey
+/// (`recovery-manifest-v1.cddl`): separate delta and snapshot shapes, the
+/// exact parent rule, and the D11 envelope keys.
+fn assert_manifest_v1_shape(m: &Manifest) {
+    use mochi_core::manifest::ManifestKind;
+    match m.kind {
+        ManifestKind::Delta => {
+            assert!(m.entries.is_empty(), "accepted a delta with entries");
+            assert_eq!(m.parent.is_none(), m.commit_seq == 0);
+            if let Some(p) = m.parent {
+                assert_eq!(p.seq + 1, m.commit_seq);
+            }
+            // Schema 2 (C9): operations only, provenance only at 0.
+            assert!(m.retention.is_empty(), "accepted a delta with a state");
+            assert!(m.provenance.is_none() || m.commit_seq == 0);
+            for op in &m.retention_ops {
+                if let mochi_core::retention::RetentionOp::Expire { seq } = op {
+                    assert!(*seq < m.commit_seq, "accepted a non-earlier expiry");
+                }
+            }
+        }
+        ManifestKind::Snapshot => {
+            assert!(m.parent.is_none(), "accepted a snapshot with a parent");
+            assert!(m.ops.is_empty(), "accepted a snapshot with operations");
+            assert!(m.retention_ops.is_empty(), "accepted snapshot operations");
+            assert!(m.provenance.is_none(), "accepted snapshot provenance");
+            assert!(m.retention.expired.iter().all(|s| *s < m.commit_seq));
+            assert!(m.retention.holds.values().all(|s| *s <= m.commit_seq));
+        }
+    }
+    let has_data = !m.retention_ops.is_empty() || !m.retention.is_empty() || m.provenance.is_some();
+    assert_eq!(
+        m.schema_version() == 2,
+        has_data,
+        "schema 2 exactly with its data"
+    );
+    assert!(
+        m.required_features.is_empty(),
+        "accepted an unknown feature"
+    );
+}
+
+/// Recovery manifests (C4, spec §11), both as a bare payload and as a stored
+/// frame. An accepted manifest re-encodes to exactly its input and has a
+/// valid schema-1 or schema-2 shape.
+pub fn exercise_manifest(data: &[u8]) {
+    let cbor_limits = CborLimits {
+        max_depth: 32,
+        max_items: 1 << 16,
+    };
+    if let Ok(m) = Manifest::decode(data, &fuzz_limits(), &cbor_limits) {
+        assert_manifest_v1_shape(&m);
+        assert_eq!(m.encode().ok().as_deref(), Some(data));
+    }
+    let stored = StoredObject::from_loaded(data.to_vec());
+    if let Ok((m, _)) = Manifest::from_stored(&stored, &fuzz_limits(), &cbor_limits) {
+        assert_manifest_v1_shape(&m);
+        assert_eq!(m.to_stored().ok().as_ref(), Some(&stored));
+    }
+}
+
+/// Commit records (C5, spec §12.1). An accepted record re-encodes to exactly
+/// its input, and its ID is the recomputed one.
+pub fn exercise_commit(data: &[u8]) {
+    let cbor_limits = CborLimits {
+        max_depth: 32,
+        max_items: 1 << 16,
+    };
+    if let Ok((r, id)) =
+        mochi_core::commit::CommitRecord::decode(data, &fuzz_limits(), &cbor_limits)
+    {
+        assert_commit_v1_shape(&r);
+        let (bytes, id2) = r.encode().expect("accepted record re-encodes");
+        assert_eq!(bytes, data);
+        assert_eq!(id, id2);
+    }
+    if let Ok((r, _)) =
+        mochi_core::commit::CommitRecord::from_stored(data, &fuzz_limits(), &cbor_limits)
+    {
+        assert_commit_v1_shape(&r);
+    }
+}
+
+/// The self-contained rules of commit schema 1 that anything accepted must
+/// obey (`commit-record-v1.cddl`).
+fn assert_commit_v1_shape(r: &mochi_core::commit::CommitRecord) {
+    use mochi_core::commit::Metadata;
+    assert_eq!(r.parent.is_none(), r.seq == 0);
+    if let Some(p) = r.parent {
+        assert_eq!(p.seq + 1, r.seq);
+    }
+    match r.metadata {
+        Metadata::Checkpoint { .. } => {}
+        Metadata::Delta { base } => {
+            assert!(r.seq > 0, "accepted a delta at sequence 0");
+            assert!(base.seq < r.seq);
+        }
+    }
+    assert_eq!(
+        r.descriptor.offset, 0,
+        "accepted a descriptor away from offset 0"
+    );
+    for (_, o) in r.object_refs() {
+        assert!(o.stored_len >= 8);
+    }
+    // Schema 4 (Annex B.2.19, D29): a comment exactly with the comment
+    // feature alone, and only text the comment rule allows.
+    match &r.comment {
+        Some(text) => {
+            assert_eq!(
+                r.required_features,
+                [mochi_format::registry::FEATURE_COMMENT]
+            );
+            assert!(mochi_core::commit::check_comment(text).is_ok());
+        }
+        None => assert!(!r
+            .required_features
+            .contains(&mochi_format::registry::FEATURE_COMMENT)),
+    }
+}
+
+/// Archive descriptors (spec Annex B.2 D12): anything accepted re-encodes to
+/// the same frame (canonical; no free bytes), and is accepted only at offset 0.
+pub fn exercise_descriptor(data: &[u8]) {
+    use mochi_core::descriptor::Descriptor;
+    let cbor_limits = CborLimits {
+        max_depth: 32,
+        max_items: 1 << 16,
+    };
+    let _ = Descriptor::decode(data, &fuzz_limits(), &cbor_limits);
+    if let Ok(d) = Descriptor::from_stored(data, 0, &fuzz_limits(), &cbor_limits) {
+        let again = d.to_stored().expect("accepted descriptor re-encodes");
+        assert_eq!(again.as_bytes(), data);
+        assert!(Descriptor::from_stored(data, 1, &fuzz_limits(), &cbor_limits).is_err());
+    }
+}
+
+/// What [`exercise_archive_open`] did with one input. Lets tests prove the
+/// segment assertions were reached (they run only for opened delta heads).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveOpenOutcome {
+    /// `open_head` refused the input.
+    Refused,
+    /// Opened at a checkpoint head; the segment is the head itself.
+    OpenedCheckpoint,
+    /// Opened at a delta head; the independent segment walk and every
+    /// segment assertion ran and held.
+    OpenedDelta,
+}
+
+/// Whole-archive opening (C5): head location, tail classification, and the
+/// footer → commit → manifest → catalog path over arbitrary bytes. Must
+/// return, bounded, and never accept a head whose referenced objects do not
+/// hash-verify (`open_head` checks that itself; here we only require no panic
+/// and that an opened head's commit is the one its footer names).
+///
+/// T11/T12: for anything `open_head` opens, also: the catalog head equals the footer's sequence, and the head's
+/// replay segment obeys the T11 rules. The segment is re-walked here
+/// independently of `mochi_core::segment` (footers via `mochi-format`,
+/// following the parent hints, which an opened head's segment must match
+/// exactly), and checked against the D10.6 base rule:
+///
+/// * contiguous sequences, each commit's ID equal to its child's parent ID;
+/// * the walk ends at a checkpoint *b*, every commit above *b* is a delta,
+///   and each delta's base equals the rule (the parent if it is a
+///   checkpoint, else the parent's base) by ID and sequence;
+/// * one descriptor reference across the segment;
+/// * `OpenedHead::segment` names *b* (sequence, ID, footer offset).
+pub fn exercise_archive_open(data: &[u8]) -> ArchiveOpenOutcome {
+    use mochi_core::commit::{CommitLink, CommitRecord, Metadata};
+    use mochi_format::footer::validate_footer;
+
+    let storage = crate::SimStorage::from_bytes(data.to_vec());
+    let opts = mochi_core::publish::ReadOptions {
+        limits: fuzz_limits(),
+        ..Default::default()
+    };
+    // T16: baseline recovery runs on anything with a locatable head, whether
+    // or not the head opens, and must never return a state for another commit.
+    baseline_recovery_is_sound(&storage, &opts);
+    damage_assessment_is_sound(&storage, &opts);
+    repair_plan_is_sound(&storage, &opts);
+    repair_with_copy_is_sound(&storage, data, &opts);
+    salvage_scan_is_sound(&storage, &opts);
+    deep_verify_is_sound(&storage, &opts);
+    parity_scan_is_sound(&storage, data, &opts);
+    let Ok(head) = mochi_core::publish::open_head(&storage, &opts) else {
+        return ArchiveOpenOutcome::Refused;
+    };
+    let footer_seq = head.location.footer.fields.commit_sequence;
+    assert_eq!(head.commit.seq, footer_seq);
+    assert_eq!(
+        head.catalog.head_commit().unwrap(),
+        Some(footer_seq),
+        "the catalog head equals the footer's sequence"
+    );
+    // Bound to a descriptor of the same archive at offset 0, and to a delta
+    // manifest with the commit's identity.
+    assert_eq!(head.commit.descriptor.offset, 0);
+    assert_eq!(head.descriptor.archive_id, head.commit.archive_id);
+    match (&head.manifest, &head.manifest_error) {
+        (Some(m), None) => assert_eq!(m.identity(), head.commit.identity()),
+        // Q31: only a checkpoint tolerates it, and only for stored damage.
+        (None, Some(e)) => {
+            assert!(head.commit.metadata.is_checkpoint());
+            assert!(mochi_core::publish::is_stored_damage(e));
+        }
+        _ => panic!("a head has its delta manifest or the reason it has none"),
+    }
+    // D10.9: the snapshot stands in for the image only after stored damage.
+    if let mochi_core::publish::CatalogSource::SnapshotManifest { image_error } =
+        &head.catalog_source
+    {
+        assert!(mochi_core::publish::is_stored_damage(image_error));
+    }
+    // Every referenced object lies before the commit frame.
+    for (_, o) in head.commit.object_refs() {
+        assert!(o.offset + o.stored_len <= head.location.footer.fields.commit_offset);
+    }
+
+    // Independent segment walk, head first.
+    let mut seg: Vec<(CommitRecord, CommitLink)> = vec![(
+        head.commit.clone(),
+        CommitLink {
+            commit_id: head.commit_id,
+            seq: head.commit.seq,
+            footer_offset: head.location.footer.footer_offset,
+        },
+    )];
+    while !seg.last().unwrap().0.metadata.is_checkpoint() {
+        let (child, _) = seg.last().unwrap();
+        let parent = child
+            .parent
+            .expect("an opened delta has a parent (commit 0 is a checkpoint)");
+        let f = validate_footer(data, parent.footer_offset, &opts.limits)
+            .expect("an opened head's segment parent hints are exact");
+        let start = f.fields.commit_offset as usize;
+        let end = start + f.fields.commit_len as usize;
+        let (rec, id) =
+            CommitRecord::from_stored(&data[start..end], &opts.limits, &Default::default())
+                .expect("segment commits decode");
+        assert_eq!(id, parent.commit_id, "parent ID");
+        assert_eq!(rec.seq + 1, child.seq, "contiguous sequences");
+        assert_eq!(rec.seq, parent.seq);
+        seg.push((
+            rec,
+            CommitLink {
+                commit_id: id,
+                seq: parent.seq,
+                footer_offset: parent.footer_offset,
+            },
+        ));
+    }
+    seg.reverse(); // base first
+    let base = seg[0].1;
+    for w in seg.windows(2) {
+        let ((prev, prev_link), (cur, _)) = (&w[0], &w[1]);
+        let Metadata::Delta { base: named } = cur.metadata else {
+            panic!("commit {} above the base is not a delta", cur.seq);
+        };
+        let rule = match prev.metadata {
+            Metadata::Checkpoint { .. } => *prev_link,
+            Metadata::Delta { base } => base,
+        };
+        assert_eq!(
+            (named.commit_id, named.seq),
+            (rule.commit_id, rule.seq),
+            "commit {}: base rule",
+            cur.seq
+        );
+        assert_eq!((named.commit_id, named.seq), (base.commit_id, base.seq));
+        assert_eq!(
+            cur.descriptor, prev.descriptor,
+            "one descriptor per segment"
+        );
+    }
+    assert_eq!(head.segment.base_seq, base.seq);
+    assert_eq!(head.segment.base_commit_id, base.commit_id);
+    assert_eq!(head.segment.base_footer_offset, base.footer_offset);
+    if seg.len() > 1 {
+        ArchiveOpenOutcome::OpenedDelta
+    } else {
+        ArchiveOpenOutcome::OpenedCheckpoint
+    }
+}
+
+/// D10.8: whatever baseline recovery returns for the located head is a
+/// catalog that materializes exactly that head, from a base at or below it.
+/// An error is always acceptable (untrusted input); a wrong state is not.
+fn baseline_recovery_is_sound(
+    storage: &crate::SimStorage,
+    opts: &mochi_core::publish::ReadOptions,
+) {
+    let Ok(loc) = mochi_core::publish::locate_head(storage, &opts.limits) else {
+        return;
+    };
+    if let Ok(b) =
+        mochi_core::publish::recover_baseline_at_footer(storage, loc.footer.footer_offset, opts)
+    {
+        assert_eq!(b.head_seq, loc.footer.fields.commit_sequence);
+        assert_eq!(b.catalog.head_commit().unwrap(), Some(b.head_seq));
+        assert!(b.segment.base_seq <= b.head_seq);
+    }
+}
+
+/// D10.9: the damage assessment of any history whose commit chain walks
+/// holds its own self-check. An error is acceptable (untrusted input) unless
+/// it is the assessment reporting an internal inconsistency.
+fn damage_assessment_is_sound(
+    storage: &crate::SimStorage,
+    opts: &mochi_core::publish::ReadOptions,
+) {
+    use mochi_core::job::{CancellationToken, JobContext, NullProgress};
+    if mochi_core::publish::commit_history(storage, opts).is_err() {
+        return;
+    }
+    let cancel = CancellationToken::new();
+    let ctx = JobContext {
+        progress: &NullProgress,
+        cancel: &cancel,
+    };
+    match mochi_core::damage::assess_damage(storage, opts, &ctx) {
+        Ok(r) => {
+            assert_eq!(r.commits.len() as u64, r.head_seq + 1);
+            assert_eq!(r.objects.len(), r.ranges.len());
+            descriptor_verdict_matches_open(storage, opts, &r);
+        }
+        Err(e) => assert!(
+            !e.message.starts_with("internal:"),
+            "the assessment found itself inconsistent: {e}"
+        ),
+    }
+}
+
+/// Q64: `fsck`'s deep structural verification (which recovers every replay
+/// segment from its baseline) never panics on arbitrary bytes, its report
+/// keeps the invariants, and a reference outside the baseline view is a
+/// recoverability failure that does not fail Integrity by itself.
+fn deep_verify_is_sound(storage: &crate::SimStorage, opts: &mochi_core::publish::ReadOptions) {
+    use mochi_core::job::{CancellationToken, JobContext, NullProgress};
+    use mochi_core::status::{Dimension, Status, VerificationLevel};
+    use mochi_core::verify::{verify, VerifyOptions};
+    use mochi_core::ErrorCode;
+    let cancel = CancellationToken::new();
+    let ctx = JobContext {
+        progress: &NullProgress,
+        cancel: &cancel,
+    };
+    let o = VerifyOptions {
+        level: VerificationLevel::Structural,
+        read: opts.clone(),
+        deep: true,
+        ..VerifyOptions::default()
+    };
+    let r = verify(storage, &o, &ctx).report;
+    r.validate()
+        .unwrap_or_else(|e| panic!("deep verify broke the report invariants: {e:?}"));
+    if r.findings
+        .iter()
+        .any(|f| f.code == ErrorCode::ReferenceInvalid)
+    {
+        assert_eq!(r.dimensions[&Dimension::Recoverability], Status::Fail);
+    }
+}
+
+/// C8: a repair plan of any input is internally consistent. Planning may
+/// fail only for operational reasons (here, the small fuzz limits); damage
+/// is the plan's content. Every sequence up to the head is either recovered
+/// or lost, never both; omissions name recovered snapshots only; the
+/// outcome follows from what is listed and never claims more.
+fn repair_plan_is_sound(storage: &crate::SimStorage, opts: &mochi_core::publish::ReadOptions) {
+    use mochi_core::job::{CancellationToken, JobContext, NullProgress};
+    use mochi_core::repair::{plan, Outcome};
+    use mochi_core::verify::{classify, ErrorClass};
+    let cancel = CancellationToken::new();
+    let ctx = JobContext {
+        progress: &NullProgress,
+        cancel: &cancel,
+    };
+    let p = match plan(storage, opts, &ctx) {
+        Ok(p) => p,
+        Err(e) => {
+            assert_eq!(
+                classify(e.code),
+                ErrorClass::Operational,
+                "repair planning failed on evidence instead of recording it: {e}"
+            );
+            return;
+        }
+    };
+    assert_eq!(p.exit_code, p.outcome.exit_code());
+    let recovered: Vec<u64> = p.snapshots.iter().map(|s| s.seq).collect();
+    assert!(recovered.windows(2).all(|w| w[0] < w[1]));
+    let lost: Vec<u64> = p.lost_snapshots.iter().map(|l| l.seq).collect();
+    assert!(lost.windows(2).all(|w| w[0] < w[1]));
+    match &p.head {
+        None => {
+            assert_eq!(p.outcome, Outcome::NothingRecoverable);
+            assert!(recovered.is_empty() && lost.is_empty());
+        }
+        Some(h) => {
+            let mut all: Vec<u64> = recovered.iter().chain(&lost).copied().collect();
+            all.sort_unstable();
+            assert_eq!(all, (0..=h.seq).collect::<Vec<_>>());
+            assert!(recovered.iter().all(|s| s.le(&h.seq)));
+        }
+    }
+    for o in &p.omitted {
+        assert!(!o.snapshots.is_empty());
+        assert!(o
+            .snapshots
+            .iter()
+            .all(|s| recovered.binary_search(s).is_ok()));
+    }
+    match p.outcome {
+        Outcome::NothingRecoverable => assert!(recovered.is_empty()),
+        Outcome::Complete => {
+            assert!(!recovered.is_empty() && lost.is_empty() && p.omitted.is_empty());
+            assert_eq!(p.tail.as_ref().map(|t| t.state.as_str()), Some("clean"));
+        }
+        Outcome::Partial => assert!(!recovered.is_empty()),
+    }
+}
+
+/// Ladder step 5 (Annex B.2.12 D22): planning with a copy equal to the input
+/// with one byte changed, in both directions (the input as the source and as
+/// the copy), returns, is bounded, and every donation is a whole frame that
+/// verifies against the chain: its bytes, laid over the source, validate as a
+/// footer, decode as a commit record or parity frame, or hash to the stored
+/// hash the opened head's commit or catalog records for that place. Donations
+/// are sorted, disjoint, and inside the source.
+fn repair_with_copy_is_sound(
+    storage: &crate::SimStorage,
+    data: &[u8],
+    opts: &mochi_core::publish::ReadOptions,
+) {
+    if data.is_empty() {
+        return;
+    }
+    let at = data.iter().fold(data.len(), |a, b| {
+        a.wrapping_mul(31).wrapping_add(usize::from(*b))
+    }) % data.len();
+    let mut mutated = data.to_vec();
+    mutated[at] ^= 0x5A;
+    let changed = crate::SimStorage::from_bytes(mutated.clone());
+    donations_verify(storage, data, &changed, &mutated, opts);
+    donations_verify(&changed, &mutated, storage, data, opts);
+}
+
+fn donations_verify(
+    source: &crate::SimStorage,
+    source_bytes: &[u8],
+    copy: &crate::SimStorage,
+    copy_bytes: &[u8],
+    opts: &mochi_core::publish::ReadOptions,
+) {
+    use mochi_core::commit::CommitRecord;
+    use mochi_core::copies::{CopySource, DonationKind};
+    use mochi_core::job::{CancellationToken, JobContext, NullProgress};
+    use mochi_core::repair::plan_with_copies;
+    use mochi_core::verify::{classify, ErrorClass};
+    use mochi_format::digest::stored_object_hash;
+    use mochi_format::parity::decode_frame;
+
+    let cancel = CancellationToken::new();
+    let ctx = JobContext {
+        progress: &NullProgress,
+        cancel: &cancel,
+    };
+    let copies = [CopySource {
+        label: "copy".into(),
+        storage: copy,
+    }];
+    let p = match plan_with_copies(source, &copies, opts, &ctx) {
+        Ok(p) => p,
+        Err(e) => {
+            assert_eq!(
+                classify(e.code),
+                ErrorClass::Operational,
+                "repair planning with a copy failed on evidence instead of recording it: {e}"
+            );
+            return;
+        }
+    };
+    assert_eq!(p.exit_code, p.outcome.exit_code());
+    assert_eq!(p.copies.len(), 1);
+    let mut image = source_bytes.to_vec();
+    let mut prev_end = 0u64;
+    for d in &p.donations {
+        assert_eq!(d.copy, 0);
+        assert!(d.len > 0 && d.offset >= prev_end, "sorted and disjoint");
+        prev_end = d.offset + d.len;
+        assert!(prev_end <= source_bytes.len() as u64 && prev_end <= copy_bytes.len() as u64);
+        let (lo, hi) = (d.offset as usize, prev_end as usize);
+        image[lo..hi].copy_from_slice(&copy_bytes[lo..hi]);
+    }
+    // A copy that donated nothing leaves the source as it was.
+    assert_eq!(p.donations.is_empty(), image == source_bytes);
+    if p.donations.is_empty() {
+        return;
+    }
+    let head = mochi_core::publish::open_head(&crate::SimStorage::from_bytes(image.clone()), opts);
+    let limits = &opts.limits;
+    let mut known: std::collections::BTreeMap<(u64, u64), mochi_format::digest::StoredObjectHash> =
+        Default::default();
+    if let Ok(h) = &head {
+        for (_, r) in h.commit.object_refs() {
+            known.insert((r.offset, r.stored_len), r.stored_hash);
+        }
+        for id in h.catalog.object_ids().unwrap_or_default() {
+            if let (Ok(Some(rec)), Ok(Some(at))) =
+                (h.catalog.object(&id), h.catalog.object_location(&id))
+            {
+                known.insert((at, rec.stored_len), rec.stored_hash);
+            }
+        }
+    }
+    for d in &p.donations {
+        let bytes = &image[d.offset as usize..(d.offset + d.len) as usize];
+        match d.kind {
+            DonationKind::Footer => {
+                validate_footer(&image[..], d.offset, limits).expect("a donated footer validates");
+            }
+            DonationKind::CommitRecord => {
+                CommitRecord::from_stored(bytes, limits, &Default::default())
+                    .expect("a donated commit record decodes");
+            }
+            DonationKind::ParityFrame => {
+                decode_frame(
+                    bytes,
+                    mochi_core::descriptor::KNOWN_REQUIRED_FEATURES,
+                    limits,
+                )
+                .expect("a donated parity frame decodes");
+            }
+            _ => {
+                if let Some(h) = known.get(&(d.offset, d.len)) {
+                    assert_eq!(
+                        stored_object_hash(StoredObject::from_loaded(bytes.to_vec()).view()),
+                        *h,
+                        "a donated object hashes to what the chain records"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// D12 (T18): the assessment's descriptor verdict for the head agrees with
+/// opening it. If the report says the head is unreadable because of a
+/// descriptor, opening fails; if opening fails on the descriptor, the report
+/// says the head is unreadable.
+fn descriptor_verdict_matches_open(
+    storage: &crate::SimStorage,
+    opts: &mochi_core::publish::ReadOptions,
+    r: &mochi_core::damage::DamageReport,
+) {
+    use mochi_core::damage::Readability;
+    use mochi_core::ErrorCode;
+    let Some(head) = r.commits.last() else {
+        return;
+    };
+    let opened = mochi_core::publish::open_head(storage, opts);
+    if head.readable
+        == (Readability::Unreadable {
+            code: ErrorCode::DescriptorInvalid,
+        })
+    {
+        assert!(opened.is_err(), "the report refuses a head that opens");
+    }
+    if opened
+        .as_ref()
+        .is_err_and(|e| e.code == ErrorCode::DescriptorInvalid)
+    {
+        assert!(
+            matches!(head.readable, Readability::Unreadable { .. }),
+            "opening refuses the descriptor, the report reads the head"
+        );
+    }
+}
+
+/// The TAR-compatible profile's stream parser (Annex B.2.9 D19 rule 8): on
+/// any bytes it returns, bounded, with `PROFILE_VIOLATION` or success and
+/// nothing else; the way the input is cut into frames does not change the
+/// outcome; and a stream it accepts as complete is the canonical encoding of
+/// the members it reported (so nothing the parser tolerates is free bytes).
+pub fn exercise_tar_stream(data: &[u8]) {
+    use mochi_core::tar::{encode_header, padding, Event, Member, Parser, END_BLOCKS};
+    use mochi_core::ErrorCode;
+
+    type Members = Vec<(Member, Vec<u8>)>;
+    let run = |step: usize| -> (Members, Result<(), ()>, bool) {
+        let mut parser = Parser::new(1 << 10);
+        let mut members: Members = Vec::new();
+        let mut ok = Ok(());
+        for piece in data.chunks(step.max(1)) {
+            let r = parser.feed(piece, &mut |ev| match ev {
+                Event::Member(m) => members.push((m.clone(), Vec::new())),
+                Event::Content(b) => members
+                    .last_mut()
+                    .expect("content follows a member")
+                    .1
+                    .extend_from_slice(b),
+            });
+            if let Err(e) = r {
+                assert_eq!(e.code, ErrorCode::ProfileViolation, "{e}");
+                ok = Err(());
+                break;
+            }
+        }
+        (members, ok, parser.is_complete())
+    };
+    let whole = run(data.len().max(1));
+    let step = 1 + usize::from(data.first().copied().unwrap_or(0)) % 600;
+    let cut = run(step);
+    assert_eq!(
+        whole.1, cut.1,
+        "the outcome depends on how the input was cut"
+    );
+    if whole.1.is_ok() {
+        assert_eq!(whole.0, cut.0);
+        assert_eq!(whole.2, cut.2);
+    }
+    if whole.1.is_ok() && whole.2 {
+        let mut again = Vec::new();
+        for (m, content) in &whole.0 {
+            assert_eq!(content.len() as u64, m.size);
+            again.extend(encode_header(m).expect("an accepted member encodes"));
+            again.extend_from_slice(content);
+            again.resize(again.len() + padding(m.size), 0);
+        }
+        again.extend_from_slice(&END_BLOCKS);
+        if again != data {
+            let at = again.iter().zip(data).position(|(a, b)| a != b);
+            panic!(
+                "an accepted stream is not canonical: lengths {} vs {}, first difference at {at:?}",
+                again.len(),
+                data.len()
+            );
+        }
+    }
+}
+
+/// Key envelopes (C11, spec Annex B.2.10 D20 item 1). Any input either is
+/// refused or decodes to an envelope whose cost parameters are checked against
+/// the reader's limits **before** a derivation could allocate, and which
+/// re-encodes to the bytes it came from (one encoding per envelope). An
+/// unwrap with a fixed passphrase never panics and never succeeds for random
+/// input.
+pub fn exercise_key_envelope(data: &[u8]) {
+    use mochi_core::keys::KeyEnvelope;
+    use mochi_format::secret::Passphrase;
+    let limits = fuzz_limits();
+    let stored = StoredObject::from_loaded(data.to_vec());
+    let Ok(env) = KeyEnvelope::from_stored(&stored, &limits, &CborLimits::default()) else {
+        return;
+    };
+    let again = env.to_stored().expect("a decoded envelope re-encodes");
+    assert_eq!(again.as_bytes(), data, "one encoding per envelope");
+    // The cost check refuses hostile parameters before any allocation; with a
+    // small budget, so a fuzzed envelope never makes the run slow.
+    let cheap = Limits {
+        max_kdf_memory_kib: 1024,
+        max_kdf_iterations: 2,
+        max_kdf_lanes: 2,
+        ..limits
+    };
+    let pass = Passphrase::new("fuzz passphrase").expect("a valid passphrase");
+    assert!(
+        !matches!(env.unwrap(&pass, &cheap), Ok(Some(_))),
+        "random input must not unwrap under a fixed passphrase"
+    );
+}
+
+/// Sealed objects (C11, spec Annex B.2.10 D20 item 5). Any input either is
+/// refused at the framing or header layer, or reaches the AEAD, which refuses
+/// it: random bytes never open under a fixed key for any binding. Never a
+/// panic, and no output on failure.
+pub fn exercise_sealed_object(data: &[u8]) {
+    use mochi_format::seal::{
+        open_payload, parse_sealed, sealed_frame_payload, KeyId, SealContext, SealTarget,
+    };
+    use mochi_format::secret::DataKey;
+    let limits = fuzz_limits();
+    let stored = StoredObject::from_loaded(data.to_vec());
+    let Ok(payload) = sealed_frame_payload(&stored, &limits) else {
+        // Not exactly one sealed frame; also try the bare payload.
+        let _ = parse_sealed(data);
+        return;
+    };
+    let _ = parse_sealed(payload);
+    let key = DataKey::from_bytes([7; 32]);
+    let ctx = SealContext {
+        key: &key,
+        key_id: KeyId::from_bytes([1; 16]),
+        archive_id: [2; 32],
+    };
+    for target in [
+        SealTarget::Chunk { object_id: [3; 32] },
+        SealTarget::Image {
+            sequence: 0,
+            transaction_id: [4; 16],
+        },
+        SealTarget::DeltaManifest {
+            sequence: 1,
+            transaction_id: [5; 16],
+        },
+        SealTarget::SnapshotManifest {
+            sequence: 2,
+            transaction_id: [6; 16],
+        },
+    ] {
+        assert!(
+            open_payload(&ctx, &target, payload).is_err(),
+            "a fuzzed object must not authenticate under a fixed key"
+        );
+    }
+}
+
+/// The parity scan (D21) on anything: never a panic or an `Err` other than
+/// I/O; the healed view has the file's size; with nothing rebuilt it reads
+/// the file exactly, and what was rebuilt is at most the shards it counts.
+fn parity_scan_is_sound(
+    storage: &crate::SimStorage,
+    data: &[u8],
+    opts: &mochi_core::publish::ReadOptions,
+) {
+    use mochi_core::storage::ReadStorage;
+    let job = crate::archive::Job::new();
+    let (scan, view) = mochi_core::parity::scan(storage, opts, &job.ctx())
+        .expect("a parity scan of in-memory bytes does not fail");
+    assert_eq!(view.size().unwrap(), data.len() as u64);
+    if scan.shards_rebuilt() == 0 {
+        assert!(!view.is_patched());
+    }
+    assert!(
+        view.patched_bytes()
+            <= scan
+                .shards_rebuilt()
+                .saturating_mul(mochi_format::parity::MAX_SHARD)
+    );
+}
+
+pub fn exercise_all(data: &[u8]) {
+    exercise_walker(data);
+    exercise_footer(data);
+    exercise_envelope(data);
+    exercise_object_decode(data);
+    exercise_cbor(data);
+    exercise_manifest(data);
+    exercise_commit(data);
+    exercise_descriptor(data);
+    exercise_archive_open(data);
+    exercise_tar_stream(data);
+    exercise_key_envelope(data);
+    exercise_sealed_object(data);
+    exercise_parity_frame(data);
+    exercise_salvage_scan(data);
+}
+
+/// The bounded salvage scan (ladder step 7, spec Annex B.2.13 D23) over
+/// arbitrary bytes, at the fuzz limits and again at a candidate limit so low
+/// that most inputs stop at it. See [`salvage_scan_is_sound`].
+pub fn exercise_salvage_scan(data: &[u8]) {
+    let storage = crate::SimStorage::from_bytes(data.to_vec());
+    let opts = mochi_core::publish::ReadOptions {
+        limits: fuzz_limits(),
+        ..Default::default()
+    };
+    salvage_scan_is_sound(&storage, &opts);
+}
+
+/// `repair plan --salvage` on anything: it terminates within its limits,
+/// fails only operationally (an ambiguous archive ID is one), never records
+/// evidence as an error, and every plan keeps the step-7 invariants:
+///
+/// * recovered sequences are strictly increasing and never also lost;
+/// * a snapshot labelled `salvage` whose commit record is known comes from a
+///   commit the scan confirmed and did not find contradictory (§5.1, §22.1);
+/// * a plan that used the scan, or whose scan hit its limit, is never
+///   `complete` (D23 item 9), and the exit code follows the outcome;
+/// * the scan examined no more candidates than its limit, and says so when
+///   it stopped at it;
+/// * the lists it carries are bounded.
+fn salvage_scan_is_sound(storage: &crate::SimStorage, opts: &mochi_core::publish::ReadOptions) {
+    use mochi_core::copies::Trust;
+    use mochi_core::job::{CancellationToken, JobContext, NullProgress};
+    use mochi_core::repair::{plan_with_salvage, Outcome, StepStatus};
+    use mochi_core::salvage::{SalvageOptions, MAX_LISTED};
+    use mochi_core::verify::{classify, ErrorClass};
+    let cancel = CancellationToken::new();
+    let ctx = JobContext {
+        progress: &NullProgress,
+        cancel: &cancel,
+    };
+    for limit in [opts.limits.max_salvage_candidates, 6] {
+        let mut o = opts.clone();
+        o.limits.max_salvage_candidates = limit;
+        let p = match plan_with_salvage(storage, &[], Some(&SalvageOptions::default()), &o, &ctx) {
+            Ok(p) => p,
+            Err(e) => {
+                assert_eq!(
+                    classify(e.code),
+                    ErrorClass::Operational,
+                    "salvage planning failed on evidence instead of recording it: {e}"
+                );
+                continue;
+            }
+        };
+        assert_eq!(p.exit_code, p.outcome.exit_code());
+        let recovered: Vec<u64> = p.snapshots.iter().map(|s| s.seq).collect();
+        assert!(
+            recovered.windows(2).all(|w| w[0] < w[1]),
+            "ascending, unique"
+        );
+        assert!(p
+            .lost_snapshots
+            .iter()
+            .all(|l| recovered.binary_search(&l.seq).is_err()));
+        let step7 = p
+            .ladder
+            .iter()
+            .find(|l| l.step == 7)
+            .expect("the ladder has step 7");
+        if matches!(step7.status, StepStatus::Used | StepStatus::Incomplete) {
+            assert_ne!(p.outcome, Outcome::Complete, "salvage is always partial");
+        }
+        if let Some(sv) = &p.salvage {
+            assert!(sv.candidates <= sv.candidate_limit && sv.candidate_limit == limit);
+            assert_eq!(sv.limit_reached, step7.status == StepStatus::Incomplete);
+            for list in [&sv.confirmed, &sv.unconfirmed, &sv.rejected] {
+                assert!(list.len() <= MAX_LISTED);
+            }
+            assert!(sv.contradictory.len() <= MAX_LISTED);
+            for s in p.snapshots.iter().filter(|s| s.trust == Trust::Salvage) {
+                // Its commit record is known only when a chain reached it.
+                // That commit is one the scan confirmed (or contradicted:
+                // the trusted chain keeps the commit it reached, D23 item
+                // 4), or one of the trusted head's own chain that the
+                // ordinary walk reached (the head, and below it down to the
+                // chain break), which needed only the scan's regenerated
+                // descriptor to open. Never one it left unconfirmed or
+                // rejected. (Skipped when the scan stopped at its limit or
+                // the lists were cut short.)
+                let Some(id) = s.commit_id.as_deref() else {
+                    continue;
+                };
+                if sv.limit_reached || sv.lists_truncated {
+                    continue;
+                }
+                let is_head = p.head.as_ref().is_some_and(|h| h.commit_id == id);
+                // The trusted chain is surveyed first, so a sequence it
+                // reached is never supplied by a salvaged segment.
+                let on_head_chain = p.head.as_ref().is_some_and(|h| {
+                    s.seq <= h.seq
+                        && p.chain_break
+                            .as_ref()
+                            .is_none_or(|b| s.seq >= b.first_trusted_seq)
+                });
+                let contradicted = sv
+                    .contradictory
+                    .iter()
+                    .any(|c| c.commits.iter().any(|x| x.commit_id == id));
+                assert!(
+                    sv.confirmed.iter().any(|c| c.commit_id == id)
+                        || is_head
+                        || on_head_chain
+                        || contradicted,
+                    "snapshot {} came from a commit the scan did not confirm",
+                    s.seq
+                );
+            }
+        } else {
+            assert!(!p.snapshots.iter().any(|s| s.trust == Trust::Salvage));
+        }
+    }
+}
+
+/// Parity frames and reconstruction (C12, spec Annex B.2.11 D21; R6). A
+/// frame that decodes re-encodes to the same bytes (one encoding per frame);
+/// anything else is refused, never a panic. Then input-derived group shapes
+/// and erasure patterns: up to m lost shards always rebuild exactly, and more
+/// is `BeyondCapacity` whenever a data shard is among them.
+pub fn exercise_parity_frame(data: &[u8]) {
+    use mochi_format::error::{FormatError, ParityFault};
+    use mochi_format::parity::{
+        accumulate, decode_frame, encode_frame, reconstruct, ParityFrameInfo,
+    };
+    let limits = fuzz_limits();
+    if let Ok(f) = decode_frame(data, &[1], &limits) {
+        let info = ParityFrameInfo::of(&f);
+        let hashes: Vec<[u8; 32]> = (0..f.layout.data_shards)
+            .map(|j| f.shard_hash(j).expect("the table holds k hashes"))
+            .collect();
+        let again = encode_frame(
+            &info,
+            &[1],
+            f.group,
+            f.parity_index,
+            &hashes,
+            f.shard,
+            &Limits::WRITER_DEFAULT,
+        )
+        .expect("a decoded frame re-encodes");
+        assert_eq!(again, data, "one encoding per parity frame");
+    }
+
+    let [a, b, c, d, body @ ..] = data else {
+        return;
+    };
+    let k = usize::from(*a % 8) + 1;
+    let m = usize::from(*b) % k + 1;
+    let erased = u32::from(u16::from_le_bytes([*c, *d])) & ((1u32 << (k + m)) - 1);
+    let len = (body.len() / k).clamp(1, 64);
+    let shards: Vec<Vec<u8>> = (0..k)
+        .map(|j| {
+            (0..len)
+                .map(|i| body.get(j * len + i).copied().unwrap_or(0))
+                .collect()
+        })
+        .collect();
+    let mut parity = vec![vec![0u8; len]; m];
+    for (j, s) in shards.iter().enumerate() {
+        accumulate(&mut parity, j as u64, s).expect("j < k ≤ 128");
+    }
+    let mut all: Vec<Option<Vec<u8>>> = shards
+        .iter()
+        .chain(&parity)
+        .enumerate()
+        .map(|(i, s)| (erased & (1 << i) == 0).then(|| s.clone()))
+        .collect();
+    let lost = erased.count_ones() as usize;
+    let data_lost = (0..k).any(|i| erased & (1 << i) != 0);
+    match reconstruct(k, m, &mut all, len) {
+        Ok(()) => {
+            assert!(lost <= m || !data_lost, "rebuilt beyond capacity");
+            for (i, s) in shards.iter().enumerate() {
+                assert_eq!(all[i].as_ref(), Some(s), "rebuilt shard {i} differs");
+            }
+        }
+        Err(e) => {
+            assert_eq!(e, FormatError::Parity(ParityFault::BeyondCapacity));
+            assert!(lost > m && data_lost, "refused within capacity");
+        }
+    }
+}

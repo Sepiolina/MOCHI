@@ -1,0 +1,23 @@
+[package]
+name = "mochi-testkit"
+description = "Fault-injecting storage and fixture builders for MOCHI tests."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mochi-core = { workspace = true, features = ["test-controls"] }
+mochi-format.workspace = true
+blake3.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+zstd.workspace = true
+tempfile.workspace = true
+# R3 (docs/ratification/R3-canonical-serialization-draft.md): validates the golden
+# CBOR records against docs/schemas/*.cddl. MIT; test-only, never a dependency
+# of a shipped crate. Only the CBOR validator is enabled.
+cddl = { version = "0.10.7", default-features = false, features = ["std", "cbor", "json", "additional-controls", "ast-span", "ast-comments", "ast-parent"] }

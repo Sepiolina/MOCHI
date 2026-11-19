@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Service
+# Dolphin (KDE Plasma): a right-click entry on folders. Installed to
+# /usr/share/kio/servicemenus/mochi-find.desktop. Desktops without KDE ignore it.
+MimeType=inode/directory;
+Actions=mochiFind;
+X-KDE-ServiceTypes=KonqPopupMenu/Plugin
+X-KDE-Priority=TopLevel
+
+[Desktop Action mochiFind]
+Name=Find in MOCHI archives
+Name[th]=ค้นหาในไฟล์บีบอัด MOCHI
+Name[zh_CN]=在 MOCHI 压缩文件中查找
+Icon=mochi-desktop
+Exec=mochi-desktop --find -- %F

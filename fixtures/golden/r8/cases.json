@@ -1,0 +1,1376 @@
+[
+  {
+    "class": "valid",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "Two commits; small enough to truncate at every byte.",
+    "fault_matrix_row": null,
+    "name": "core-valid-small",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§12, §24.2"
+  },
+  {
+    "class": "valid",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "Seven commits: mkdir, put, overwrite, delete, rename, an empty file, a multi-chunk file; checkpoints and deltas.",
+    "fault_matrix_row": null,
+    "name": "core-valid-history",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§10, §11, §12"
+  },
+  {
+    "class": "valid",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "Hostile names: markup, a newline, U+202E, a non-UTF-8 byte, an unpaired surrogate (WTF-8), CON, a trailing dot, a trailing space, and the case pair a/A.",
+    "fault_matrix_row": "Path traversal or naming collision",
+    "name": "core-valid-hostile-names",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§10.4, §23.3 #9"
+  },
+  {
+    "class": "valid",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A forced checkpoint between deltas, a legal hold, and expiry of four snapshots.",
+    "fault_matrix_row": "Retention expires under legal hold",
+    "name": "core-valid-retention",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§16.3, §18.3"
+  },
+  {
+    "class": "valid",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A compaction output: every snapshot kept, provenance recorded.",
+    "fault_matrix_row": null,
+    "name": "core-valid-compacted",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§18.2"
+  },
+  {
+    "class": "valid",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A GC output: only the retained roots; the held snapshot survives its expiry.",
+    "fault_matrix_row": null,
+    "name": "core-valid-gc",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§18.3"
+  },
+  {
+    "class": "valid",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A file whose content is a raw copy of the archive's own earlier state.",
+    "fault_matrix_row": null,
+    "name": "core-valid-self-containing",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§8.5, §22.1"
+  },
+  {
+    "class": "valid",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A file whose content embeds a real footer frame and frame headers: nothing inside a payload is a frame.",
+    "fault_matrix_row": "False magic inside payload",
+    "name": "core-valid-false-magic",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§8.5, §8.4"
+  },
+  {
+    "class": "valid",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "The seven-commit history under the TAR-compatible profile; each commit's stream reassembles with tarfile.",
+    "fault_matrix_row": null,
+    "name": "tar-valid-history",
+    "passphrase": null,
+    "profile": "tar",
+    "salvage": false,
+    "spec": "Annex B.2.9 D19"
+  },
+  {
+    "class": "valid",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "Hostile names in a TAR-compatible archive (pax records).",
+    "fault_matrix_row": null,
+    "name": "tar-valid-hostile-names",
+    "passphrase": null,
+    "profile": "tar",
+    "salvage": false,
+    "spec": "Annex B.2.9 D19, §10.4"
+  },
+  {
+    "class": "valid",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "The seven-commit history under the Encrypted profile, summarized with the passphrase.",
+    "fault_matrix_row": null,
+    "name": "enc-valid-history",
+    "passphrase": "r8 golden passphrase",
+    "profile": "enc",
+    "salvage": false,
+    "spec": "Annex B.2.10 D20"
+  },
+  {
+    "class": "valid",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "Hostile names in an Encrypted archive.",
+    "fault_matrix_row": null,
+    "name": "enc-valid-hostile-names",
+    "passphrase": "r8 golden passphrase",
+    "profile": "enc",
+    "salvage": false,
+    "spec": "Annex B.2.10 D20, §10.4"
+  },
+  {
+    "class": "valid",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A rewrap adds a second passphrase and removes none; either opens it.",
+    "fault_matrix_row": null,
+    "name": "enc-valid-rekeyed",
+    "passphrase": "r8 second passphrase",
+    "profile": "enc",
+    "salvage": false,
+    "spec": "Annex B.2.10 D20"
+  },
+  {
+    "class": "valid",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A re-encrypted rewrite: new data key, provenance reason re-encryption.",
+    "fault_matrix_row": null,
+    "name": "enc-valid-reencrypted",
+    "passphrase": "r8 second passphrase",
+    "profile": "enc",
+    "salvage": false,
+    "spec": "Annex B.2.10 D20 item 10"
+  },
+  {
+    "class": "valid",
+    "copies": [],
+    "expect": {
+      "repair_exit": 3,
+      "repair_outcome": "error:KEY_UNAVAILABLE",
+      "verify_exit": 2,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "The Encrypted archive verified without a passphrase: stored integrity only, everything else unknown; content fields null.",
+    "fault_matrix_row": "Primary key service unavailable",
+    "name": "enc-valid-keyless",
+    "passphrase": null,
+    "profile": "enc",
+    "salvage": false,
+    "spec": "Annex B.2.10 D20 item 9"
+  },
+  {
+    "class": "valid",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A 50 % recovery record (the base of the damage cases).",
+    "fault_matrix_row": null,
+    "name": "red-valid-50pct",
+    "passphrase": null,
+    "profile": "red",
+    "salvage": false,
+    "spec": "Annex B.2.11 D21"
+  },
+  {
+    "class": "valid",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A 5 % recovery record.",
+    "fault_matrix_row": null,
+    "name": "red-valid-5pct",
+    "passphrase": null,
+    "profile": "red",
+    "salvage": false,
+    "spec": "Annex B.2.11 D21"
+  },
+  {
+    "class": "valid",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A 100 % recovery record.",
+    "fault_matrix_row": null,
+    "name": "red-valid-100pct",
+    "passphrase": null,
+    "profile": "red",
+    "salvage": false,
+    "spec": "Annex B.2.11 D21"
+  },
+  {
+    "class": "valid",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "About 3 MiB of incompressible data: a commit with more than one parity group.",
+    "fault_matrix_row": null,
+    "name": "red-valid-multigroup",
+    "passphrase": null,
+    "profile": "red",
+    "salvage": false,
+    "spec": "Annex B.2.11 D21, R6"
+  },
+  {
+    "class": "valid",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "TAR-compatible with a 50 % recovery record.",
+    "fault_matrix_row": null,
+    "name": "tar-red-valid-history",
+    "passphrase": null,
+    "profile": "tar+red",
+    "salvage": false,
+    "spec": "Annex B.2.9, B.2.11"
+  },
+  {
+    "class": "valid",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "Encrypted with a 50 % recovery record.",
+    "fault_matrix_row": null,
+    "name": "enc-red-valid-history",
+    "passphrase": "r8 golden passphrase",
+    "profile": "enc+red",
+    "salvage": false,
+    "spec": "Annex B.2.10, B.2.11"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "One byte flipped in a chunk only the head commit uses.",
+    "fault_matrix_row": "Corrupted content object",
+    "name": "core-corrupt-chunk-head",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§9, §20"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "One byte flipped in a chunk only an older snapshot uses.",
+    "fault_matrix_row": "Corrupted content object",
+    "name": "core-corrupt-chunk-older",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§9, §20"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "Every catalog image destroyed: the catalog is rebuilt from manifests.",
+    "fault_matrix_row": "Destroyed SQLite catalogs",
+    "name": "core-corrupt-all-images",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "Annex B.2 D10.9"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A middle commit's delta manifest damaged.",
+    "fault_matrix_row": null,
+    "name": "core-corrupt-delta-manifest",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "Annex B.2 D10"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "The head footer's digest damaged: the previous commit is the head, the tail is unresolved.",
+    "fault_matrix_row": "Corrupted latest footer",
+    "name": "core-corrupt-latest-footer",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§8.4, §12.2"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 1,
+      "repair_outcome": "nothing_recoverable",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "The descriptor frame damaged.",
+    "fault_matrix_row": "Destroyed SQLite catalogs",
+    "name": "core-corrupt-descriptor",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "Annex B.2 D12"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 1,
+      "repair_outcome": "nothing_recoverable",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A middle commit frame damaged: the chain cannot be walked past it.",
+    "fault_matrix_row": null,
+    "name": "core-corrupt-middle-commit",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§8.4, §12"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A referenced manifest frame whose header declares a size beyond every limit.",
+    "fault_matrix_row": null,
+    "name": "core-corrupt-oversized-frame",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§8.5"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 1,
+      "repair_outcome": "nothing_recoverable",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A head commit whose CBOR is not canonical, with a footer that covers it.",
+    "fault_matrix_row": null,
+    "name": "core-corrupt-noncanonical-commit",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "Annex B.1 D2"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 4,
+      "repair_outcome": "error:UNSUPPORTED_FEATURE",
+      "verify_exit": 4,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A head chunk that depends on a dictionary this build cannot use.",
+    "fault_matrix_row": "Missing shared dictionary",
+    "name": "core-corrupt-dictionary-dependency",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§24.2, plan K17"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 4,
+      "repair_outcome": "error:UNSUPPORTED_FEATURE",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A head chunk that names a dictionary the catalog does not hold.",
+    "fault_matrix_row": "Missing shared dictionary",
+    "name": "core-corrupt-missing-dictionary",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§24.2, §5.2"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A head chunk whose stored hash holds but whose content hash does not.",
+    "fault_matrix_row": null,
+    "name": "core-corrupt-content-hash",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§9"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A head manifest whose path is a traversal (..).",
+    "fault_matrix_row": "Path traversal or naming collision",
+    "name": "core-corrupt-traversal-path",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§10.4, §22.1"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A forged head whose manifest reference names another commit's manifest, correctly hashed.",
+    "fault_matrix_row": null,
+    "name": "core-corrupt-snapshot-bound-elsewhere",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "Annex B.2 D11"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A head whose put has no parent directory in the snapshot.",
+    "fault_matrix_row": null,
+    "name": "core-corrupt-orphan-put",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§10.2"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A head file version that claims ten more bytes than its extents cover.",
+    "fault_matrix_row": null,
+    "name": "core-corrupt-short-extents",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§10.3"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A head put that names a file version no manifest defines.",
+    "fault_matrix_row": null,
+    "name": "core-corrupt-undefined-version",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§10.5, R4"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A head chunk that reuses an existing object ID with different content.",
+    "fault_matrix_row": null,
+    "name": "core-corrupt-reused-chunk-id",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§10.2, Annex B D10.4"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A head checkpoint whose catalog image has a zeroed page but is correctly enveloped and hashed.",
+    "fault_matrix_row": null,
+    "name": "core-corrupt-image-pages",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§10.5, R4"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "After the head, a frame header declaring a size beyond every limit and the file.",
+    "fault_matrix_row": "Oversized or malicious frame metadata",
+    "name": "core-corrupt-oversized-tail-frame",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§8.5"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A head whose manifest reference hashes correctly but names bytes that are not a frame.",
+    "fault_matrix_row": null,
+    "name": "core-corrupt-manifest-not-a-frame",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§8.5"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A head whose manifest reference names a skippable frame cut short.",
+    "fault_matrix_row": null,
+    "name": "core-corrupt-manifest-cut-short",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§8.5"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": "ba1041d18a7bd794d805b6222e1b8a7642b06e23e1ebfc10231007b5051a18d3",
+    "fault": "An older valid state of the archive substituted for the current one.",
+    "fault_matrix_row": "Older valid archive substituted",
+    "name": "core-corrupt-older-archive",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§5.7"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "Cut inside an older commit: the later commits are gone, the earlier ones still open.",
+    "fault_matrix_row": "Truncation at every byte of small fixtures",
+    "name": "core-corrupt-truncated-mid-history",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§12.2"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A head chunk flipped in a TAR-compatible archive.",
+    "fault_matrix_row": "Corrupted content object",
+    "name": "tar-corrupt-chunk-head",
+    "passphrase": null,
+    "profile": "tar",
+    "salvage": false,
+    "spec": "§9, D19"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A stream-only chunk altered and re-hashed: every hash holds, the stream no longer matches the commit.",
+    "fault_matrix_row": null,
+    "name": "tar-corrupt-stream",
+    "passphrase": null,
+    "profile": "tar",
+    "salvage": false,
+    "spec": "Annex B.2.9 D19 rule 8"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A ciphertext byte flipped in a head chunk.",
+    "fault_matrix_row": "Corrupted content object",
+    "name": "enc-corrupt-chunk-head",
+    "passphrase": "r8 golden passphrase",
+    "profile": "enc",
+    "salvage": false,
+    "spec": "Annex B.2.10 D20"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 3,
+      "repair_outcome": "error:KEY_UNAVAILABLE",
+      "verify_exit": 3,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A wrong passphrase: KEY_UNAVAILABLE, never a verification result.",
+    "fault_matrix_row": "Primary key service unavailable",
+    "name": "enc-corrupt-wrong-passphrase",
+    "passphrase": "r8 wrong passphrase",
+    "profile": "enc",
+    "salvage": false,
+    "spec": "Annex B.2.10 D20 item 9"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A head chunk sealed under another key: every hash holds, the AEAD tag does not.",
+    "fault_matrix_row": null,
+    "name": "enc-corrupt-aead-tag",
+    "passphrase": "r8 golden passphrase",
+    "profile": "enc",
+    "salvage": false,
+    "spec": "Annex B.2.10 D20"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A head commit listing its key envelopes in decreasing envelope-ID order.",
+    "fault_matrix_row": null,
+    "name": "enc-corrupt-envelopes-unordered",
+    "passphrase": "r8 golden passphrase",
+    "profile": "enc",
+    "salvage": false,
+    "spec": "Annex B.2.10 D20 item 10, R3 §7.1"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A head commit listing the same key envelope twice.",
+    "fault_matrix_row": null,
+    "name": "enc-corrupt-envelope-duplicate",
+    "passphrase": "r8 golden passphrase",
+    "profile": "enc",
+    "salvage": false,
+    "spec": "Annex B.2.10 D20 item 10, R3 §7.1"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A head commit whose data region is a sealed frame that is not a data object.",
+    "fault_matrix_row": null,
+    "name": "enc-corrupt-data-region-kind",
+    "passphrase": "r8 golden passphrase",
+    "profile": "enc",
+    "salvage": false,
+    "spec": "Annex B.2.10 D20 item 7, R3 §7.1"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "Damage within the recovery record: rebuilt in memory, bit-identically.",
+    "fault_matrix_row": null,
+    "name": "red-corrupt-within-capacity",
+    "passphrase": null,
+    "profile": "red",
+    "salvage": false,
+    "spec": "Annex B.2.11 D21"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 1,
+      "repair_outcome": "nothing_recoverable",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "One damaged shard more than the group's parity: reported, never rebuilt.",
+    "fault_matrix_row": "Damage beyond parity capacity",
+    "name": "red-corrupt-beyond-capacity",
+    "passphrase": null,
+    "profile": "red",
+    "salvage": false,
+    "spec": "Annex B.2.11 D21"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 2,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A parity frame damaged: integrity unaffected, recoverability degraded.",
+    "fault_matrix_row": null,
+    "name": "red-corrupt-parity-frame",
+    "passphrase": null,
+    "profile": "red",
+    "salvage": false,
+    "spec": "Annex B.2.11 D21"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A parity frame that verifies but disagrees with its commit.",
+    "fault_matrix_row": null,
+    "name": "red-corrupt-forged-parity",
+    "passphrase": null,
+    "profile": "red",
+    "salvage": false,
+    "spec": "Annex B.2.11 D21"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "Damage within capacity in a TAR-compatible archive.",
+    "fault_matrix_row": null,
+    "name": "tar-red-corrupt-within-capacity",
+    "passphrase": null,
+    "profile": "tar+red",
+    "salvage": false,
+    "spec": "B.2.9, B.2.11"
+  },
+  {
+    "class": "corrupt",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "Damage beyond capacity in an Encrypted archive.",
+    "fault_matrix_row": "Damage beyond parity capacity",
+    "name": "enc-red-corrupt-beyond-capacity",
+    "passphrase": "r8 golden passphrase",
+    "profile": "enc+red",
+    "salvage": false,
+    "spec": "B.2.10, B.2.11"
+  },
+  {
+    "class": "interrupted",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "Halted after the data objects: no manifest, no commit.",
+    "fault_matrix_row": "Termination at each publication stage",
+    "name": "core-interrupted-after-data",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§12.2 steps 1-2"
+  },
+  {
+    "class": "interrupted",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "Halted after the commit frame, before its footer.",
+    "fault_matrix_row": "Termination at each publication stage",
+    "name": "core-interrupted-after-commit-frame",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§12.2 steps 4-5"
+  },
+  {
+    "class": "interrupted",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A footer torn mid-write.",
+    "fault_matrix_row": "Torn, reordered, or lost writes",
+    "name": "core-interrupted-torn-footer",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§12.2 step 5"
+  },
+  {
+    "class": "interrupted",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "The second half of a referenced data object reads back as zeros under a complete footer.",
+    "fault_matrix_row": "Torn, reordered, or lost writes",
+    "name": "core-interrupted-lost-write",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§12.2 step 3"
+  },
+  {
+    "class": "interrupted",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "Halted after the commit frame of a TAR-compatible archive.",
+    "fault_matrix_row": "Termination at each publication stage",
+    "name": "tar-interrupted-after-commit-frame",
+    "passphrase": null,
+    "profile": "tar",
+    "salvage": false,
+    "spec": "§12.2"
+  },
+  {
+    "class": "interrupted",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "Halted after the sealed data objects.",
+    "fault_matrix_row": "Termination at each publication stage",
+    "name": "enc-interrupted-after-data",
+    "passphrase": "r8 golden passphrase",
+    "profile": "enc",
+    "salvage": false,
+    "spec": "§12.2, D20"
+  },
+  {
+    "class": "interrupted",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 2,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "Halted after the parity frames, before the footer.",
+    "fault_matrix_row": "Termination at each publication stage",
+    "name": "red-interrupted-after-parity",
+    "passphrase": null,
+    "profile": "red",
+    "salvage": false,
+    "spec": "§12.2, D21"
+  },
+  {
+    "class": "interrupted",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 2,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "Halted after the parity frames of a TAR-compatible archive.",
+    "fault_matrix_row": "Termination at each publication stage",
+    "name": "tar-red-interrupted-after-parity",
+    "passphrase": null,
+    "profile": "tar+red",
+    "salvage": false,
+    "spec": "§12.2, D19, D21"
+  },
+  {
+    "class": "interrupted",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 2,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "Halted after the commit frame of an Encrypted archive with a recovery record.",
+    "fault_matrix_row": "Termination at each publication stage",
+    "name": "enc-red-interrupted-after-commit-frame",
+    "passphrase": "r8 golden passphrase",
+    "profile": "enc+red",
+    "salvage": false,
+    "spec": "§12.2, D20, D21"
+  },
+  {
+    "class": "interrupted",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 0,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A compaction output cut off before its last footer; the source is untouched.",
+    "fault_matrix_row": "Compaction interrupted",
+    "name": "core-interrupted-compaction",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "§18.2"
+  },
+  {
+    "class": "copy",
+    "copies": [
+      "copy-damaged-chunk.copy1.mochi"
+    ],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A damaged chunk with an intact copy: the copy donates it.",
+    "fault_matrix_row": null,
+    "name": "copy-damaged-chunk",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "Annex B.2.12 D22"
+  },
+  {
+    "class": "copy",
+    "copies": [
+      "copy-head-destroyed.copy1.mochi"
+    ],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "The head's commit frame and footer destroyed; the copy confirms the commit.",
+    "fault_matrix_row": null,
+    "name": "copy-head-destroyed",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "Annex B.2.12 D22"
+  },
+  {
+    "class": "copy",
+    "copies": [
+      "copy-diverged.copy1.mochi"
+    ],
+    "expect": {
+      "repair_exit": 0,
+      "repair_outcome": "complete",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A copy that diverged after commit 2: donations only below the divergence.",
+    "fault_matrix_row": null,
+    "name": "copy-diverged",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "Annex B.2.12 D22"
+  },
+  {
+    "class": "salvage",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "Every footer destroyed: the scan confirms commits by parent links and the repair is partial.",
+    "fault_matrix_row": null,
+    "name": "salvage-destroyed-footers",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": true,
+    "spec": "Annex B.2.13 D23"
+  },
+  {
+    "class": "salvage",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "The descriptor destroyed: re-encoded from the hash the commits record.",
+    "fault_matrix_row": null,
+    "name": "salvage-destroyed-descriptor",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": true,
+    "spec": "Annex B.2.13 D23"
+  },
+  {
+    "class": "salvage",
+    "copies": [],
+    "expect": {
+      "repair_exit": 2,
+      "repair_outcome": "partial",
+      "verify_exit": 1,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A byte copy of an earlier state stored after a damaged head: the archive inside the archive is not scanned as the archive.",
+    "fault_matrix_row": null,
+    "name": "salvage-archive-inside",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": true,
+    "spec": "Annex B.2.13 D23"
+  },
+  {
+    "class": "legacy",
+    "copies": [],
+    "expect": {
+      "repair_exit": 1,
+      "repair_outcome": "nothing_recoverable",
+      "verify_exit": 4,
+      "verify_level": "restoration"
+    },
+    "expected_head": null,
+    "fault": "A draft-1 archive (pre-freeze): refused, UNSUPPORTED_FEATURE.",
+    "fault_matrix_row": null,
+    "name": "legacy-draft-1",
+    "passphrase": null,
+    "profile": "core",
+    "salvage": false,
+    "spec": "Annex B.2 D24, plan W15"
+  }
+]

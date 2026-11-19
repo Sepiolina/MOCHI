@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+node_modules/
+dist/
+draft_docs/
+# Signing keys and secrets never live in the repo (plan D7).
+*.key
+*.pem
+__pycache__/
+*.pyc
+/apps/mochi-desktop/src-tauri/binaries/

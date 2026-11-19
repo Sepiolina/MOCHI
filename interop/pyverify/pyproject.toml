@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mochi-verify"
+version = "0.1.0"
+description = "Independent read-only verifier for the MOCHI archive format (written from the specification alone)"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = ["blake3", "zstandard", "PyNaCl", "argon2-cffi"]
+
+[tool.setuptools]
+packages = ["mochi_verify"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

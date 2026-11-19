@@ -1,0 +1,23 @@
+{
+  "archive_id": null,
+  "case": "core-corrupt-manifest-not-a-frame",
+  "commits": [],
+  "findings": [
+    {
+      "code": "MALFORMED_FRAME",
+      "object": null
+    }
+  ],
+  "format": "mochi-interop-summary-v1",
+  "head": {
+    "code": "MALFORMED_FRAME",
+    "status": "refused"
+  },
+  "parity": null,
+  "profile": {
+    "encrypted": false,
+    "recovery_percent": null,
+    "tar_compatible": false
+  },
+  "snapshots": []
+}

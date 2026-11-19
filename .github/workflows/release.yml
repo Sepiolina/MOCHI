@@ -1,0 +1,239 @@
+name: release
+
+# Plan D7, T13. Builds both installers, signs the updater artifacts with the owner's
+# minisign key (GitHub Actions secrets TAURI_SIGNING_PRIVATE_KEY and
+# TAURI_SIGNING_PRIVATE_KEY_PASSWORD), writes latest.json, and creates a DRAFT GitHub
+# Release for the owner to review and publish by hand. Windows installers are not
+# Authenticode-signed (owner decision 2026-10-14). See docs/dev/packaging.md "Releasing".
+#
+# This workflow never publishes a release and never pushes a tag: `gh release create
+# --draft` only. (ci/check-invariants.sh rule 11 checks that.) Runs on a pushed tag `v*`
+# (the owner pushes it) and on manual dispatch (the tag of the draft is then v<version>
+# from tauri.conf.json, and it is created only when the owner publishes the draft).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  preflight:
+    name: preflight
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # The version step reads Cargo.toml with tomllib (3.11+); 22.04's system Python is 3.10.
+          python-version: "3.12"
+      - name: Require the updater signing secrets
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          missing=""
+          [ -n "$KEY" ] || missing="$missing TAURI_SIGNING_PRIVATE_KEY"
+          [ -n "$PASSWORD" ] || missing="$missing TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::error title=Updater signing secrets are missing::Add the repository secret(s):$missing (Settings > Secrets and variables > Actions). Nothing was built. See docs/dev/packaging.md, section Releasing."
+            exit 1
+          fi
+      - name: Work out the version and tag
+        id: v
+        run: |
+          python3 -I - <<'PY'
+          import json, os, re, sys, tomllib
+          conf = json.load(open("apps/mochi-desktop/src-tauri/tauri.conf.json"))["version"]
+          work = tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"]
+          def fail(msg):
+              print(f"::error title=Release version::{msg}")
+              sys.exit(1)
+          if conf != work:
+              fail(f"tauri.conf.json says {conf} but the workspace says {work}; they must match")
+          if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?", conf):
+              fail(f"{conf!r} is not a semantic version")
+          if os.environ["GITHUB_REF_TYPE"] == "tag":
+              tag = os.environ["GITHUB_REF_NAME"]
+              if tag != f"v{conf}":
+                  fail(f"the tag {tag} does not match the app version v{conf}; tag the commit that carries the version")
+          else:
+              tag = f"v{conf}"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"version={conf}\ntag={tag}\n")
+          print(f"releasing {conf} as {tag}")
+          PY
+
+  build:
+    name: build (${{ matrix.os }})
+    needs: preflight
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            bundle: deb
+          - os: windows-latest
+            bundle: nsis
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.os }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Enable pnpm (corepack, the version in package.json)
+        run: corepack enable
+      - name: Desktop app build dependencies (Ubuntu 22.04; webkit2gtk 4.1, plan O11)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev
+      - name: Install cargo-about and the Tauri CLI (pinned)
+        run: |
+          cargo install cargo-about --version 0.9.2 --locked --features cli
+          cargo install tauri-cli --version 2.12.2 --locked
+      - name: Build the installer with updater artifacts (license list, UI, bundle, .sig)
+        shell: bash
+        env:
+          MOCHI_UPDATER_ARTIFACTS: "1"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: packaging/build-installer.sh ${{ matrix.bundle }}
+      - name: Check that each installer has a signature naming this version
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(target/release/bundle/${{ matrix.bundle }}/*.deb target/release/bundle/${{ matrix.bundle }}/*-setup.exe)
+          [ "${#files[@]}" = 1 ] || { echo "::error::expected exactly one installer, found ${#files[@]}"; exit 1; }
+          python3 -I packaging/latest_json.py check --version "${{ needs.preflight.outputs.version }}" "${files[@]}"
+      - name: Smoke check the .deb (metadata, dependency, contents, install, ldd, remove)
+        if: matrix.bundle == 'deb'
+        run: |
+          deb=$(ls target/release/bundle/deb/*.deb)
+          packaging/smoke-deb.sh --install "$deb"
+      - name: Smoke check the installer (silent per-user install, uninstall)
+        if: matrix.bundle == 'nsis'
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem target\release\bundle\nsis\*-setup.exe).FullName
+          packaging\smoke-nsis.ps1 -Setup $setup
+      - name: Collect the installer, its signature and the license list
+        shell: bash
+        run: |
+          mkdir -p target/release-out
+          cp target/release/bundle/${{ matrix.bundle }}/*.deb target/release/bundle/${{ matrix.bundle }}/*.deb.sig \
+             target/release/bundle/${{ matrix.bundle }}/*-setup.exe target/release/bundle/${{ matrix.bundle }}/*-setup.exe.sig \
+             target/release-out/ 2>/dev/null || true
+          cp target/packaging/THIRD-PARTY-LICENSES.txt target/release-out/
+          ls -l target/release-out
+          [ "$(ls target/release-out | wc -l)" = 3 ]
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.bundle }}
+          path: target/release-out/*
+          if-no-files-found: error
+
+  deb-on-24:
+    # The 22.04-built .deb must also install on the current LTS (O11).
+    name: smoke (ubuntu-24.04)
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-deb
+          path: installer
+      - name: Smoke check the .deb on 24.04
+        run: packaging/smoke-deb.sh --install "$(ls installer/*.deb)"
+
+  draft:
+    name: draft release
+    needs: [preflight, build, deb-on-24]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # Same Python as the build jobs for packaging/latest_json.py (22.04's system one is 3.10).
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-deb
+          path: assets-deb
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-nsis
+          path: assets-nsis
+      - name: Assemble the assets and latest.json
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+          cp assets-deb/*.deb assets-deb/*.deb.sig assets-nsis/*-setup.exe assets-nsis/*-setup.exe.sig assets/
+          cp assets-deb/THIRD-PARTY-LICENSES.txt assets/
+          # The release notes the app shows are plain text. docs/release-notes/v<version>.txt
+          # is used when it exists; otherwise a short generic text.
+          if [ -f "docs/release-notes/$TAG.txt" ]; then
+            cp "docs/release-notes/$TAG.txt" notes.txt
+          else
+            printf 'MOCHI %s (1.0 ratified format; an archive is not a backup).\nSee the release page for details.\n' "$VERSION" > notes.txt
+          fi
+          python3 -I packaging/latest_json.py make --version "$VERSION" --tag "$TAG" \
+            --repo "$GITHUB_REPOSITORY" --notes notes.txt --out assets/latest.json \
+            --nsis "$(ls assets/*-setup.exe)" --deb "$(ls assets/*.deb)"
+          cat assets/latest.json
+          ls -l assets
+      - name: Create the DRAFT release (never published here, no tag pushed)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error title=Release exists::A release for $TAG already exists. Delete the draft (or choose a new version) and run again."
+            exit 1
+          fi
+          cat > body.md <<EOF
+          MOCHI $VERSION. Ratified 1.0 format; archives from pre-1.0 builds are converted with \`mochi migrate\`. An archive is not a backup.
+
+          **The installers are not code-signed.** Windows SmartScreen shows "unknown publisher": choose More info, then Run anyway. The in-app updater authenticates updates with its own signature (the .sig files), which the app checks before it installs anything.
+
+          - Windows 10 22H2 / 11 (x86-64): the \`*-setup.exe\` installer (per user).
+          - Ubuntu 22.04 / 24.04 (x86-64): the \`.deb\` (\`sudo apt install ./mochi_*.deb\`).
+          - \`latest.json\` is what the in-app updater reads once this release is published.
+          - \`THIRD-PARTY-LICENSES.txt\` lists the licenses of what is inside.
+          EOF
+          # --draft: not published, no tag created. An existing tag (a pushed v* tag) is only verified.
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            gh release create "$TAG" --draft --verify-tag --title "MOCHI $VERSION" --notes-file body.md assets/*
+          else
+            gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "MOCHI $VERSION" --notes-file body.md assets/*
+          fi
+          echo "A draft release for $TAG was created. Review it, then publish it from the Releases page." >> "$GITHUB_STEP_SUMMARY"

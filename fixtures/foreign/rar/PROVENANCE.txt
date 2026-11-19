@@ -1,0 +1,18 @@
+Base RAR archives: copied unchanged from the data/ directory of the `unrar`
+crate 0.5.8 (https://github.com/muja/unrar.rs, MIT OR Apache-2.0), which holds
+real archives written by RARLAB's rar. They are test inputs only; MOCHI never
+writes RAR.
+
+  version.rar                 RAR 4, one file (VERSION), CRC32
+  solid.rar                   RAR 5, solid, one file (.gitignore), CRC32
+  unicode.rar                 RAR 5, a non-ASCII file name
+  crypted.rar                 RAR 4, file data encrypted (AES-128); password: unrar
+  comment-hpw-password.rar    RAR 5, names and data encrypted (AES-256); password: password
+  archive.part1.rar           RAR 4 volume 1 of a set whose volume 2 is not present
+  100M.part00002.rar          RAR volume 2: not the first volume of its set
+  recovery-record.rar, locked.rar   RAR 5 with a recovery record / locked flag
+
+Files named crc_corrupt, truncated, bad_header, rar5_* are made from these by
+fixtures/foreign/gen_rar_mutations.py (flip or cut bytes; nothing else).
+No RAR 5 archive with a BLAKE2sp hash is available (it needs a RAR writer);
+that path is not covered by a fixture.

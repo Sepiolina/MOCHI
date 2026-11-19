@@ -1,0 +1,75 @@
+import type { Catalogue } from "../types";
+import type { foreign as enForeign } from "../en/foreign";
+// Foreign archive formats (plan D8 rule 6, spec §23.3). Nothing here uses
+// MOCHI's verification vocabulary or health dimensions.
+export const foreign = {
+  "foreign.heading": "ไฟล์บีบอัดรูปแบบอื่น (อ่านอย่างเดียว)",
+  "foreign.readOnly": " (อ่านอย่างเดียว)",
+  "foreign.partialBadge": "บางส่วน",
+  "foreign.detailNote": "หมายเหตุ",
+  "foreign.streamCheckLabel": "การตรวจทั้งสตรีม",
+  "foreign.stoppedEarlyLabel": "หยุดก่อนครบ",
+  "foreign.close": "ปิด",
+  "foreign.testNote":
+    "อ่านทุกรายการและทำการตรวจที่รูปแบบนี้มี ไม่ได้ตรวจสอบไฟล์บีบอัดแบบที่ MOCHI ตรวจไฟล์ของตัวเอง และผลที่นี่ไม่ได้บอกอะไรเกี่ยวกับความสามารถในการกู้คืน ความใหม่ หรือระยะเวลาเก็บ",
+  "foreign.extractNote":
+    "จะไม่เขียนทับและไม่เปลี่ยนชื่อใด จะไม่สร้างลิงก์ อุปกรณ์ เส้นทางสัมบูรณ์ และชื่อที่มี .. ไฟล์แต่ละไฟล์จะถูกเก็บไว้ก็ต่อเมื่อผ่านการตรวจของรูปแบบนั้นเอง (ถ้ามี)",
+  "foreign.weakNote":
+    "บางรายการใช้ ZipCrypto ซึ่งเป็นการเข้ารหัสแบบอ่อนที่การโจมตีแบบ known-plaintext เจาะได้",
+  "foreign.testHeadline": "อ่าน {entries} ของไฟล์บีบอัด {format}: {problems}",
+  "foreign.testHeadlineEarly":
+    "อ่าน {entries} ของไฟล์บีบอัด {format}: {problems} การอ่านหยุดก่อนครบ ผลนี้จึงครอบคลุมเพียงบางส่วนของไฟล์บีบอัด",
+  "foreign.cancelled": "ยกเลิกแล้ว การทำงานหยุดก่อนเสร็จ",
+  "foreign.cancelledNote":
+    "ไฟล์ที่แตกก่อนที่คุณยกเลิกยังอยู่ในโฟลเดอร์ และแต่ละไฟล์สมบูรณ์ ไฟล์ที่กำลังเขียนถูกทิ้ง",
+  "foreign.failedNote": "ไม่ได้เขียนอะไร เว้นแต่ข้อความจะระบุไว้เป็นอย่างอื่น",
+  "foreign.extracted": "แตก {files} ({size}) และ {folders} ไปที่ {dest} แล้ว",
+  "foreign.extractedSkippedOne":
+    "แตก {files} ({size}) และ {folders} ไปที่ {dest} แล้ว {n} รายการยังไม่ได้แตก",
+  "foreign.extractedSkippedMany":
+    "แตก {files} ({size}) และ {folders} ไปที่ {dest} แล้ว {n} รายการยังไม่ได้แตก",
+  "foreign.progressReading": "กำลังอ่าน: {completed} จาก {total} รายการ",
+  "foreign.progressReadingNoTotal": "กำลังอ่าน: {completed} รายการ",
+  "foreign.progressExtracting": "กำลังแตกไฟล์: {completed} จาก {total} รายการ",
+  "foreign.progressExtractingNoTotal": "กำลังแตกไฟล์: {completed} รายการ",
+  "foreign.kindFolder": "โฟลเดอร์",
+  "foreign.kindFile": "ไฟล์",
+  "foreign.kindLink": "ลิงก์",
+  "foreign.kindSpecial": "ไฟล์พิเศษ",
+  "foreign.openFailed": "เปิดไฟล์บีบอัดไม่สำเร็จ",
+  "foreign.listFailed": "แสดงรายการไม่สำเร็จ",
+  "foreign.startFailed": "เริ่มไม่สำเร็จ",
+  "foreign.folderFailed": "ตรวจโฟลเดอร์ไม่สำเร็จ",
+  "foreign.wrongPassword": "รหัสผ่านนี้เปิดไฟล์บีบอัดไม่ได้ ลองอีกครั้ง",
+  "foreign.needPassword":
+    "ชื่อรายการในไฟล์บีบอัดนี้ถูกเข้ารหัส ต้องใช้รหัสผ่านก่อนจึงจะแสดงรายการได้",
+  "foreign.passwordGroup": "รหัสผ่าน",
+  "foreign.password": "รหัสผ่าน",
+  "foreign.passwordSubmit": "เปิด",
+  "foreign.meta": "ไฟล์บีบอัด {format} (รูปแบบอื่น)",
+  "foreign.openedWithPassword": "เปิดด้วยรหัสผ่าน",
+  "foreign.partial": "แสดงรายการได้บางส่วน: {reason} รายการหลังจุดนั้นจะไม่แสดง",
+  "foreign.partialDefault": "การแสดงรายการหยุดก่อนครบ",
+  "foreign.limitNotes": "ถึงขีดจำกัดขณะแสดงรายการ",
+  "foreign.testToolbar": "ทดสอบ",
+  "foreign.extractAllTip": "แตกไฟล์ทั้งหมดในไฟล์บีบอัดนี้",
+  "foreign.info": "เกี่ยวกับไฟล์บีบอัดนี้",
+  "foreign.planGroup": "แตกไฟล์ไปที่",
+  "foreign.planHeading": "แตกไฟล์",
+  "foreign.folder": "โฟลเดอร์",
+  "foreign.what2": "สิ่งที่จะแตก",
+  "foreign.everything": "ทั้งหมดในไฟล์บีบอัด",
+  "foreign.itemsOne": "{n} รายการ",
+  "foreign.itemsMany": "{n} รายการ",
+  "foreign.skippedKindsOne": "{n} รายการเป็นลิงก์หรือไฟล์พิเศษ และจะถูกข้าม",
+  "foreign.skippedKindsMany": "{n} รายการเป็นลิงก์หรือไฟล์พิเศษ และจะถูกข้าม",
+  "foreign.whatChecked": "สิ่งที่ตรวจ",
+  "foreign.checkCount": "{count} × {what}",
+  "foreign.problems": "รายการที่มีปัญหา",
+  "foreign.notExtractedList": "รายการที่ยังไม่ได้แตก",
+  "foreign.currentFolder": "โฟลเดอร์ปัจจุบัน",
+  "foreign.folderContents": "เนื้อหาโฟลเดอร์",
+  "foreign.detailKind": "ชนิด",
+  "foreign.detailSize": "ขนาดที่ประกาศไว้",
+  "foreign.detailEncryption": "การเข้ารหัส",
+} satisfies Catalogue<typeof enForeign>;

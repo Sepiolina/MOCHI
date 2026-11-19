@@ -1,0 +1,76 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "MOCHI",
+  "version": "0.9.21",
+  "identifier": "io.github.immerh8.mochi",
+  "build": {
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../ui/dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost ws://localhost:5173; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "freezePrototype": true,
+      "capabilities": [
+        "main",
+        "quick"
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "deb"],
+    "category": "Utility",
+    "shortDescription": "Archiver for the MOCHI archive format",
+    "longDescription": "MOCHI creates, browses, tests, and repairs .mochi archives. An archive is not a backup.",
+    "publisher": "The MOCHI Project contributors",
+    "copyright": "Copyright (c) 2026 The MOCHI Project contributors",
+    "license": "MIT",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      {
+        "ext": ["mochi"],
+        "name": "MOCHI.Archive",
+        "description": "MOCHI archive",
+        "mimeType": "application/x-mochi",
+        "role": "Editor"
+      }
+    ],
+    "windows": {
+      "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "../../../packaging/nsis/hooks.nsh"
+      }
+    },
+    "linux": {
+      "deb": {
+        "section": "utils",
+        "desktopTemplate": "../../../packaging/linux/mochi.desktop",
+        "files": {
+          "/usr/share/mime/packages/mochi.xml": "../../../packaging/linux/mochi-mime.xml",
+          "/usr/share/applications/mochi-find.desktop": "../../../packaging/linux/mochi-find.desktop",
+          "/usr/share/kio/servicemenus/mochi-find.desktop": "../../../packaging/linux/mochi-find-servicemenu.desktop",
+          "/usr/share/nemo/actions/mochi-find.nemo_action": "../../../packaging/linux/mochi-find.nemo_action",
+          "/usr/share/nautilus-python/extensions/mochi_find.py": "../../../packaging/linux/mochi-find-nautilus.py"
+        }
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc5QTJEQkZBODQwNzI1RjUKUldUMUpRZUUrdHVpZWNaMG5FVDN4T09PSkVhMnMycEUwK2czMnNzYnU1OTkvNEZ1S3VSdTBkQVYK",
+      "endpoints": ["https://github.com/immerh8/MOCHI/releases/latest/download/latest.json"],
+      "requireSignedVersion": true,
+      "windows": { "installMode": "passive" }
+    }
+  }
+}

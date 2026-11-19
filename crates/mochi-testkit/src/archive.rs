@@ -1,0 +1,333 @@
+//! C5 helpers: a scripted multi-commit history with an independent model of
+//! the expected state after each commit, and a reader that reconstructs every
+//! file of an opened commit and checks its file-content hash.
+//!
+//! The model is plain maps, built without the catalog, so a test comparing
+//! "what the archive says" against it is not comparing the code with itself.
+
+use std::collections::BTreeMap;
+
+use mochi_core::catalog::extent::ExtentSource;
+use mochi_core::catalog::namespace::EntryKind;
+use mochi_core::catalog::path::ArchivePath;
+use mochi_core::job::{CancellationToken, JobContext, NullProgress};
+use mochi_core::manifest::{Attributes, Mtime, PosixAttributes};
+use mochi_core::object::{decode_verified, load_stored};
+use mochi_core::publish::{
+    ArchiveWriter, CommitOutcome, Dedup, OpenedHead, ReadOptions, Transaction, WriterOptions,
+};
+use mochi_core::storage::{ReadStorage, Storage};
+use mochi_core::{ErrorCode, MochiError, Result};
+use mochi_format::digest::file_content_hash;
+use mochi_format::repr::DecodedSlice;
+
+use crate::{deterministic_bytes, SeqIds};
+
+/// One entry of an expected snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Content {
+    Dir,
+    File(Vec<u8>),
+}
+
+/// Path (stored form) → content.
+pub type State = BTreeMap<Vec<u8>, Content>;
+
+/// A progress sink and cancellation token for tests.
+#[derive(Default)]
+pub struct Job {
+    pub progress: NullProgress,
+    pub cancel: CancellationToken,
+}
+
+impl Job {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn ctx(&self) -> JobContext<'_> {
+        JobContext {
+            progress: &self.progress,
+            cancel: &self.cancel,
+        }
+    }
+}
+
+pub fn path(s: &str) -> ArchivePath {
+    ArchivePath::from_stored(s.as_bytes()).expect("valid test path")
+}
+
+/// Deterministic writer options: small chunks so files span several
+/// objects, and no wall-clock time.
+pub fn test_options() -> WriterOptions {
+    WriterOptions {
+        read: ReadOptions::default(),
+        chunk_size: Some(64),
+        zstd_level: Some(3),
+        record_time: false,
+        profile: None,
+        checkpoint_trigger: None,
+        dedup: Dedup::default(),
+        kdf: None,
+        threads: None,
+    }
+}
+
+/// A cheap Argon2id cost for tests (the key-derivation limits and the
+/// production defaults are tested separately): 64 KiB, 2 passes, 1 lane.
+pub const TEST_KDF: mochi_format::kdf::KdfParams = mochi_format::kdf::KdfParams {
+    memory_kib: 64,
+    iterations: 2,
+    lanes: 1,
+};
+
+/// Reader options holding a fresh key session over `passphrases`, as one
+/// process would: nothing is derived until something needs the key.
+pub fn keyed_read(passphrases: &[&str]) -> ReadOptions {
+    let keys = passphrases
+        .iter()
+        .map(|p| mochi_format::secret::Passphrase::new(p).expect("valid test passphrase"))
+        .collect();
+    ReadOptions {
+        keys: Some(mochi_core::keys::KeySession::new(keys).expect("a passphrase")),
+        ..ReadOptions::default()
+    }
+}
+
+/// Writer options for an Encrypted-profile archive (Annex B.2.10 D20) that
+/// the given passphrases open, with the test chunk size and a cheap KDF.
+pub fn encrypted_options(passphrases: &[&str]) -> WriterOptions {
+    WriterOptions {
+        read: keyed_read(passphrases),
+        profile: Some(mochi_core::descriptor::Profile {
+            tar_compatible: false,
+            encrypted: true,
+            redundancy: None,
+        }),
+        kdf: Some(TEST_KDF),
+        ..test_options()
+    }
+}
+
+fn attrs(mode: u32) -> Attributes {
+    Attributes {
+        posix: Some(PosixAttributes {
+            mode,
+            uid: 1000,
+            gid: 1000,
+        }),
+        windows: None,
+        mtime: Some(Mtime {
+            secs: 1_700_000_000,
+            nanos: 0,
+        }),
+    }
+}
+
+/// One scripted commit and the state it must produce.
+#[derive(Debug, Clone)]
+pub struct Step {
+    pub tx: Transaction,
+    pub after: State,
+}
+
+/// A three-commit history exercising files spanning several chunks, an empty
+/// file, replacement, rename into a directory, deletion, and a hostile name
+/// (spec §23.3 #9 fixtures must include one).
+pub fn scripted_history() -> Vec<Step> {
+    let mut steps = Vec::new();
+    let mut state = State::new();
+    let put = |state: &mut State, tx: &mut Transaction, p: &str, c: Option<Vec<u8>>| match c {
+        None => {
+            tx.put_dir(path(p), attrs(0o755));
+            state.insert(p.as_bytes().to_vec(), Content::Dir);
+        }
+        Some(bytes) => {
+            tx.put_file(path(p), bytes.clone(), attrs(0o644));
+            state.insert(p.as_bytes().to_vec(), Content::File(bytes));
+        }
+    };
+
+    // Commit 0.
+    let mut tx = Transaction::new();
+    tx.at(Mtime {
+        secs: 1_700_000_000,
+        nanos: 0,
+    });
+    put(&mut state, &mut tx, "docs", None);
+    put(
+        &mut state,
+        &mut tx,
+        "docs/a.txt",
+        Some(deterministic_bytes(1, 200)),
+    );
+    put(&mut state, &mut tx, "empty", Some(Vec::new()));
+    put(
+        &mut state,
+        &mut tx,
+        "<img src=x onerror=alert(1)>",
+        Some(b"hostile name, plain content".to_vec()),
+    );
+    steps.push(Step {
+        tx,
+        after: state.clone(),
+    });
+
+    // Commit 1: replace, add, rename.
+    let mut tx = Transaction::new();
+    tx.at(Mtime {
+        secs: 1_700_000_100,
+        nanos: 5,
+    });
+    put(
+        &mut state,
+        &mut tx,
+        "docs/a.txt",
+        Some(deterministic_bytes(2, 130)),
+    );
+    put(&mut state, &mut tx, "docs/c.bin", Some(vec![0u8; 300]));
+    tx.rename(path("empty"), path("docs/empty"));
+    let moved = state.remove(b"empty".as_slice()).expect("empty exists");
+    state.insert(b"docs/empty".to_vec(), moved);
+    steps.push(Step {
+        tx,
+        after: state.clone(),
+    });
+
+    // Commit 2: delete, and a larger multi-chunk file.
+    let mut tx = Transaction::new();
+    tx.at(Mtime {
+        secs: 1_700_000_200,
+        nanos: 0,
+    });
+    tx.delete(path("docs/c.bin"));
+    state.remove(b"docs/c.bin".as_slice());
+    put(
+        &mut state,
+        &mut tx,
+        "big",
+        Some(deterministic_bytes(3, 1000)),
+    );
+    steps.push(Step {
+        tx,
+        after: state.clone(),
+    });
+    steps
+}
+
+/// [`scripted_history`] with one incompressible file of `pad` bytes added to
+/// every commit (`pad-0`, `pad-1`, ...). The catalog image is compressed
+/// (B.2.2 encoding 2), so a commit's byte range is much smaller than its
+/// uncompressed image; tests whose geometry depends on that range (the
+/// Redundancy profile's shard layout, C12) use this to keep several shards.
+pub fn padded_history(pad: usize) -> Vec<Step> {
+    let mut steps = scripted_history();
+    let mut pads: State = State::new();
+    for (i, step) in steps.iter_mut().enumerate() {
+        let name = format!("pad-{i}");
+        let bytes = deterministic_bytes(1000 + i as u64, pad);
+        step.tx.put_file(path(&name), bytes.clone(), attrs(0o644));
+        pads.insert(name.into_bytes(), Content::File(bytes));
+        // Pad files persist: the expected state holds every one so far.
+        step.after.extend(pads.clone());
+    }
+    steps
+}
+
+/// Create an archive in `storage` and commit `steps` in order, every commit
+/// a checkpoint: the C5 full-checkpoint writer that the C5 publication tests
+/// and the replay oracle are written against. The production trigger (T14)
+/// is exercised by `t14_trigger.rs`.
+pub fn build<S: Storage>(storage: S, seed: u64, steps: &[Step]) -> Result<Vec<CommitOutcome>> {
+    let mut w = ArchiveWriter::create(storage, Box::new(SeqIds::new(seed)), test_options())?;
+    w.set_checkpoint_policy(mochi_core::publish::CheckpointPolicy::EveryCommit)?;
+    let job = Job::new();
+    let mut out = Vec::new();
+    for s in steps {
+        out.push(w.commit(s.tx.clone(), &job.ctx())?);
+    }
+    w.close()?;
+    Ok(out)
+}
+
+/// Every file and directory of an opened commit, with each file rebuilt
+/// from its chunks (stored and content integrity checked per chunk) and its
+/// file-content hash checked over the reassembled logical stream.
+pub fn read_state(src: &dyn ReadStorage, head: &OpenedHead) -> Result<State> {
+    let limits = ReadOptions::default().limits;
+    let cat = &head.catalog;
+    // An Encrypted archive's chunks are opened under the head's data key.
+    let seal = head.seal_context();
+    let mut out = State::new();
+    for (p, entry) in cat.replay(None)?.iter() {
+        let key = p.as_stored().to_vec();
+        if entry.kind == EntryKind::Directory {
+            out.insert(key, Content::Dir);
+            continue;
+        }
+        let (version, extents) = cat.file_version(&entry.version)?.ok_or_else(|| {
+            MochiError::new(
+                ErrorCode::CatalogInvalid,
+                "snapshot names a missing version",
+            )
+        })?;
+        let len = usize::try_from(version.logical_len)
+            .map_err(|_| MochiError::new(ErrorCode::LimitExceeded, "test file too large"))?;
+        let mut buf = vec![0u8; len];
+        for e in &extents {
+            let ExtentSource::Chunk {
+                chunk,
+                chunk_offset,
+            } = e.source
+            else {
+                continue; // holes are already zero
+            };
+            let record = cat.object(&chunk)?.ok_or_else(|| {
+                MochiError::new(ErrorCode::CatalogInvalid, "extent names a missing chunk")
+            })?;
+            let at = cat.object_location(&chunk)?.ok_or_else(|| {
+                MochiError::new(ErrorCode::CatalogInvalid, "chunk has no location")
+            })?;
+            let stored = load_stored(src, at, &record, &limits)?;
+            let decoded = decode_verified(&record, &stored, &limits, seal.as_ref())?;
+            let from = chunk_offset as usize;
+            let to = from + e.length as usize;
+            let lo = e.logical_offset as usize;
+            buf[lo..lo + e.length as usize].copy_from_slice(&decoded.as_bytes()[from..to]);
+        }
+        if Some(file_content_hash(DecodedSlice::from_logical(&buf))) != version.content_hash {
+            return Err(MochiError::new(
+                ErrorCode::ContentIntegrityFailed,
+                "reassembled file does not match its file-content hash",
+            ));
+        }
+        out.insert(key, Content::File(buf));
+    }
+    Ok(out)
+}
+
+/// The absolute offset of the middle byte of the first chunk of the file at
+/// `p` in `head`'s snapshot: flipping that byte damages the file's stored
+/// content and nothing else (as `c8_repair.rs` does). Used by the desktop
+/// tests and the D4 E2E fixtures.
+pub fn first_chunk_middle(head: &OpenedHead, p: &str) -> Result<u64> {
+    let missing = |what: &str| MochiError::new(ErrorCode::CatalogInvalid, format!("{p}: {what}"));
+    let cat = &head.catalog;
+    let snap = cat.replay(None)?;
+    let entry = snap.get(&path(p)).ok_or_else(|| missing("no such entry"))?;
+    let (_, extents) = cat
+        .file_version(&entry.version)?
+        .ok_or_else(|| missing("no file version"))?;
+    let chunk = extents
+        .iter()
+        .find_map(|e| match e.source {
+            ExtentSource::Chunk { chunk, .. } => Some(chunk),
+            ExtentSource::Hole => None,
+        })
+        .ok_or_else(|| missing("no chunk"))?;
+    let record = cat.object(&chunk)?.ok_or_else(|| missing("no object"))?;
+    let at = cat
+        .object_location(&chunk)?
+        .ok_or_else(|| missing("no location"))?;
+    Ok(at + record.stored_len / 2)
+}

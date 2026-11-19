@@ -1,0 +1,50 @@
+{
+  "archive_id": "37980f8a8b1123dc71491468008736886947492b3c6e65328de84339562f35f6",
+  "case": "red-valid-multigroup",
+  "commits": [
+    {
+      "checkpoint": true,
+      "commit_id": "2ca07ff270803c3884e051b054cb89c9c581c47b81f8cdc693ff0fab0dbb143c",
+      "footer_offset": 3547391,
+      "seq": 0
+    }
+  ],
+  "findings": [],
+  "format": "mochi-interop-summary-v1",
+  "head": {
+    "code": null,
+    "status": "opened"
+  },
+  "parity": {
+    "beyond_capacity": 0,
+    "commits": 1,
+    "damaged_shards": 0,
+    "rebuilt": 0
+  },
+  "profile": {
+    "encrypted": false,
+    "recovery_percent": 10,
+    "tar_compatible": false
+  },
+  "snapshots": [
+    {
+      "entries": [
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000001000000007,
+            "posix_mode": 420,
+            "uid": 1420,
+            "windows": null
+          },
+          "content_hash": "f43fdbad81a5b17b4fc29a1b4e803c72c0be6548e63d202f1532f008742ab71d",
+          "kind": "file",
+          "path": "6269672e62696e",
+          "size": 3145728,
+          "target": null
+        }
+      ],
+      "seq": 0
+    }
+  ]
+}

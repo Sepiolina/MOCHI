@@ -1,0 +1,96 @@
+import type { Catalogue } from "../types";
+import type { common as enCommon } from "../en/common";
+// Thai glossary (use these terms consistently in every th/*.ts file):
+//   archive            ไฟล์บีบอัด (short: ไฟล์)      extract          แตกไฟล์
+//   test / verify      ทดสอบ / ตรวจสอบ              repair           ซ่อม
+//   version (commit)   เวอร์ชัน (commit = คอมมิต)    snapshot         สแนปช็อต
+//   entry / item       รายการ                       folder           โฟลเดอร์
+//   passphrase         วลีรหัสผ่าน                   password         รหัสผ่าน
+//   encrypt            เข้ารหัส                      key envelope     ซองกุญแจ
+//   recovery record    ข้อมูลกู้คืน                   salvage scan     สแกนกู้ข้อมูลที่เหลือ
+//   health             สภาพ                         retention        ระยะเวลาเก็บ
+//   catalog            แค็ตตาล็อก                    hash             แฮช
+// Kept in English: error codes, PASS/FAIL/DEGRADED/UNKNOWN/OVERDUE/UNSUPPORTED, LOCAL_COMMITTED,
+// format names (.mochi, ZIP, tar, BLAKE3 ...). Never write "backed up / safe / secure / preserved /
+// revoked" in Thai (spec 23.3): no ปลอดภัย, สำรองข้อมูล, เก็บรักษาแล้ว, เพิกถอน, ซ่อมแซมแล้ว.
+// Wording shared by more than one screen.
+export const common = {
+  "common.cancel": "ยกเลิก",
+  "common.close": "ปิด",
+  "common.starting": "กำลังเริ่ม…",
+  "common.loading": "กำลังโหลด…",
+  "common.cancelling": " (กำลังยกเลิก…)",
+  "common.folder": "โฟลเดอร์",
+  "common.file": "ไฟล์",
+  "common.escapedMarker": " (แสดงแบบหลีก)",
+  "common.escapedHint":
+    "แสดงแบบหลีกอักขระ: ชื่อที่เก็บไว้มีอักขระควบคุม ตัวกำหนดทิศทาง เครื่องหมายแบ็กสแลช หรือไบต์ที่ไม่ใช่ UTF-8",
+  "common.errorWithCode": "{what} ({code}): {message}",
+  "common.errorPlain": "{what}",
+  "common.completed": "เสร็จสิ้น: {summary}",
+  "common.failed": "ไม่สำเร็จ ({code}): {message}",
+  "common.stoppedUnexpectedly": "หยุดทำงานโดยไม่คาดคิด: {message}",
+  "common.byteOne": "{n} ไบต์",
+  "common.bytesMany": "{n} ไบต์",
+  "common.sizeWithExact": "{human} ({exact})",
+  "common.sizeHuman": "{value} {unit}",
+  "common.progress": "ความคืบหน้า",
+  "common.itemOne": "{n} รายการ",
+  "common.itemMany": "{n} รายการ",
+  "common.selectedCount": "เลือกไว้ {n}",
+  "common.statusSeparator": " · ",
+  "common.listSeparator": ", ",
+  "count.fileOne": "{n} ไฟล์",
+  "count.fileMany": "{n} ไฟล์",
+  "count.folderOne": "{n} โฟลเดอร์",
+  "count.folderMany": "{n} โฟลเดอร์",
+  "count.entryOne": "{n} รายการ",
+  "count.entryMany": "{n} รายการ",
+  "count.problemOne": "{n} ปัญหา",
+  "count.problemMany": "{n} ปัญหา",
+  "common.andMore": "…และอีก {n} รายการ",
+  "common.phase.verify-structure": "กำลังตรวจโครงสร้าง",
+  "common.phase.verify-history": "กำลังตรวจประวัติ",
+  "common.phase.verify-baseline": "กำลังตรวจจุดตั้งต้น",
+  "common.phase.verify-objects": "กำลังตรวจออบเจ็กต์ที่เก็บไว้",
+  "common.phase.verify-files": "กำลังตรวจไฟล์",
+  "common.phase.verify-streams": "กำลังตรวจสตรีม",
+  "common.phase.verify-keyless": "กำลังตรวจไบต์ที่เก็บไว้โดยไม่ใช้กุญแจ",
+  "common.phase.unknown": "กำลังทำงาน",
+  "common.phase.read": "กำลังอ่าน",
+  "common.phase.search": "กำลังค้นหา",
+  "common.phase.parity": "กำลังตรวจข้อมูลกู้คืน",
+  "common.phase.repair-copies": "กำลังอ่านสำเนา",
+  "common.phase.content": "กำลังเขียนข้อมูลไฟล์",
+  "common.phase.catalog": "กำลังอัปเดตแคตตาล็อก",
+  "common.phase.manifest": "กำลังเขียนรายการการเปลี่ยนแปลง",
+  "common.phase.checkpoint": "กำลังเขียนจุดตรวจ",
+  "common.phase.adopt": "กำลังอ่านจุดตรวจกลับมาเทียบ",
+  "common.phase.commit-record": "กำลังเขียนบันทึกการคอมมิต",
+  "common.phase.sync-content": "กำลังบันทึกข้อมูลลงดิสก์",
+  "common.phase.footer": "กำลังเขียนส่วนท้าย",
+  "common.phase.sync-footer": "กำลังบันทึกส่วนท้ายลงดิสก์",
+  "common.phase.directory": "กำลังบันทึกรายการโฟลเดอร์",
+  "common.phase.publish": "กำลังเผยแพร่ที่เก็บถาวรใหม่",
+  "common.phase.verify-scoped": "กำลังตรวจออบเจ็กต์ใหม่",
+  "dialog.openArchive": "เปิดไฟล์บีบอัด",
+  "dialog.openForeign": "เปิดไฟล์บีบอัด ZIP, 7z, RAR หรือ tar (อ่านอย่างเดียว)",
+  "dialog.chooseFiles": "เลือกไฟล์ที่จะเพิ่ม",
+  "dialog.chooseFolder": "เลือกโฟลเดอร์ที่จะเพิ่ม",
+  "dialog.saveArchiveAs": "บันทึกไฟล์บีบอัดใหม่เป็น",
+  "dialog.extractTo": "แตกไฟล์ไปที่…",
+  "dialog.moveFolder": "ย้ายโฟลเดอร์ไปที่…",
+  "dialog.chooseSubject": "เลือกไฟล์บีบอัดที่จะทดสอบหรือซ่อม",
+  "dialog.chooseCopy": "เลือกสำเนาอิสระของไฟล์บีบอัดเดียวกัน",
+  "dialog.exportReport": "ส่งออกรายงาน (JSON)",
+  "dialog.exportCrashLog": "ส่งออกบันทึกการขัดข้อง (ข้อความ)",
+  "dialog.filterArchives": "ไฟล์บีบอัด",
+  "dialog.filterMochi": "ไฟล์บีบอัด MOCHI",
+  "dialog.filterAll": "ทุกไฟล์",
+  "dialog.filterJson": "รายงาน JSON",
+  "dialog.filterText": "ข้อความ",
+  "dialog.filterZip": "ไฟล์บีบอัด ZIP",
+  "dialog.filterTar": "ไฟล์บีบอัด tar",
+  "dialog.filterTarGz": "ไฟล์บีบอัด tar.gz",
+  "dialog.filterTarZst": "ไฟล์บีบอัด tar.zst",
+} satisfies Catalogue<typeof enCommon>;

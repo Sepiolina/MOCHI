@@ -1,0 +1,26 @@
+[
+  {
+    "name": "draft2-core-history",
+    "file": "draft2-core-history.mochi",
+    "profile": "core",
+    "passphrase": null,
+    "equal_in_content_to": "core-valid-history",
+    "fault": "A draft-2 archive (the layout frozen at G12, descriptor key 3 = 2): refused by every command but `migrate`."
+  },
+  {
+    "name": "draft2-enc-history",
+    "file": "draft2-enc-history.mochi",
+    "profile": "enc",
+    "passphrase": "r8 golden passphrase",
+    "equal_in_content_to": "enc-valid-history",
+    "fault": "A draft-2 Encrypted archive: `migrate` needs the passphrase and seals the chunks again under the new archive's key."
+  },
+  {
+    "name": "draft2-red-5pct",
+    "file": "draft2-red-5pct.mochi",
+    "profile": "red",
+    "passphrase": null,
+    "equal_in_content_to": "red-valid-5pct",
+    "fault": "A draft-2 archive with a 5% recovery record: `migrate` writes the parity again."
+  }
+]

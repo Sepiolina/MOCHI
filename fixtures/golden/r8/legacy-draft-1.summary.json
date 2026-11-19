@@ -1,0 +1,23 @@
+{
+  "archive_id": null,
+  "case": "legacy-draft-1",
+  "commits": [],
+  "findings": [
+    {
+      "code": "UNSUPPORTED_FEATURE",
+      "object": null
+    }
+  ],
+  "format": "mochi-interop-summary-v1",
+  "head": {
+    "code": "UNSUPPORTED_FEATURE",
+    "status": "refused"
+  },
+  "parity": null,
+  "profile": {
+    "encrypted": false,
+    "recovery_percent": null,
+    "tar_compatible": false
+  },
+  "snapshots": []
+}

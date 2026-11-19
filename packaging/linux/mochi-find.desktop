@@ -1,0 +1,23 @@
+[Desktop Entry]
+Type=Application
+Name=Find in MOCHI archives
+Name[th]=ค้นหาในไฟล์บีบอัด MOCHI
+Name[zh_CN]=在 MOCHI 压缩文件中查找
+Comment=Search the file names inside every MOCHI archive in the chosen folders
+Comment[th]=ค้นหาชื่อไฟล์ภายในไฟล์บีบอัด MOCHI ทุกไฟล์ในโฟลเดอร์ที่เลือก
+Comment[zh_CN]=在所选文件夹中的每个 MOCHI 压缩文件里查找文件名
+Keywords=MOCHI;archive;search;find;
+Categories=Utility;
+# MOCHI Find (the "Find in MOCHI archives" window): `--find` takes the folders to scan
+# (none: the window opens and asks), so this is also a plain launcher in the app menu.
+# There is deliberately NO MimeType: registering inode/directory would list MOCHI as a
+# handler for folders in mimeinfo.cache, where "mochi-find.desktop" sorts before
+# "org.gnome.Nautilus.desktop", and MOCHI must never become what opens a folder. The
+# right-click entries on folders are separate, per file manager: Dolphin
+# (mochi-find-servicemenu.desktop), Nemo (mochi-find.nemo_action) and GNOME Files
+# (mochi-find-nautilus.py, which needs the python3-nautilus package). Elsewhere, use
+# "Find in archives..." in MOCHI (More menu, Ctrl+Shift+F).
+Exec=mochi-desktop --find -- %F
+Icon=mochi-desktop
+StartupWMClass=mochi-desktop
+Terminal=false

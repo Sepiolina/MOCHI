@@ -1,0 +1,23 @@
+{
+  "archive_id": null,
+  "case": "enc-corrupt-wrong-passphrase",
+  "commits": [],
+  "findings": [
+    {
+      "code": "KEY_UNAVAILABLE",
+      "object": null
+    }
+  ],
+  "format": "mochi-interop-summary-v1",
+  "head": {
+    "code": "KEY_UNAVAILABLE",
+    "status": "refused"
+  },
+  "parity": null,
+  "profile": {
+    "encrypted": false,
+    "recovery_percent": null,
+    "tar_compatible": false
+  },
+  "snapshots": []
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "quick",
+  "description": "The compact windows of the shell's quick verbs (Extract here, Extract to new folder, Add to archive; plan D6, owner decision 2026-10-16). Since owner report 2026-11-12 each quick job has a window of its own, labelled quick, then quick-2, quick-3, ... (quick::QuickPool), so a second job runs beside the first instead of waiting behind it; every command below acts on the calling window's own job only, found by the label Tauri hands the command, never one the page names. Least privilege: fourteen commands of its own and nothing else. watch_quick listens to the one running job (progress, a request for a passphrase, the result); quick_passphrase sends a passphrase once, into a zeroizing type in Rust, never a command line; quick_cancel stops the job; quick_pause pauses or resumes it at its next safe point (the points where it could be cancelled), so the user can free the disk or the processor for a while without losing the work done; quick_show_folder opens the folder the job wrote into in the file manager (Rust remembers the path; the webview names none); quick_close closes the window. Two more for the Add form of the shell verb Add to archive... (--add, owner decision 2026-10-20): quick_choose_location is the form's Browse... button (it shows the operating system's save dialog from Rust, keeps the folder it returns in Rust, and tells the webview only the folder's display text and the file name) and quick_add_submit is its OK button (it takes a plain file name, one of five fixed format words, a compression level and, for .mochi only, a passphrase that crosses once into a zeroizing type and a recovery percentage; Rust checks it, refuses a name that exists, and makes the archive in the folder it holds, so the webview never names a path). Three more for what follows an extraction (owner request 2026-11-09): quick_set_open_folder turns the saved choice \"Open the folder when done\" on or off (one boolean; Rust then opens the folder extracted into in the file manager, as quick_show_folder does); quick_rename_folder takes one plain folder name, checked in Rust (no separators, no control characters, not . or ..), and renames the new folder that Extract to new folder made, in the same parent, with a no-replace rename, so an existing file or folder is never replaced; quick_move_folder shows the operating system's folder dialog from Rust and moves that same folder into the chosen folder, keeping its name, again with a no-replace rename on the same drive (nothing is copied). Neither acts on any folder but the one the job made, and the webview names no path. No fs, shell, http, dialog, or window permission is granted, core:default is not granted, and none of the main window's archive, staging, extract, or update commands is reachable from here. Three more for the window's own title bar (release 0.9.10: the compact window is built undecorated like the archive windows, so the whole app has one look): window_minimize, window_close and window_start_drag act only on the calling window (Tauri hands it to the command; the page names none). window_close makes the same close request as the operating system's close button and Alt+F4, so closing still stops the window's job (WindowEvent::Destroyed); window_start_drag moves the window from a press on the bar's empty part. The window is neither resizable nor maximizable, so window_toggle_maximize and window_watch are not granted here.",
+  "windows": [
+    "quick",
+    "quick-*"
+  ],
+  "permissions": [
+    "allow-watch-quick",
+    "allow-quick-passphrase",
+    "allow-quick-cancel",
+    "allow-quick-pause",
+    "allow-quick-show-folder",
+    "allow-quick-close",
+    "allow-quick-choose-location",
+    "allow-quick-add-submit",
+    "allow-quick-set-open-folder",
+    "allow-quick-rename-folder",
+    "allow-quick-move-folder",
+    "allow-window-minimize",
+    "allow-window-close",
+    "allow-window-start-drag"
+  ]
+}

@@ -1,0 +1,581 @@
+{
+  "archive_id": "44283158c88cd3d22eba0d940738e33f8894a627eb34e71c909a1618f26622e2",
+  "case": "core-valid-retention",
+  "commits": [
+    {
+      "checkpoint": true,
+      "commit_id": "879b75399832e159fbc0cccf908fe628f73c79b5e8b590850d2c34e8ce4fe6e8",
+      "footer_offset": 6019,
+      "seq": 0
+    },
+    {
+      "checkpoint": false,
+      "commit_id": "d9784c9fd1b1f5609f49f8acf615a0dc1e1aba29b07aa6f18452adbfe4d916cb",
+      "footer_offset": 7307,
+      "seq": 1
+    },
+    {
+      "checkpoint": false,
+      "commit_id": "f6a44e58176adc7768e25c6277bc7aba8b4c454beb4c72081ab2fd5e9c3e0108",
+      "footer_offset": 7827,
+      "seq": 2
+    },
+    {
+      "checkpoint": true,
+      "commit_id": "07b2d72d98183ea7c685c6d7b4ab8c5f68cb68d247ccfb834cf946a293f90091",
+      "footer_offset": 14667,
+      "seq": 3
+    },
+    {
+      "checkpoint": false,
+      "commit_id": "bef8a95a17ffa299b811ce871e7bbdca55e08214128e74cb8a32a54ded9535aa",
+      "footer_offset": 15147,
+      "seq": 4
+    },
+    {
+      "checkpoint": false,
+      "commit_id": "fe03806a80d3c08d7947336ea008d6b0d2259d471d18a58840f840234312afa4",
+      "footer_offset": 16434,
+      "seq": 5
+    },
+    {
+      "checkpoint": false,
+      "commit_id": "5618f13406bbadfaf8bf6620f40fb359560be88afc841c656453ecf271084bd7",
+      "footer_offset": 17721,
+      "seq": 6
+    },
+    {
+      "checkpoint": false,
+      "commit_id": "2f75696349dc781cc9c98b02c7c6e896d3e578b14bff2ec15bd3d6edf77919cc",
+      "footer_offset": 18220,
+      "seq": 7
+    },
+    {
+      "checkpoint": false,
+      "commit_id": "2ffcdddcb021ab279bfbfb1417b760df5b4ac567b3d963d4d55c6f07d0c52039",
+      "footer_offset": 19507,
+      "seq": 8
+    }
+  ],
+  "findings": [],
+  "format": "mochi-interop-summary-v1",
+  "head": {
+    "code": null,
+    "status": "opened"
+  },
+  "parity": null,
+  "profile": {
+    "encrypted": false,
+    "recovery_percent": null,
+    "tar_compatible": false
+  },
+  "snapshots": [
+    {
+      "entries": [
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000002000000014,
+            "posix_mode": 384,
+            "uid": 1384,
+            "windows": null
+          },
+          "content_hash": "df4c6adc07579debbc26de8d97d818cad2662e310afe2471810723bcfb460546",
+          "kind": "file",
+          "path": "62",
+          "size": 150,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000001000000007,
+            "posix_mode": 493,
+            "uid": 1493,
+            "windows": null
+          },
+          "content_hash": null,
+          "kind": "dir",
+          "path": "64",
+          "size": 0,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000001000000007,
+            "posix_mode": 420,
+            "uid": 1420,
+            "windows": null
+          },
+          "content_hash": "2a1d8f159299198823032f2c61aa1cdc4af0c03cbc90ad6bf62fea3eac039397",
+          "kind": "file",
+          "path": "642f61",
+          "size": 150,
+          "target": null
+        }
+      ],
+      "seq": 0
+    },
+    {
+      "entries": [
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000002000000014,
+            "posix_mode": 384,
+            "uid": 1384,
+            "windows": null
+          },
+          "content_hash": "df4c6adc07579debbc26de8d97d818cad2662e310afe2471810723bcfb460546",
+          "kind": "file",
+          "path": "62",
+          "size": 150,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000001000000007,
+            "posix_mode": 493,
+            "uid": 1493,
+            "windows": null
+          },
+          "content_hash": null,
+          "kind": "dir",
+          "path": "64",
+          "size": 0,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000003000000021,
+            "posix_mode": 416,
+            "uid": 1416,
+            "windows": null
+          },
+          "content_hash": "58dfd788b87b51ced0e838d11718c1dc46151305b94a7c3ffb80f604a7f56b25",
+          "kind": "file",
+          "path": "642f61",
+          "size": 150,
+          "target": null
+        }
+      ],
+      "seq": 1
+    },
+    {
+      "entries": [
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000001000000007,
+            "posix_mode": 493,
+            "uid": 1493,
+            "windows": null
+          },
+          "content_hash": null,
+          "kind": "dir",
+          "path": "64",
+          "size": 0,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000003000000021,
+            "posix_mode": 416,
+            "uid": 1416,
+            "windows": null
+          },
+          "content_hash": "58dfd788b87b51ced0e838d11718c1dc46151305b94a7c3ffb80f604a7f56b25",
+          "kind": "file",
+          "path": "642f61",
+          "size": 150,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000002000000014,
+            "posix_mode": 384,
+            "uid": 1384,
+            "windows": null
+          },
+          "content_hash": "df4c6adc07579debbc26de8d97d818cad2662e310afe2471810723bcfb460546",
+          "kind": "file",
+          "path": "642f62",
+          "size": 150,
+          "target": null
+        }
+      ],
+      "seq": 2
+    },
+    {
+      "entries": [
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000004000000028,
+            "posix_mode": 420,
+            "uid": 1420,
+            "windows": null
+          },
+          "content_hash": "bd1bfaea21f33fd1fd6ee958212e392115f640cbbb9508db3736fe2551dd7533",
+          "kind": "file",
+          "path": "63",
+          "size": 150,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000001000000007,
+            "posix_mode": 493,
+            "uid": 1493,
+            "windows": null
+          },
+          "content_hash": null,
+          "kind": "dir",
+          "path": "64",
+          "size": 0,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000003000000021,
+            "posix_mode": 416,
+            "uid": 1416,
+            "windows": null
+          },
+          "content_hash": "58dfd788b87b51ced0e838d11718c1dc46151305b94a7c3ffb80f604a7f56b25",
+          "kind": "file",
+          "path": "642f61",
+          "size": 150,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000002000000014,
+            "posix_mode": 384,
+            "uid": 1384,
+            "windows": null
+          },
+          "content_hash": "df4c6adc07579debbc26de8d97d818cad2662e310afe2471810723bcfb460546",
+          "kind": "file",
+          "path": "642f62",
+          "size": 150,
+          "target": null
+        }
+      ],
+      "seq": 3
+    },
+    {
+      "entries": [
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000001000000007,
+            "posix_mode": 493,
+            "uid": 1493,
+            "windows": null
+          },
+          "content_hash": null,
+          "kind": "dir",
+          "path": "64",
+          "size": 0,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000003000000021,
+            "posix_mode": 416,
+            "uid": 1416,
+            "windows": null
+          },
+          "content_hash": "58dfd788b87b51ced0e838d11718c1dc46151305b94a7c3ffb80f604a7f56b25",
+          "kind": "file",
+          "path": "642f61",
+          "size": 150,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000002000000014,
+            "posix_mode": 384,
+            "uid": 1384,
+            "windows": null
+          },
+          "content_hash": "df4c6adc07579debbc26de8d97d818cad2662e310afe2471810723bcfb460546",
+          "kind": "file",
+          "path": "642f62",
+          "size": 150,
+          "target": null
+        }
+      ],
+      "seq": 4
+    },
+    {
+      "entries": [
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000001000000007,
+            "posix_mode": 493,
+            "uid": 1493,
+            "windows": null
+          },
+          "content_hash": null,
+          "kind": "dir",
+          "path": "64",
+          "size": 0,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000003000000021,
+            "posix_mode": 416,
+            "uid": 1416,
+            "windows": null
+          },
+          "content_hash": "58dfd788b87b51ced0e838d11718c1dc46151305b94a7c3ffb80f604a7f56b25",
+          "kind": "file",
+          "path": "642f61",
+          "size": 150,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000002000000014,
+            "posix_mode": 384,
+            "uid": 1384,
+            "windows": null
+          },
+          "content_hash": "df4c6adc07579debbc26de8d97d818cad2662e310afe2471810723bcfb460546",
+          "kind": "file",
+          "path": "642f62",
+          "size": 150,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000005000000035,
+            "posix_mode": 420,
+            "uid": 1420,
+            "windows": null
+          },
+          "content_hash": "9f1bbec31568ffca25b79e03e2235016681f3e17563f61b4bd080a9c6802c040",
+          "kind": "file",
+          "path": "65",
+          "size": 150,
+          "target": null
+        }
+      ],
+      "seq": 5
+    },
+    {
+      "entries": [
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000001000000007,
+            "posix_mode": 493,
+            "uid": 1493,
+            "windows": null
+          },
+          "content_hash": null,
+          "kind": "dir",
+          "path": "64",
+          "size": 0,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000003000000021,
+            "posix_mode": 416,
+            "uid": 1416,
+            "windows": null
+          },
+          "content_hash": "58dfd788b87b51ced0e838d11718c1dc46151305b94a7c3ffb80f604a7f56b25",
+          "kind": "file",
+          "path": "642f61",
+          "size": 150,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000002000000014,
+            "posix_mode": 384,
+            "uid": 1384,
+            "windows": null
+          },
+          "content_hash": "df4c6adc07579debbc26de8d97d818cad2662e310afe2471810723bcfb460546",
+          "kind": "file",
+          "path": "642f62",
+          "size": 150,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000006000000042,
+            "posix_mode": 420,
+            "uid": 1420,
+            "windows": null
+          },
+          "content_hash": "dc78e357c77d71904340db2b0fe6f5b85acbb82f37dbe574a0edabcf190932b4",
+          "kind": "file",
+          "path": "65",
+          "size": 150,
+          "target": null
+        }
+      ],
+      "seq": 6
+    },
+    {
+      "entries": [
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000001000000007,
+            "posix_mode": 493,
+            "uid": 1493,
+            "windows": null
+          },
+          "content_hash": null,
+          "kind": "dir",
+          "path": "64",
+          "size": 0,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000003000000021,
+            "posix_mode": 416,
+            "uid": 1416,
+            "windows": null
+          },
+          "content_hash": "58dfd788b87b51ced0e838d11718c1dc46151305b94a7c3ffb80f604a7f56b25",
+          "kind": "file",
+          "path": "642f61",
+          "size": 150,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000002000000014,
+            "posix_mode": 384,
+            "uid": 1384,
+            "windows": null
+          },
+          "content_hash": "df4c6adc07579debbc26de8d97d818cad2662e310afe2471810723bcfb460546",
+          "kind": "file",
+          "path": "642f62",
+          "size": 150,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000006000000042,
+            "posix_mode": 420,
+            "uid": 1420,
+            "windows": null
+          },
+          "content_hash": "dc78e357c77d71904340db2b0fe6f5b85acbb82f37dbe574a0edabcf190932b4",
+          "kind": "file",
+          "path": "65",
+          "size": 150,
+          "target": null
+        }
+      ],
+      "seq": 7
+    },
+    {
+      "entries": [
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000001000000007,
+            "posix_mode": 493,
+            "uid": 1493,
+            "windows": null
+          },
+          "content_hash": null,
+          "kind": "dir",
+          "path": "64",
+          "size": 0,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000003000000021,
+            "posix_mode": 416,
+            "uid": 1416,
+            "windows": null
+          },
+          "content_hash": "58dfd788b87b51ced0e838d11718c1dc46151305b94a7c3ffb80f604a7f56b25",
+          "kind": "file",
+          "path": "642f61",
+          "size": 150,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000002000000014,
+            "posix_mode": 384,
+            "uid": 1384,
+            "windows": null
+          },
+          "content_hash": "df4c6adc07579debbc26de8d97d818cad2662e310afe2471810723bcfb460546",
+          "kind": "file",
+          "path": "642f62",
+          "size": 150,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000006000000042,
+            "posix_mode": 420,
+            "uid": 1420,
+            "windows": null
+          },
+          "content_hash": "dc78e357c77d71904340db2b0fe6f5b85acbb82f37dbe574a0edabcf190932b4",
+          "kind": "file",
+          "path": "65",
+          "size": 150,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000007000000049,
+            "posix_mode": 420,
+            "uid": 1420,
+            "windows": null
+          },
+          "content_hash": "cbc5486fffb2f9de7e71ac3b2e762eca5d979718f268cf7adc08368eb90d2cbc",
+          "kind": "file",
+          "path": "67",
+          "size": 150,
+          "target": null
+        }
+      ],
+      "seq": 8
+    }
+  ]
+}

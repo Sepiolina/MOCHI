@@ -1,0 +1,137 @@
+{
+  "archive_id": "3c9054cc421fc5e0d88707ef97a5f2289c2cd47f39b816559746505bf3ece62d",
+  "case": "core-valid-false-magic",
+  "commits": [
+    {
+      "checkpoint": true,
+      "commit_id": "d21995d0e58981ae1cb66aed58148d584ea4ecfae8e38253771cf4e52370d4e0",
+      "footer_offset": 2773,
+      "seq": 0
+    },
+    {
+      "checkpoint": false,
+      "commit_id": "2314dc46e865ff4035234e42c6d462c5284b0078c55bd5421560ae1558bf3303",
+      "footer_offset": 3578,
+      "seq": 1
+    },
+    {
+      "checkpoint": false,
+      "commit_id": "6c630a4847dd0b2998dc389c8c3b0f4c7f0cc7ce128a125bd4e107604779c3dc",
+      "footer_offset": 4855,
+      "seq": 2
+    }
+  ],
+  "findings": [],
+  "format": "mochi-interop-summary-v1",
+  "head": {
+    "code": null,
+    "status": "opened"
+  },
+  "parity": null,
+  "profile": {
+    "encrypted": false,
+    "recovery_percent": null,
+    "tar_compatible": false
+  },
+  "snapshots": [
+    {
+      "entries": [
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000001000000007,
+            "posix_mode": 420,
+            "uid": 1420,
+            "windows": null
+          },
+          "content_hash": "53f237a9b40939d04002745f4f5702c672dd0fe538c61892e93d377f0cdee2c3",
+          "kind": "file",
+          "path": "61",
+          "size": 40,
+          "target": null
+        }
+      ],
+      "seq": 0
+    },
+    {
+      "entries": [
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000001000000007,
+            "posix_mode": 420,
+            "uid": 1420,
+            "windows": null
+          },
+          "content_hash": "53f237a9b40939d04002745f4f5702c672dd0fe538c61892e93d377f0cdee2c3",
+          "kind": "file",
+          "path": "61",
+          "size": 40,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000002000000014,
+            "posix_mode": 420,
+            "uid": 1420,
+            "windows": null
+          },
+          "content_hash": "39454e5f5b992d6ab5549c25f3841a56d4df9f24574ee2cfddbf7c254e259494",
+          "kind": "file",
+          "path": "62",
+          "size": 20,
+          "target": null
+        }
+      ],
+      "seq": 1
+    },
+    {
+      "entries": [
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000001000000007,
+            "posix_mode": 420,
+            "uid": 1420,
+            "windows": null
+          },
+          "content_hash": "53f237a9b40939d04002745f4f5702c672dd0fe538c61892e93d377f0cdee2c3",
+          "kind": "file",
+          "path": "61",
+          "size": 40,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000002000000014,
+            "posix_mode": 420,
+            "uid": 1420,
+            "windows": null
+          },
+          "content_hash": "39454e5f5b992d6ab5549c25f3841a56d4df9f24574ee2cfddbf7c254e259494",
+          "kind": "file",
+          "path": "62",
+          "size": 20,
+          "target": null
+        },
+        {
+          "attributes": {
+            "gid": 2000,
+            "mtime_ns": 1700000001000000007,
+            "posix_mode": 420,
+            "uid": 1420,
+            "windows": null
+          },
+          "content_hash": "44a3b6fde5408f3dced06a0ba99f9d83160909670d7c1046762319f16f9a361e",
+          "kind": "file",
+          "path": "7061796c6f61642e62696e",
+          "size": 152,
+          "target": null
+        }
+      ],
+      "seq": 2
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "archive_id": null,
+  "case": "core-corrupt-delta-manifest",
+  "commits": [],
+  "findings": [
+    {
+      "code": "STORED_INTEGRITY_FAILED",
+      "object": null
+    }
+  ],
+  "format": "mochi-interop-summary-v1",
+  "head": {
+    "code": "STORED_INTEGRITY_FAILED",
+    "status": "refused"
+  },
+  "parity": null,
+  "profile": {
+    "encrypted": false,
+    "recovery_percent": null,
+    "tar_compatible": false
+  },
+  "snapshots": []
+}

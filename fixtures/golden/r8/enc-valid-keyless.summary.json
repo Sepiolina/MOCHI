@@ -1,0 +1,61 @@
+{
+  "archive_id": "6583808980ec839d542c73f54a3821949357973a301c73593ce06d928f6747fd",
+  "case": "enc-valid-keyless",
+  "commits": [
+    {
+      "checkpoint": true,
+      "commit_id": "5798aa1ce66c719a4b7d23a9fc36e047263776e12d870ff81e9bc68f5e49627c",
+      "footer_offset": 7602,
+      "seq": 0
+    },
+    {
+      "checkpoint": false,
+      "commit_id": "ec6815fbc90227d14929057cca7335684aa5462bd7629aa8f4434b12b1e485cf",
+      "footer_offset": 10911,
+      "seq": 1
+    },
+    {
+      "checkpoint": false,
+      "commit_id": "a5a9b358ae6e49fadc35d4b58526c1734dd94a5e0b7afaec97e5c597641528ab",
+      "footer_offset": 11543,
+      "seq": 2
+    },
+    {
+      "checkpoint": false,
+      "commit_id": "0621ddced77e37a1c552900c60c3b338a943cf8453b6cf8479ede473b09b57da",
+      "footer_offset": 12894,
+      "seq": 3
+    },
+    {
+      "checkpoint": false,
+      "commit_id": "de1baa25cefa33206cf867d28c46bd67c8f5dda75ee7a774d46c7686ea7e43a5",
+      "footer_offset": 14554,
+      "seq": 4
+    },
+    {
+      "checkpoint": false,
+      "commit_id": "f632ac30c77a216bbab2be8b1df8307f09278ddb43e34fdece892feaf17ad7d1",
+      "footer_offset": 15184,
+      "seq": 5
+    },
+    {
+      "checkpoint": false,
+      "commit_id": "9b659fb2eb37767a374ed03e6ba5e1d7e04a9ef6277c3f3c7dd1de96bd3f3bb5",
+      "footer_offset": 16505,
+      "seq": 6
+    }
+  ],
+  "findings": [],
+  "format": "mochi-interop-summary-v1",
+  "head": {
+    "code": null,
+    "status": "keyless"
+  },
+  "parity": null,
+  "profile": {
+    "encrypted": true,
+    "recovery_percent": null,
+    "tar_compatible": false
+  },
+  "snapshots": null
+}

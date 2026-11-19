@@ -1,0 +1,43 @@
+[package]
+name = "mochi-core"
+description = "MOCHI archive operations: catalog, verification, repair, jobs, reports."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Test controls: fault injection in the segment applier, a logical catalog
+# dump, and (later) writer checkpoint policies. Off by default; enabled only
+# by mochi-testkit. Cargo features are additive, so this is not an isolation
+# boundary: anything in the build graph that enables it enables the controls
+# for every crate in that build (review decision 14).
+test-controls = []
+
+[dependencies]
+mochi-format.workspace = true
+serde.workspace = true
+getrandom.workspace = true
+rusqlite.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# `process`: `geteuid`, for the restore root's ownership check (plan C6).
+rustix = { workspace = true, features = ["process"] }
+
+# Windows publication of a created archive (owner decision 2026-10-15) and the
+# one-byte writer lock (owner decision 2026-10-20): the Win32 calls mochi-core
+# may not make itself (forbid(unsafe_code)).
+[target.'cfg(windows)'.dependencies]
+mochi-sys.workspace = true
+
+[dev-dependencies]
+# `trace`: the T13 work-bound tests count SQL statements and full-scan steps
+# with SQLite's own profiler, independently of the code under test.
+rusqlite = { workspace = true, features = ["trace"] }
+serde_json.workspace = true
+tempfile.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true

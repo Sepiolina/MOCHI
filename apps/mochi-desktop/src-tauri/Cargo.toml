@@ -1,0 +1,81 @@
+[package]
+name = "mochi-desktop"
+description = "The MOCHI desktop application (Tauri v2): thin commands over mochi-core."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "mochi_desktop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mochi-desktop"
+path = "src/main.rs"
+
+[features]
+# Embeds the built UI (`../ui/dist`) in the binary, as `tauri build` does.
+# Without it the app loads `devUrl` (the Vite dev server): `cargo build` and
+# `cargo test` then need no built frontend. The E2E job enables it.
+custom-protocol = ["tauri/custom-protocol"]
+# Test builds only (the E2E job): on Windows, pass msedgedriver's
+# WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS and WEBVIEW2_USER_DATA_FOLDER through
+# to WebView2 so that the driver can attach (src/automation.rs). Never
+# enabled in a shipped build.
+e2e = []
+
+[dependencies]
+mochi-core.workspace = true
+mochi-format.workspace = true
+# Writes ZIP / tar / tar.gz / tar.zst from the user's local files (plan O31).
+mochi-export.workspace = true
+zeroize.workspace = true
+# Random names for drag-out folders (`dragout`): the operating system's CSPRNG.
+getrandom.workspace = true
+# The client only: no ZIP/7z/RAR/tar parser is linked into the app process
+# (plan D8 rule 3; ci/check-invariants.sh checks `default-features = false`).
+# The helper binary it talks to is built from the same package and shipped
+# next to the app (crates/mochi-foreign/README.md "Shipping the helper").
+mochi-foreign = { path = "../../../crates/mochi-foreign", default-features = false }
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+# The native open dialog, called from Rust only (D1): the webview gets no
+# dialog permission and never names a path (README "Security decisions").
+tauri-plugin-dialog = "2"
+# Single-instance handling (D6): a second launch forwards its arguments to the
+# running app and exits. The plugin has no webview commands, so it adds no
+# capability permission; it needs only the OS facilities that make one process
+# the owner (a named mutex and a hidden window message on Windows, the session
+# D-Bus on Linux).
+tauri-plugin-single-instance = "2"
+ts-rs = "12"
+tauri-plugin-updater = "2"
+# Opens the bundled user guide with the operating system's handler for .html
+# (Help, User guide). Called from Rust on a path Rust resolved; the webview gets no
+# opener, shell, or filesystem permission. MIT, as are its two small dependencies.
+open = "5"
+# "Replace existing files" when extracting (owner decision 2026-11-11): an
+# existing file is moved to the Recycle Bin (Windows) or the Trash (Ubuntu,
+# freedesktop.org spec), never deleted, so the user can get it back. Called
+# from Rust on a path the restore engine checked; the webview gets no
+# permission. MIT.
+trash = "5"
+# Starts the operating system's drag of files out of the main window (Rust
+# only, `dragout`): Apache-2.0 OR MIT, by CrabNebula (the crate behind
+# tauri-plugin-drag, which is NOT used: the webview gets no plugin command
+# and never names a path). Windows: OLE `DoDragDrop`; Linux: GTK drag source.
+drag = "2.1.1"
+
+[dev-dependencies]
+mochi-testkit.workspace = true
+tempfile.workspace = true
+blake3.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[lints]
+workspace = true

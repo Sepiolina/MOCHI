@@ -1,0 +1,24 @@
+[package]
+name = "mochi-export"
+description = "Writes ZIP, tar, tar.gz and tar.zst archives from local files for the desktop app (plan O31). Parses no archive."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mochi-core.workspace = true
+getrandom.workspace = true
+# MIT (zip), MIT OR Apache-2.0 (tar, flate2, zstd's binding). Deflate is flate2's
+# pure-Rust backend; only the writing side is used.
+zip.workspace = true
+tar.workspace = true
+flate2.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

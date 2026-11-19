@@ -1,0 +1,32 @@
+{
+  "archive_id": null,
+  "case": "red-corrupt-beyond-capacity",
+  "commits": [],
+  "findings": [
+    {
+      "code": "PARITY_CAPACITY_EXCEEDED",
+      "object": null
+    },
+    {
+      "code": "STORED_INTEGRITY_FAILED",
+      "object": null
+    }
+  ],
+  "format": "mochi-interop-summary-v1",
+  "head": {
+    "code": "STORED_INTEGRITY_FAILED",
+    "status": "refused"
+  },
+  "parity": {
+    "beyond_capacity": 1,
+    "commits": 7,
+    "damaged_shards": 3,
+    "rebuilt": 0
+  },
+  "profile": {
+    "encrypted": false,
+    "recovery_percent": null,
+    "tar_compatible": false
+  },
+  "snapshots": []
+}

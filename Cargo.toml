@@ -1,0 +1,76 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mochi-format",
+    "crates/mochi-core",
+    "crates/mochi-cli",
+    "crates/mochi-testkit",
+    "crates/mochi-foreign",
+    # Writes ZIP, tar, tar.gz and tar.zst from local files (plan O31, owner
+    # decision 2026-10-20). Parses no archive.
+    "crates/mochi-export",
+    # The only unsafe outside mochi-foreign: the Win32 calls mochi-core may not
+    # make itself (G6a publication, B.2.17 writer lock).
+    "crates/mochi-sys",
+    # The Explorer context-menu handler (classic IContextMenu COM DLL, Windows
+    # only; empty elsewhere). The second place with unsafe code besides mochi-sys.
+    "crates/mochi-shellext",
+    # Phase D0 (plan §7, decision O1): the Tauri v2 desktop app. Building it
+    # on Linux needs webkit2gtk 4.1 (apps/mochi-desktop/README.md).
+    "apps/mochi-desktop/src-tauri",
+]
+
+[workspace.package]
+version = "0.9.21"
+edition = "2021"
+rust-version = "1.89"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+mochi-format = { path = "crates/mochi-format" }
+mochi-core = { path = "crates/mochi-core" }
+mochi-testkit = { path = "crates/mochi-testkit" }
+mochi-sys = { path = "crates/mochi-sys" }
+mochi-export = { path = "crates/mochi-export" }
+clap = { version = "4", features = ["derive", "string"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+blake3 = { version = "1", default-features = false, features = ["std"] }
+zstd = "0.13"
+# Writing ZIP / tar / tar.gz (plan O31), used by `mochi-export` only. MIT (zip),
+# MIT OR Apache-2.0 (tar, flate2). Deflate through flate2's pure-Rust backend
+# (miniz_oxide); no bzip2/lzma/zstd/AES inside ZIP.
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+tar = { version = "0.4", default-features = false }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+getrandom = "0.3"
+# Encrypted profile (spec Annex B.2.10, D20). All MIT or Apache-2.0.
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
+zeroize = "1"
+unicode-normalization = "0.1"
+rpassword = "7"
+ciborium = "0.2"
+rusqlite = { version = "0.40", features = ["bundled", "serialize"] }
+proptest = { version = "1", default-features = false, features = ["std"] }
+# Linux renameat2(RENAME_NOREPLACE) (plan T20). Apache-2.0 WITH
+# LLVM-exception OR Apache-2.0 OR MIT; already in the tree through tempfile.
+rustix = { version = "1.1", default-features = false, features = ["std", "fs"] }
+
+# AGENTS.md: library crates must not unwrap/expect/panic on paths reachable
+# from archive contents. Unit tests opt out locally with cfg_attr(test, ...).
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+
+# The `cddl` crate (dev-dependency of mochi-testkit only; R3's schema check)
+# validates one record in ~120 ms unoptimized and ~11 ms at opt-level 3, which
+# keeps crates/mochi-testkit/tests/r3_cddl.rs to seconds in a debug test run.
+[profile.dev.package.cddl]
+opt-level = 3

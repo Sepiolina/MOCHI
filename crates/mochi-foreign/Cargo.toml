@@ -1,0 +1,64 @@
+[package]
+name = "mochi-foreign"
+description = "Read-only foreign archive formats (ZIP, 7z, RAR, tar, tar.gz, tar.zst) parsed in an isolated helper process (plan D8)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "mochi_foreign"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mochi-foreign-helper"
+path = "src/bin/helper.rs"
+required-features = ["engine"]
+
+[features]
+default = ["engine"]
+# The parsers and the helper's body. The app (and anything else that only
+# talks to the helper) depends on this crate with `default-features = false`,
+# so no ZIP/tar/gzip parser is linked into its process; ci/check-invariants.sh
+# checks that.
+engine = ["dep:zip", "dep:tar", "dep:flate2", "dep:ruzstd", "dep:rustix", "dep:sevenz-rust2", "dep:unrar_sys"]
+# Fault hooks for the crash/limit tests (panic, abort, huge allocation, hang,
+# stdout flood). Enabled only by this crate's own dev-dependency below;
+# ci/check-invariants.sh forbids it anywhere else.
+test-faults = ["engine"]
+
+[dependencies]
+# MIT. No bzip2/lzma/zstd/ppmd inside ZIP: C or large decoders we do not need
+# yet; such entries are reported UNSUPPORTED per entry. (Zstandard is read for
+# `.tar.zst` only, through the pure-Rust `ruzstd` below.) aes-crypto = AES + ZipCrypto.
+zip = { version = "9", default-features = false, features = ["aes-crypto", "deflate-flate2", "deflate64"], optional = true }
+# MIT OR Apache-2.0 each.
+tar = { version = "0.4", default-features = false, optional = true }
+flate2 = { version = "1", optional = true }
+# MIT, pure Rust decoder (no C): `.tar.zst`. `hash` is the XXH64 that checks a
+# frame's content checksum; `std` is its io::Read adapter.
+ruzstd = { version = "0.9", default-features = false, features = ["std", "hash"], optional = true }
+sevenz-rust2 = { version = "0.20.2", default-features = false, features = ["aes256", "bzip2", "deflate", "ppmd"], optional = true }
+# The FFI crate of the `unrar` project (muja/unrar.rs; MIT OR Apache-2.0). It
+# builds the vendored RARLAB UnRAR C++ source, which is NOT MIT/Apache: see
+# THIRD-PARTY-NOTICES.md. We use it, not the safe `unrar` wrapper, because the
+# wrapper buffers a whole entry in memory, hides the hash type, and unwraps on
+# unknown flags; streaming with limits needs the callback API directly.
+unrar_sys = { version = "0.5.8", optional = true }
+zeroize.workspace = true
+rustix = { workspace = true, features = ["process"], optional = true }
+
+# Windows only: the Job Object that caps the helper's memory (src/jobobject.rs).
+# MIT OR Apache-2.0; already in the tree through the desktop app's stack.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+[dev-dependencies]
+mochi-foreign = { path = ".", features = ["test-faults"] }
+tempfile.workspace = true
+# Writes the .tar.zst fixtures and bombs in tests only (libzstd, as in mochi-core).
+zstd.workspace = true
+
+[lints]
+workspace = true

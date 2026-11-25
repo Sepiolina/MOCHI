@@ -149,6 +149,56 @@ pub fn import_into<T: SourceTree>(
     opts: &ImportOptions,
     ctx: &JobContext<'_>,
 ) -> Result<Import> {
+    walk(tree, inputs, transaction, opts, ctx, &mut |_| {})
+}
+
+/// One source entry an import put into the transaction: what it becomes
+/// in the archive and where it came from ([`import_recording`]).
+#[derive(Clone)]
+pub struct ImportedEntry<N> {
+    pub path: ArchivePath,
+    pub node: N,
+    /// [`SourceKind::File`] or [`SourceKind::Directory`].
+    pub kind: SourceKind,
+    /// A file's content source, to read it again after the commit.
+    pub source: Option<Arc<dyn FileSource>>,
+}
+
+impl<N: std::fmt::Debug> std::fmt::Debug for ImportedEntry<N> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImportedEntry")
+            .field("path", &self.path)
+            .field("node", &self.node)
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+/// [`import_into`], also returning every file and directory it imported, in
+/// walk order (parents first), for removing the sources after the commit
+/// (spec Annex B.2.23 item 3, [`crate::sources`]).
+pub fn import_recording<T: SourceTree>(
+    tree: &T,
+    inputs: &[(ArchivePath, T::Node)],
+    transaction: Transaction,
+    opts: &ImportOptions,
+    ctx: &JobContext<'_>,
+) -> Result<(Import, Vec<ImportedEntry<T::Node>>)> {
+    let mut seen_entries = Vec::new();
+    let import = walk(tree, inputs, transaction, opts, ctx, &mut |e| {
+        seen_entries.push(e);
+    })?;
+    Ok((import, seen_entries))
+}
+
+fn walk<T: SourceTree>(
+    tree: &T,
+    inputs: &[(ArchivePath, T::Node)],
+    transaction: Transaction,
+    opts: &ImportOptions,
+    ctx: &JobContext<'_>,
+    record: &mut dyn FnMut(ImportedEntry<T::Node>),
+) -> Result<Import> {
     let mut seen = BTreeSet::new();
     for (p, _) in inputs {
         if !seen.insert(p.clone()) {
@@ -184,11 +234,23 @@ pub fn import_into<T: SourceTree>(
                 let source = tree.source(&node, meta.len)?;
                 out.bytes = bytes;
                 out.files += 1;
+                record(ImportedEntry {
+                    path: path.clone(),
+                    node: node.clone(),
+                    kind: SourceKind::File,
+                    source: Some(Arc::clone(&source)),
+                });
                 out.transaction.put_file_from(path, source, meta.attributes);
                 ctx.report(IMPORT_PHASE, out.bytes, None);
             }
             SourceKind::Directory => {
                 out.directories += 1;
+                record(ImportedEntry {
+                    path: path.clone(),
+                    node: node.clone(),
+                    kind: SourceKind::Directory,
+                    source: None,
+                });
                 out.transaction.put_dir(path.clone(), meta.attributes);
                 let mut children = tree.children(&node)?;
                 children.sort_by(|a, b| a.0.cmp(&b.0));

@@ -42,12 +42,21 @@
 //! kind that feeds the dimension, every kind that has evidence counts, again
 //! without an age limit.
 //!
+//! Retention compliance follows the same rules over the `verify` kind
+//! (`verify`, `fsck`, `repair apply` record it; Annex B.2.22): a local check,
+//! never an inventory's.
+//!
 //! Freshness is judged by the caller from the local head history, exactly as
 //! `verify` judges it (the same [`FreshnessJudgement`]); without an anchor it
-//! is `UNKNOWN`, whatever was passed. Durability and key availability are
-//! `UNKNOWN` (bytes show neither; `health` does not read the descriptor);
-//! searchability and retention compliance are `UNSUPPORTED`, as in `verify`.
-//! None of these is ever `PASS`.
+//! is `UNKNOWN`, whatever was passed.
+//!
+//! **Durability** comes from `commit` records (Annex B.2.22): the latest one
+//! about the current head gives `DEGRADED` with its flush outcome in a note
+//! (confirmed or not, one copy on one device is a reduced protection, and
+//! nothing in 1.0 establishes a recovery copy); without one it is `UNKNOWN`,
+//! because bytes cannot show durability. It is never `PASS`. Key availability
+//! is `UNKNOWN` (`health` does not read the descriptor) and searchability
+//! `UNSUPPORTED`, as in `verify`; neither is ever `PASS`.
 //!
 //! Evidence log lines that cannot be read are reported (a skipped item named
 //! `unreadable_evidence`) and **no dimension can be `PASS` while any exist**:
@@ -65,6 +74,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ErrorCode, MochiError, Result};
+use crate::publish::PublishDurability;
 use crate::report::{
     Finding, FreshnessAnchorKind, FreshnessBasis, Policy, Report, Severity, SkippedItem,
 };
@@ -72,10 +82,18 @@ use crate::status::{Dimension, Status, VerificationLevel};
 use crate::timestamp::Timestamp;
 use crate::verify::FreshnessJudgement;
 
-/// Evidence record schema.
+/// Evidence record schema of `verify`, `fsck`, `restore-test`, and
+/// `repair apply` records.
 pub const EVIDENCE_SCHEMA: u32 = 1;
+/// Evidence record schema of a commit record (Annex B.2.22,
+/// `health-evidence-v2.schema.json`). Every other record keeps schema 1, so
+/// an older reader only counts commit lines as unreadable.
+pub const EVIDENCE_SCHEMA_COMMIT: u32 = 2;
 /// Policy file schema tag.
 pub const POLICY_SCHEMA: &str = "mochi-health-policy-v1";
+/// The scope of a commit record ([`EvidenceRecord::from_commit`]).
+pub const COMMIT_SCOPE: &str =
+    "local commit on this device, published by this client; no recovery copy was checked";
 /// The default policy's age limit for `verify` evidence.
 pub const DEFAULT_VERIFY_MAX_AGE_DAYS: u32 = 30;
 
@@ -86,7 +104,9 @@ fn invalid(msg: impl Into<String>) -> MochiError {
 }
 
 /// The command that produced a record. Serialized as typed on the command
-/// line: `verify`, `fsck`, `restore-test`, `repair-apply`.
+/// line: `verify`, `fsck`, `restore-test`, `repair-apply`; `commit` for a
+/// commit this client published (`create`, `append`, the desktop app's New
+/// archive and Add; Annex B.2.22).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EvidenceCommand {
@@ -95,6 +115,9 @@ pub enum EvidenceCommand {
     RestoreTest,
     /// The re-verification of a new archive written by `repair apply`.
     RepairApply,
+    /// A commit this client published, with what it knows of its durability
+    /// (the sync and the directory flush). It speaks for durability only.
+    Commit,
 }
 
 /// What a policy age limit names.
@@ -108,12 +131,15 @@ pub enum EvidenceKind {
 }
 
 impl EvidenceCommand {
-    pub const fn kind(self) -> EvidenceKind {
+    /// The policy's kind of evidence; `None` for a commit, which has no age
+    /// limit (it is about one head, and a later commit replaces it).
+    pub const fn kind(self) -> Option<EvidenceKind> {
         match self {
             EvidenceCommand::Verify | EvidenceCommand::Fsck | EvidenceCommand::RepairApply => {
-                EvidenceKind::Verify
+                Some(EvidenceKind::Verify)
             }
-            EvidenceCommand::RestoreTest => EvidenceKind::RestoreTest,
+            EvidenceCommand::RestoreTest => Some(EvidenceKind::RestoreTest),
+            EvidenceCommand::Commit => None,
         }
     }
 
@@ -121,9 +147,11 @@ impl EvidenceCommand {
     /// live, never from a record.
     pub const fn assesses(self, d: Dimension) -> bool {
         match (self, d) {
+            (EvidenceCommand::Commit, Dimension::Durability) => true,
+            (EvidenceCommand::Commit, _) => false,
             (_, Dimension::Recoverability) => true,
             (EvidenceCommand::RestoreTest, _) => false,
-            (_, Dimension::Integrity) => true,
+            (_, Dimension::Integrity | Dimension::RetentionCompliance) => true,
             _ => false,
         }
     }
@@ -135,7 +163,7 @@ impl EvidenceKind {
             (self, d),
             (
                 EvidenceKind::Verify,
-                Dimension::Integrity | Dimension::Recoverability
+                Dimension::Integrity | Dimension::Recoverability | Dimension::RetentionCompliance
             ) | (EvidenceKind::RestoreTest, Dimension::Recoverability)
         )
     }
@@ -213,12 +241,47 @@ impl EvidenceRecord {
         })
     }
 
-    /// The record is well formed: known schema, a D15 timestamp, a 64-digit
+    /// A record of a commit this client published: durability `DEGRADED`
+    /// whatever the flush said (Annex B.2.22: one copy on one device is a
+    /// reduced protection even when every sync was confirmed; nothing in 1.0
+    /// establishes a recovery copy), with the flush outcome in the scope.
+    pub fn from_commit(
+        head: EvidenceHead,
+        durability: &PublishDurability,
+        completed_at: &Timestamp,
+        exit_code: u8,
+    ) -> EvidenceRecord {
+        let scope = match durability {
+            PublishDurability::Durable => format!("{COMMIT_SCOPE}: every sync was confirmed"),
+            PublishDurability::DirectoryUnconfirmed(why) => {
+                format!("{COMMIT_SCOPE}: the directory entry is unconfirmed ({why})")
+            }
+        };
+        EvidenceRecord {
+            schema: EVIDENCE_SCHEMA_COMMIT,
+            command: EvidenceCommand::Commit,
+            level: None,
+            completed_at: completed_at.to_string(),
+            head,
+            dimensions: [(Dimension::Durability, Status::Degraded)].into(),
+            exit_code,
+            scope: Some(scope),
+            finding_codes: Vec::new(),
+        }
+    }
+
+    /// The record is well formed: the schema of its command (1, or 2 for a
+    /// commit), a D15 timestamp, a 64-digit
     /// lower-case hexadecimal commit ID. Returns the parsed time.
     pub fn validate(&self) -> Result<Timestamp> {
-        if self.schema != EVIDENCE_SCHEMA {
+        let want = if self.command == EvidenceCommand::Commit {
+            EVIDENCE_SCHEMA_COMMIT
+        } else {
+            EVIDENCE_SCHEMA
+        };
+        if self.schema != want {
             return Err(invalid(format!(
-                "evidence schema {} is not {EVIDENCE_SCHEMA}",
+                "evidence schema {} is not {want} for this command",
                 self.schema
             )));
         }
@@ -340,6 +403,7 @@ fn cmd_name(c: EvidenceCommand) -> &'static str {
         EvidenceCommand::Fsck => "fsck",
         EvidenceCommand::RestoreTest => "restore-test",
         EvidenceCommand::RepairApply => "repair apply",
+        EvidenceCommand::Commit => "a commit by this client",
     }
 }
 
@@ -378,7 +442,7 @@ fn judge(
     let latest = records
         .iter()
         .filter(|(r, _)| r.command.assesses(d))
-        .filter(|(r, _)| r.command.kind() == kind)
+        .filter(|(r, _)| r.command.kind() == Some(kind))
         .filter(|(r, _)| r.dimensions.get(&d).is_some_and(|s| *s != Status::Unknown))
         .max_by_key(|(_, t)| *t);
     let Some((rec, at)) = latest else {
@@ -497,6 +561,49 @@ fn judge(
     }
 }
 
+/// Durability from commit records (Annex B.2.22): the latest commit record
+/// about the current head, capped at `DEGRADED`; `UNKNOWN` without one. A
+/// record about another head says nothing about this one.
+fn durability(records: &[(&EvidenceRecord, Timestamp)], inp: &Inputs<'_>) -> (Status, String) {
+    if let Some(why) = &inp.evidence_unavailable {
+        return (Status::Unknown, why.clone());
+    }
+    let latest = records
+        .iter()
+        .filter(|(r, _)| r.command == EvidenceCommand::Commit)
+        .filter(|(r, _)| r.head.seq == inp.current.seq && r.head.commit_id == inp.current.commit_id)
+        .max_by_key(|(_, t)| *t);
+    match latest {
+        None => (
+            Status::Unknown,
+            "this client did not record publishing the current head, and the archive's bytes \
+             cannot show whether they reached stable storage"
+                .to_owned(),
+        ),
+        Some((rec, _)) => {
+            let recorded = rec
+                .dimensions
+                .get(&Dimension::Durability)
+                .copied()
+                .unwrap_or(Status::Unknown);
+            // Never better than DEGRADED: one copy on one device.
+            let status = if recorded == Status::Pass {
+                Status::Degraded
+            } else {
+                recorded
+            };
+            let scope = rec.scope.as_deref().unwrap_or(COMMIT_SCOPE);
+            (
+                status,
+                format!(
+                    "{scope} (commit {} on {}); a single copy is a reduced protection",
+                    rec.head.seq, rec.completed_at
+                ),
+            )
+        }
+    }
+}
+
 /// Assess one archive's health from recorded evidence.
 ///
 /// The report is schema v1 and always passes [`Report::validate`]; its three
@@ -538,7 +645,11 @@ pub fn assess(inp: &Inputs<'_>, policy: &HealthPolicy) -> Report {
     }
 
     let mut oldest: Option<u64> = None;
-    for d in [Dimension::Integrity, Dimension::Recoverability] {
+    for d in [
+        Dimension::Integrity,
+        Dimension::Recoverability,
+        Dimension::RetentionCompliance,
+    ] {
         let mut out = if let Some(why) = &inp.evidence_unavailable {
             Outcome {
                 status: Status::Unknown,
@@ -623,12 +734,14 @@ pub fn assess(inp: &Inputs<'_>, policy: &HealthPolicy) -> Report {
         ));
     }
 
+    // Durability: what this client knew when it published the current head.
+    let (durable, why) = durability(&parsed, inp);
+    r.dimensions.insert(Dimension::Durability, durable);
+    r.skipped.push(note(Dimension::Durability, why));
+
     // Dimensions no 1.0 evidence covers, as `verify` reports them.
-    r.dimensions.insert(Dimension::Durability, Status::Unknown);
     r.dimensions
         .insert(Dimension::Searchability, Status::Unsupported);
-    r.dimensions
-        .insert(Dimension::RetentionCompliance, Status::Unsupported);
     r.dimensions
         .insert(Dimension::KeyAvailability, Status::Unknown);
     r.conclude(false);
@@ -754,7 +867,8 @@ mod tests {
         assert_eq!(dim(&r, Dimension::Recoverability), Status::Pass);
         assert_eq!(r.policy_result, Status::Pass);
         assert_eq!(r.exit_code, 0, "{:?}", r.skipped);
-        // Durability, key availability, searchability, retention are not PASS.
+        // Durability, key availability, and searchability are never PASS;
+        // retention compliance has no evidence in these records.
         assert_ne!(r.overall_status, Status::Pass);
         for d in [
             Dimension::Durability,
@@ -766,6 +880,111 @@ mod tests {
         }
         assert_eq!(dim(&r, Dimension::Searchability), Status::Unsupported);
         assert_eq!(r.coverage.evidence_age_seconds, Some(DAY as u64));
+    }
+
+    /// Annex B.2.22: a commit record about the current head gives durability
+    /// `DEGRADED` (never `PASS`, even with every sync confirmed) and says what
+    /// the flush showed; one about another head, or none, is `UNKNOWN`.
+    #[test]
+    fn durability_comes_from_this_client_s_commit_of_the_current_head_and_never_passes() {
+        let head = |seq: u64| EvidenceHead {
+            seq,
+            commit_id: if seq == 5 { HEAD } else { OLD }.into(),
+        };
+        let at = ts(T0 + 9 * DAY, 0);
+        let r = run(&[], &HealthPolicy::default(), now());
+        assert_eq!(dim(&r, Dimension::Durability), Status::Unknown);
+
+        let confirmed = EvidenceRecord::from_commit(head(5), &PublishDurability::Durable, &at, 0);
+        assert!(confirmed.validate().is_ok());
+        let r = run(
+            std::slice::from_ref(&confirmed),
+            &HealthPolicy::default(),
+            now(),
+        );
+        assert_eq!(dim(&r, Dimension::Durability), Status::Degraded);
+        let why = r.skipped.iter().find(|s| s.item == "durability").unwrap();
+        assert!(
+            why.reason.contains("every sync was confirmed"),
+            "{}",
+            why.reason
+        );
+        assert!(why.reason.contains("no recovery copy"), "{}", why.reason);
+
+        // A record that somehow says PASS is still capped.
+        let mut tampered = confirmed.clone();
+        tampered
+            .dimensions
+            .insert(Dimension::Durability, Status::Pass);
+        let r = run(&[tampered], &HealthPolicy::default(), now());
+        assert_eq!(dim(&r, Dimension::Durability), Status::Degraded);
+
+        let unconfirmed = EvidenceRecord::from_commit(
+            head(5),
+            &PublishDurability::DirectoryUnconfirmed("the folder flush is not documented".into()),
+            &at,
+            2,
+        );
+        let r = run(&[unconfirmed], &HealthPolicy::default(), now());
+        assert_eq!(dim(&r, Dimension::Durability), Status::Degraded);
+        let why = r.skipped.iter().find(|s| s.item == "durability").unwrap();
+        assert!(why.reason.contains("unconfirmed"), "{}", why.reason);
+
+        // About an earlier head: says nothing about this one.
+        let older = EvidenceRecord::from_commit(head(4), &PublishDurability::Durable, &at, 0);
+        let r = run(&[older], &HealthPolicy::default(), now());
+        assert_eq!(dim(&r, Dimension::Durability), Status::Unknown);
+
+        // A commit record speaks for durability only.
+        assert!(!EvidenceCommand::Commit.assesses(Dimension::Integrity));
+        let r = run(&[confirmed], &HealthPolicy::default(), now());
+        assert_eq!(dim(&r, Dimension::Integrity), Status::Unknown);
+        // A required durability is never a policy pass.
+        let policy = HealthPolicy {
+            required: [Dimension::Durability].into(),
+            ..HealthPolicy::default()
+        };
+        let r = run(
+            &[EvidenceRecord::from_commit(
+                head(5),
+                &PublishDurability::Durable,
+                &at,
+                0,
+            )],
+            &policy,
+            now(),
+        );
+        assert_eq!(r.policy_result, Status::Degraded);
+        assert_eq!(r.exit_code, 2);
+    }
+
+    /// Retention compliance is judged from `verify` records like integrity:
+    /// a recorded pass at the current head passes, a failure stands.
+    #[test]
+    fn retention_compliance_follows_recorded_verify_evidence() {
+        let at = ts(T0 + 9 * DAY, 0);
+        let pass = rec(
+            EvidenceCommand::Verify,
+            at,
+            5,
+            &[
+                (Dimension::Integrity, Status::Pass),
+                (Dimension::Recoverability, Status::Pass),
+                (Dimension::RetentionCompliance, Status::Pass),
+            ],
+        );
+        let r = run(&[pass], &HealthPolicy::default(), now());
+        assert_eq!(dim(&r, Dimension::RetentionCompliance), Status::Pass);
+        let fail = rec(
+            EvidenceCommand::Fsck,
+            ts(T0 + 2 * DAY, 0),
+            4,
+            &[(Dimension::RetentionCompliance, Status::Fail)],
+        );
+        let r = run(&[fail], &HealthPolicy::default(), now());
+        assert_eq!(dim(&r, Dimension::RetentionCompliance), Status::Fail);
+        // A restore-test does not speak for it.
+        assert!(!EvidenceCommand::RestoreTest.assesses(Dimension::RetentionCompliance));
     }
 
     #[test]

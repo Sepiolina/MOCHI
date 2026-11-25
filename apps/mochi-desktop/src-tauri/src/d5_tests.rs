@@ -106,6 +106,7 @@ impl Fx {
             tar_compatible: false,
             passphrase: passphrase.map(Secret::new),
             recovery_percent: recovery,
+            delete_sources: None,
         })?;
         Ok((dest, *done.commit.unwrap()))
     }
@@ -212,6 +213,7 @@ fn a_secret_and_every_request_holding_one_print_redacted() {
             tar_compatible: false,
             passphrase: Some(Secret::new(PASS)),
             recovery_percent: Some(10),
+            delete_sources: None,
         },
         JobRequest::AddPassphrase {
             handle: 1,
@@ -411,6 +413,7 @@ fn create_refuses_what_cannot_work_before_creating_anything() {
         tar_compatible: tar,
         passphrase: pass.map(Secret::new),
         recovery_percent: rr,
+        delete_sources: None,
     };
     // Encrypted + TAR-compatible: sealed objects are skipped by generic tools.
     let e = f.svc.validate(&req(true, Some(PASS), None)).unwrap_err();
@@ -448,6 +451,7 @@ fn an_existing_destination_is_never_replaced_and_leaks_no_passphrase() {
             tar_compatible: false,
             passphrase: Some(Secret::new(PASS)),
             recovery_percent: None,
+            delete_sources: None,
         })
         .unwrap_err();
     assert_eq!(e.code, ErrorCode::DestinationExists);
@@ -466,7 +470,10 @@ fn add_and_remove_work_on_an_unlocked_encrypted_archive_and_keep_it_sealed() {
     f.svc.staging.clear();
     f.svc.staging.add(&extra);
     let added = f
-        .run(&JobRequest::AddToArchive { handle: a.handle })
+        .run(&JobRequest::AddToArchive {
+            handle: a.handle,
+            delete_sources: None,
+        })
         .unwrap()
         .commit
         .unwrap();
@@ -699,7 +706,10 @@ fn a_recovery_record_is_fixed_at_creation_and_reported_and_survives_appends() {
     f.svc.staging.clear();
     f.svc.staging.add(&extra);
     let added = f
-        .run(&JobRequest::AddToArchive { handle: a.handle })
+        .run(&JobRequest::AddToArchive {
+            handle: a.handle,
+            delete_sources: None,
+        })
         .unwrap()
         .commit
         .unwrap();
@@ -952,8 +962,11 @@ fn re_encryption_writes_a_new_file_under_a_new_key_and_leaves_the_source_alone()
     let extra = f.sources(&[("c.txt", b"charlie")]);
     f.svc.staging.clear();
     f.svc.staging.add(&extra);
-    f.run(&JobRequest::AddToArchive { handle: a.handle })
-        .unwrap();
+    f.run(&JobRequest::AddToArchive {
+        handle: a.handle,
+        delete_sources: None,
+    })
+    .unwrap();
     let before = file_hash(&path);
     let old_id = a.archive_id.clone();
 
@@ -1117,8 +1130,11 @@ fn search_scopes_cover_every_snapshot_they_name_and_a_commit_after_the_head_is_r
     let extra = f.sources(&[("new-name.txt", b"v2")]);
     f.svc.staging.clear();
     f.svc.staging.add(&extra);
-    f.run(&JobRequest::AddToArchive { handle: a.handle })
-        .unwrap();
+    f.run(&JobRequest::AddToArchive {
+        handle: a.handle,
+        delete_sources: None,
+    })
+    .unwrap();
 
     let head = search(&f, a.handle, "name", SearchScopeChoice::Head, None, false).unwrap();
     assert_eq!(

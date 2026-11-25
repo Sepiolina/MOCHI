@@ -1,0 +1,219 @@
+; MOCHI recovery manifest, schema version 2 (FROZEN with draft 2; ratification item R3).
+; Decisions: spec Annex B.2 D10, D11, and Annex B D18 (retention, plan C9),
+; with the provenance of a rewritten archive (D18, plan C9).
+; Extends recovery-manifest-v1.cddl with key 11, retention, and key 12,
+; provenance. Readers accept schemas 1, 2, and 3. This file is complete and
+; standalone: every rule it uses is defined here.
+;
+; Schema 2 is written EXACTLY when a manifest carries retention data or
+; provenance and does not list the Encrypted required feature: a delta with
+; at least one retention operation, a snapshot whose retention state is not
+; empty, or the delta of commit 0 of a rewritten archive (provenance). Every
+; other manifest is schema 1, byte for byte as before, so one logical
+; manifest keeps exactly one encoding. A schema-2 manifest without retention
+; data and without provenance, and a schema-1 manifest with key 11 or 12, are
+; refused. The Encrypted profile uses schema 3 (recovery-manifest-v3.cddl).
+;
+; Encoding, frame, hash, and envelope: as recovery-manifest-v1.cddl (the
+; deterministic-CBOR subset of Annex B.1 D2; one skippable frame of kind
+; RECOVERY_MANIFEST, 0x184D2A58; envelope keys 0, 1, 2, 9, and 10).
+;
+; Key 11 is present in every schema-2 manifest:
+;   * delta: the retention operations of the commit, in order (may be empty
+;     only in the delta of commit 0 of a rewritten archive, which carries
+;     provenance instead);
+;   * snapshot: the complete retention state after the commit (never empty
+;     in schema 2: an empty state is written as schema 1).
+; Key 12 (provenance) is present only in the delta of commit 0, which is the
+; only place a rewritten archive can say where it came from.
+;
+; Retention semantics (D18):
+;   * Every commit is retained by default. A delta's operations apply in
+;     order, after its namespace operations, atomically, each judged against
+;     the state the previous one left. Readers rebuild the state at a commit
+;     from S(b), key 11, plus every delta's key 11 after b (D10.10).
+;   * expire s: s < this commit's sequence, and s not already expired.
+;   * hold label s: 1 <= label length <= 255; s <= this commit's sequence;
+;     label not already active.
+;   * release label: label active.
+;   * Roots at head h: h, every commit not expired, every held commit.
+;   * The catalog image holds no retention state (like promised
+;     attributes); D10.7 compares it through the snapshot manifest only.
+;
+; Rules CDDL cannot state, checked by the code (R3 section 7 lists them):
+;   * Everything listed in recovery-manifest-v1.cddl.
+;   * Retention operations are judged in order against the replayed state
+;     (already expired, label already active, label not active).
+;   * expired sequences and holds in a snapshot are strictly increasing
+;     (holds by label, bytewise); every expired sequence < this sequence and
+;     every held sequence <= this sequence.
+;   * provenance: the source sequences in key 1 are strictly increasing; key 2
+;     is strictly increasing, each entry before the last source sequence and
+;     not also in key 1.
+
+manifest = root-delta / child-delta / snapshot
+
+; Commit 0's delta, the only delta that may carry provenance: either a
+; rewritten archive's (provenance, with or without retention operations) or
+; one with retention operations alone.
+root-delta = rewritten-root / retained-root
+
+; Provenance makes the schema 2, so retention operations may be absent.
+rewritten-root = {
+  0: 2,
+  1: archive-id,
+  2: 0,
+  3: null,
+  4: 0,                       ; kind: delta
+  delta-contents,
+  common-tail,
+  11: [* retention-op],       ; the commit's retention operations, in order (possibly none)
+  12: provenance,
+}
+
+retained-root = {
+  0: 2,
+  1: archive-id,
+  2: 0,
+  3: null,
+  4: 0,
+  delta-contents,
+  common-tail,
+  11: [+ retention-op],
+}
+
+; Delta of commit n >= 1: no provenance, so retention operations are what
+; makes it schema 2.
+child-delta = {
+  0: 2,
+  1: archive-id,
+  2: uint .ge 1,
+  3: parent,
+  4: 0,
+  delta-contents,
+  common-tail,
+  11: [+ retention-op],
+}
+
+snapshot = {
+  0: 2,
+  1: archive-id,
+  2: seq,
+  3: null,
+  4: 1,                       ; kind: snapshot
+  5: [* chunk],
+  6: [* file-version],
+  7: [],
+  8: [* entry],
+  common-tail,
+  11: retention-state,        ; never empty in schema 2
+}
+
+delta-contents = (
+  5: [* chunk],
+  6: [* file-version],
+  7: [* op],
+  8: [],
+)
+
+common-tail = (
+  9: features,
+  10: txid,
+)
+
+retention-op = expire / hold / release
+expire = [0, seq]             ; seq < this commit's sequence
+hold = [1, label, seq]        ; seq <= this commit's sequence
+release = [2, label]
+label = bstr .size (1..255)
+
+; Never empty: some expired sequence or some active hold.
+retention-state = {
+  0: [+ seq],                 ; expired, strictly increasing, each < this sequence
+  1: [* hold-entry],          ; active holds, strictly increasing by label (bytewise)
+} / {
+  0: [],
+  1: [+ hold-entry],
+}
+hold-entry = [label, seq]     ; seq <= this commit's sequence
+
+; Where a rewritten (compacted or collected) archive came from.
+provenance = {
+  0: archive-id,              ; source archive ID
+  1: [+ [seq, hash32]],       ; per new commit: source sequence, source commit ID; strictly increasing
+  2: [* seq],                 ; collected source snapshots; strictly increasing, each before the source head and not kept
+}
+
+parent = {
+  0: seq,                     ; parent sequence (= this - 1)
+  1: hash32,                  ; stored-object hash of the parent commit's delta manifest
+}
+
+chunk = {
+  0: hash32,                  ; object ID
+  1: 0,                       ; encoding: one Zstandard frame (plan O21)
+  2: 0,                       ; protection: 0 none (1 AEAD is the Encrypted profile, schema 3)
+  3: uint .ge 1,              ; stored length (> 0)
+  4: hash32,                  ; stored-object hash
+  5: uint,                    ; decoded length
+  6: hash32,                  ; chunk content hash
+  7: [* dependency],          ; sorted, no duplicates
+  8: opt-offset,              ; stored offset in a monolithic archive; null = rediscover by scan + stored hash
+}
+opt-offset = uint / null
+dependency = [dep-kind, hash32]
+dep-kind = 0 / 1              ; 0 dictionary, 1 key envelope; then the object ID
+
+; A file version is a file or a directory; the two forms are separate rules.
+file-version = regular / directory
+
+regular = {
+  0: hash32,                  ; file-version ID
+  1: 0,                       ; kind: file
+  2: uint,                    ; logical length
+  3: hash32,                  ; plain BLAKE3 file-content hash (plan O20)
+  4: [* extent],              ; must cover exactly [0, logical length) (spec 10.3)
+  5: attributes,
+}
+
+; Kind 2 (symbolic link) is reserved: a reader answers UNSUPPORTED_FEATURE.
+directory = {
+  0: hash32,
+  1: 1,                       ; kind: directory
+  2: 0,                       ; logical length 0
+  3: null,                    ; no content hash
+  4: [],                      ; no extents
+  5: attributes,
+}
+
+; logical offset, length (> 0), chunk ID, chunk offset; or a hole.
+extent = data-extent / hole
+data-extent = [uint, uint, hash32, uint]
+hole = [uint, uint, null, 0]
+
+; Promised attributes (spec Annex B.1 D6). Absent key = not recorded.
+attributes = {
+  ? 0: [mode, u32, u32],      ; POSIX: permission bits, numeric uid, numeric gid
+  ? 1: windows-bits,          ; Windows attributes
+  ? 2: mtime,
+}
+mode = uint .le 4095          ; permission bits only (<= 0o7777)
+u32 = uint .le 4294967295
+; READONLY 0x01 | HIDDEN 0x02 | SYSTEM 0x04 | ARCHIVE 0x20 (mask 0x27):
+; exactly these sixteen values (0 to 7, and 0x20 to 0x27).
+windows-bits = 0 / 1 / 2 / 3 / 4 / 5 / 6 / 7 / 32 / 33 / 34 / 35 / 36 / 37 / 38 / 39
+mtime = [secs, nanos]         ; seconds since the Unix epoch, nanoseconds
+secs = int                    ; must fit a signed 64-bit integer (checked by the code)
+
+op = put / delete
+put = [0, path, hash32]       ; path (stored form, spec 10.4 / plan O24), file-version ID
+delete = [1, path]
+entry = [path, hash32]        ; path, file-version ID
+path = bstr
+
+archive-id = bstr .size 32
+txid = bstr .size 16
+hash32 = bstr .size 32
+seq = uint
+features = [* uint]           ; strictly increasing
+nanos = uint .lt 1000000000

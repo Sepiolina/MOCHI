@@ -8,11 +8,14 @@
 //
 // The independent oracle is the command-line tool: `mochi verify --json`
 // over the same file must report the same thing (apart from the run's start
-// and completion times). It is built by the CI job (`cargo build -p
+// and completion times). The app and the tool share the local head history
+// (spec Annex B.2.22; MOCHI_STATE_DIR is this run's, set in wdio.conf.js), so
+// the oracle runs against a copy of that history taken just before the app's
+// test: both then judge freshness against the same anchor. It is built by the CI job (`cargo build -p
 // mochi-cli`); MOCHI_CLI_BINARY overrides its path.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41,10 +44,29 @@ const assertNoBannedWording = async () => {
 
 const sha = (file) => createHash("sha256").update(readFileSync(file)).digest("hex");
 
-/** `mochi verify --json` over `file`: its report without the run's times, and its exit code. */
-function cliVerify(file, ...args) {
+/** A copy of the shared state directory as it is now (see the header). */
+function snapshotState() {
+  const snap = mkdtempSync(path.join(os.tmpdir(), "mochi-d4-state-"));
+  const state = process.env.MOCHI_STATE_DIR;
+  if (state && existsSync(state)) cpSync(state, snap, { recursive: true });
+  return snap;
+}
+
+/** Whether the snapshot `snap` holds a head for `archiveId`. */
+function seenIn(snap, archiveId) {
+  const heads = path.join(snap, "heads.json");
+  return existsSync(heads) && archiveId in JSON.parse(readFileSync(heads, "utf8")).heads;
+}
+
+/**
+ * `mochi verify --json` over `file`: its report without the run's times, and
+ * its exit code. With `state`, against that copy of the head history;
+ * without, with no local history.
+ */
+function cliVerify(file, state) {
   if (!existsSync(cli)) throw new Error(`missing ${cli}: cargo build -p mochi-cli`);
-  const r = spawnSync(cli, ["verify", file, "--json", "--no-local-history", ...args], { encoding: "utf8" });
+  const history = state ? ["--state-dir", state] : ["--no-local-history"];
+  const r = spawnSync(cli, [...history, "verify", file, "--json"], { encoding: "utf8" });
   return { report: withoutTimes(JSON.parse(r.stdout)), exit: r.status };
 }
 
@@ -120,16 +142,24 @@ describe("test, health, and repair", () => {
   it("tests a good archive read-only and shows core's report per dimension", async () => {
     const before = sha(good);
     await choose(good);
+    const snap = snapshotState();
     const report = await testArchive();
     expect(await dimensionStatus("integrity")).toBe("PASS");
     expect(await dimensionStatus("recoverability")).toBe("PASS");
-    expect(await dimensionStatus("freshness")).toBe("UNKNOWN");
+    // First sight is UNKNOWN; a head seen before (another spec of this run
+    // may have tested or changed this fixture) is PASS. Never PASS unanchored.
+    const seen = seenIn(snap, report.archive_id);
+    expect(await dimensionStatus("freshness")).toBe(seen ? "PASS" : "UNKNOWN");
     await openDetails();
-    await expect($('[data-testid="report-freshness-note"]')).toHaveText(expect.stringContaining("not a failure"));
+    if (!seen) {
+      await expect($('[data-testid="report-freshness-note"]')).toHaveText(expect.stringContaining("not a failure"));
+    }
+    // A test in which nothing failed records the head, for the next test.
+    expect(seenIn(snapshotState(), report.archive_id)).toBe(true);
     expect(await $('[data-testid="report"]').getAttribute("data-overall")).not.toBe("PASS");
     await assertOnlyPassLooksLikeSuccess();
     // The same report as the command-line tool's.
-    const oracle = cliVerify(good);
+    const oracle = cliVerify(good, snap);
     expect(withoutTimes(report)).toEqual(oracle.report);
     expect(report.exit_code).toBe(oracle.exit);
     expect(sha(good)).toBe(before);
@@ -155,6 +185,7 @@ describe("test, health, and repair", () => {
   it("shows FAIL for a corrupted archive without hiding it in the overall status", async () => {
     const before = sha(damaged);
     await choose(damaged);
+    const snap = snapshotState();
     const report = await testArchive();
     expect(await dimensionStatus("integrity")).toBe("FAIL");
     await expect($('[data-testid="report"]')).toHaveAttribute("data-overall", "FAIL");
@@ -164,12 +195,12 @@ describe("test, health, and repair", () => {
     await expect($('[data-testid="report-overall"]')).toHaveText(expect.stringContaining("Failing: Integrity"));
     await expect($('[data-testid="report-overall"]')).toHaveText(expect.stringContaining("exit code 1"));
     await assertOnlyPassLooksLikeSuccess();
-    const oracle = cliVerify(damaged);
+    const oracle = cliVerify(damaged, snap);
     expect(oracle.exit).toBe(1);
     expect(withoutTimes(report)).toEqual(oracle.report);
     expect(sha(damaged)).toBe(before);
 
-    // Health from this session's evidence: the failure stands.
+    // Health from the shared evidence log: the failure stands.
     await press("check-health");
     await $('[data-testid="health"]').waitForExist({ timeout: 30_000 });
     const health = await browser.execute(() =>

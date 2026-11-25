@@ -1,0 +1,315 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mochi.invalid/schemas/json/common.schema.json",
+  "title": "MOCHI shared definitions",
+  "description": "Definitions every MOCHI JSON Schema refers to (R7, gate G15). Not an output of its own.",
+  "$defs": {
+    "u8": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "u16": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    "u32": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "u64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "seq": {
+      "description": "A commit sequence number.",
+      "$ref": "#/$defs/u64"
+    },
+    "hex32": {
+      "description": "32 bytes as 64 lower-case hexadecimal digits: an archive, commit, object, or file-version ID, or a BLAKE3-256 digest.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "hex16": {
+      "description": "16 bytes as 32 lower-case hexadecimal digits: a key-envelope ID.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "hex-bytes": {
+      "description": "Exact bytes as lower-case hexadecimal, two digits per byte.",
+      "type": "string",
+      "pattern": "^([0-9a-f]{2})*$"
+    },
+    "timestamp": {
+      "description": "A D15 timestamp (spec Annex B.2 D15): UTC with nine fraction digits.",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{9}Z$"
+    },
+    "status": {
+      "description": "A spec 20.4 status value. There are no others.",
+      "enum": [
+        "PASS",
+        "FAIL",
+        "DEGRADED",
+        "UNKNOWN",
+        "OVERDUE",
+        "UNSUPPORTED"
+      ]
+    },
+    "dimension": {
+      "description": "A spec 20.3 health dimension.",
+      "enum": [
+        "durability",
+        "integrity",
+        "recoverability",
+        "searchability",
+        "freshness",
+        "retention_compliance",
+        "key_availability"
+      ]
+    },
+    "level": {
+      "description": "A spec 20.1 verification level.",
+      "enum": [
+        "structural",
+        "referential",
+        "stored_integrity",
+        "content_integrity",
+        "restoration",
+        "search",
+        "inventory",
+        "disaster_recovery"
+      ]
+    },
+    "severity": {
+      "enum": [
+        "info",
+        "warning",
+        "error"
+      ]
+    },
+    "exit-code": {
+      "description": "A spec 23.2 exit code (D15).",
+      "enum": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ]
+    },
+    "error-code": {
+      "description": "A registered stable error code, in registry order (R7 section 6). Adding a code appends here; renaming, removing, or changing the meaning of one is a breaking change.",
+      "enum": [
+        "IO_ERROR",
+        "OUT_OF_BOUNDS",
+        "LIMIT_EXCEEDED",
+        "LOCK_CONFLICT",
+        "INVALID_ARGUMENT",
+        "CANCELLED",
+        "UNSUPPORTED_FEATURE",
+        "NOT_IMPLEMENTED",
+        "REPORT_INCONSISTENT",
+        "MALFORMED_FRAME",
+        "TRUNCATED",
+        "FOOTER_INVALID",
+        "ENVELOPE_INVALID",
+        "STORED_INTEGRITY_FAILED",
+        "CONTENT_INTEGRITY_FAILED",
+        "PATH_INVALID",
+        "EXTENT_INVALID",
+        "NAMESPACE_INVALID",
+        "CATALOG_INVALID",
+        "IDENTITY_CONFLICT",
+        "RECORD_INVALID",
+        "NO_VALID_HEAD",
+        "UNCOMMITTED_TAIL",
+        "TAIL_UNRESOLVED",
+        "COMMIT_UNCONFIRMED",
+        "WRITER_POISONED",
+        "DESTINATION_EXISTS",
+        "CAPACITY_EXCEEDED",
+        "CHECKPOINT_MISMATCH",
+        "DESCRIPTOR_INVALID",
+        "RETENTION_UNRESOLVED",
+        "QUARANTINE_FAILED",
+        "DURABILITY_UNCONFIRMED",
+        "PROFILE_CHANGE_UNSUPPORTED",
+        "NAME_COLLISION",
+        "NAME_UNSUPPORTED",
+        "ATTRIBUTE_NOT_RESTORED",
+        "REFERENCE_INVALID",
+        "FRESHNESS_FAILED",
+        "PROFILE_VIOLATION",
+        "KEY_UNAVAILABLE",
+        "KDF_COST_BELOW_DEFAULT",
+        "LIMIT_NOT_DEFAULT",
+        "PARITY_DAMAGED",
+        "PARITY_CAPACITY_EXCEEDED",
+        "ARCHIVE_ID_AMBIGUOUS"
+      ]
+    },
+    "seq-range": {
+      "description": "An inclusive range of commit sequences (D10.9).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "first",
+        "last"
+      ],
+      "properties": {
+        "first": {
+          "$ref": "#/$defs/seq"
+        },
+        "last": {
+          "$ref": "#/$defs/seq"
+        }
+      }
+    },
+    "finding": {
+      "description": "A structured finding with a stable code (spec 20.5). The four optional fields are omitted when absent, never null.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "severity"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/error-code"
+        },
+        "severity": {
+          "$ref": "#/$defs/severity"
+        },
+        "message": {
+          "type": "string"
+        },
+        "expected": {
+          "type": "string"
+        },
+        "observed": {
+          "type": "string"
+        },
+        "affected": {
+          "$ref": "#/$defs/seq-range"
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    },
+    "problem": {
+      "description": "Why something failed: a stable code and its message.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/error-code"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "path": {
+      "description": "An archive path. When its bytes are not UTF-8 this is a lossy rendering and path_hex beside it holds the exact bytes.",
+      "type": "string"
+    },
+    "entry-kind": {
+      "enum": [
+        "file",
+        "directory"
+      ]
+    },
+    "dimensions": {
+      "description": "One status for every spec 20.3 dimension.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "durability",
+        "integrity",
+        "recoverability",
+        "searchability",
+        "freshness",
+        "retention_compliance",
+        "key_availability"
+      ],
+      "properties": {
+        "durability": {
+          "$ref": "#/$defs/status"
+        },
+        "integrity": {
+          "$ref": "#/$defs/status"
+        },
+        "recoverability": {
+          "$ref": "#/$defs/status"
+        },
+        "searchability": {
+          "$ref": "#/$defs/status"
+        },
+        "freshness": {
+          "$ref": "#/$defs/status"
+        },
+        "retention_compliance": {
+          "$ref": "#/$defs/status"
+        },
+        "key_availability": {
+          "$ref": "#/$defs/status"
+        }
+      }
+    },
+    "commit-status": {
+      "description": "What a local commit reports (spec 23.3 #6). Nothing in 1.0 reports PRESERVED.",
+      "const": "LOCAL_COMMITTED"
+    },
+    "durability": {
+      "description": "Whether the new head's directory entry was confirmed durable.",
+      "enum": [
+        "durable",
+        "directory_unconfirmed"
+      ]
+    },
+    "catalog-source": {
+      "description": "Where an opened catalog came from: its image, or the same checkpoint's snapshot manifest when the image is damaged.",
+      "enum": [
+        "image",
+        "snapshot-manifest"
+      ]
+    },
+    "plan-head": {
+      "description": "The head a plan or rewrite was made at.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seq",
+        "commit_id",
+        "footer_offset",
+        "committed_len"
+      ],
+      "properties": {
+        "seq": {
+          "$ref": "#/$defs/seq"
+        },
+        "commit_id": {
+          "$ref": "#/$defs/hex32"
+        },
+        "footer_offset": {
+          "$ref": "#/$defs/u64"
+        },
+        "committed_len": {
+          "$ref": "#/$defs/u64"
+        }
+      }
+    }
+  }
+}

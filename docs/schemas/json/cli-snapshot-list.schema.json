@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mochi.invalid/schemas/json/cli-snapshot-list.schema.json",
+  "title": "mochi snapshot list --json",
+  "description": "Every commit and its retention at the head: `mochi snapshot list --json`. When retention cannot be rebuilt, retention_known is false and expired and retained are null.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "archive_id",
+    "retention_known",
+    "commits"
+  ],
+  "properties": {
+    "schema": {
+      "const": "mochi-cli-snapshot-list-v1"
+    },
+    "archive_id": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/hex32"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "retention_known": {
+      "type": "boolean"
+    },
+    "commits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "seq",
+          "commit_id",
+          "time",
+          "checkpoint",
+          "footer_offset",
+          "expired",
+          "holds",
+          "retained"
+        ],
+        "properties": {
+          "seq": {
+            "$ref": "common.schema.json#/$defs/seq"
+          },
+          "commit_id": {
+            "$ref": "common.schema.json#/$defs/hex32"
+          },
+          "time": {
+            "anyOf": [
+              {
+                "$ref": "common.schema.json#/$defs/timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "checkpoint": {
+            "type": "boolean"
+          },
+          "footer_offset": {
+            "$ref": "common.schema.json#/$defs/u64"
+          },
+          "expired": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "holds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "retained": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "retention_known": {
+            "const": false
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "commits": {
+            "items": {
+              "properties": {
+                "expired": {
+                  "type": "null"
+                },
+                "retained": {
+                  "type": "null"
+                },
+                "holds": {
+                  "maxItems": 0
+                }
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "commits": {
+            "items": {
+              "properties": {
+                "expired": {
+                  "type": "boolean"
+                },
+                "retained": {
+                  "type": "boolean"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

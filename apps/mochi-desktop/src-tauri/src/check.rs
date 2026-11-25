@@ -28,12 +28,19 @@
 //!   by ID, with the copies and salvage options it was made with; core plans
 //!   again and refuses any difference. Changing the archive or the copies
 //!   drops the plan.
-//! * **Freshness has no anchor.** The app keeps no head history yet, so
-//!   freshness is `UNKNOWN` (spec Annex B.1 D8), never `PASS`.
-//! * **Evidence is this session's.** Each completed test is recorded in
-//!   memory and the health summary reads those records; nothing is saved and
-//!   the command-line tool's evidence log is not read, because the log lives
-//!   in `mochi-cli`, not in core (plan D4 "Gap").
+//! * **Freshness from the shared head history** (spec Annex B.2.22, which
+//!   replaces B.3 item 5). With "Remember archives on this computer" on (the
+//!   default), a test is anchored at the head the app or the command-line
+//!   tool last saw on this computer (D8: `PASS` if the history still holds
+//!   it, `FAIL` on a rollback or substitution, `UNKNOWN` at first sight), and
+//!   a test in which nothing failed records the head, as `mochi verify` does.
+//!   Off, freshness has no anchor and is `UNKNOWN`, never `PASS`.
+//! * **Evidence is shared, or this session's.** With local history on, each
+//!   completed test (and each commit the app publishes, `history::committed`)
+//!   is appended to the evidence log `mochi health` reads, and the health
+//!   summary reads that log: the command-line tool's evidence counts here and
+//!   the reverse. Off, each test is recorded in memory only and nothing is
+//!   saved.
 //! * **Encrypted archives (D20, D5).** The subject says whether it is
 //!   Encrypted (the head commit record, read without a key) and whether Rust
 //!   holds a key for it. The passphrase crosses IPC once, in `unlock`, and is
@@ -53,7 +60,7 @@ use mochi_core::health::{
 };
 use mochi_core::job::JobContext;
 use mochi_core::object::{ArchiveId, OsIds};
-use mochi_core::publish::{locate_head, open_head, read_commit, ReadOptions};
+use mochi_core::publish::{commit_history, locate_head, open_head, read_commit, ReadOptions};
 use mochi_core::repair::{
     self, LostSnapshot, OmittedEntry, Outcome, RepairOptions, RepairPlan, RepairReport,
     RetentionPlan,
@@ -63,7 +70,9 @@ use mochi_core::salvage::SalvageOptions;
 use mochi_core::status::{Status, VerificationLevel};
 use mochi_core::storage::os::{OsDir, OsReadStorage};
 use mochi_core::timestamp::Timestamp;
-use mochi_core::verify::{verify, FreshnessAnchor, FreshnessJudgement, VerifyOptions};
+use mochi_core::verify::{
+    judge_freshness_of, verify, FreshnessAnchor, FreshnessJudgement, VerifyOptions,
+};
 use mochi_core::{ErrorCode, MochiError, Result};
 use serde::Serialize;
 
@@ -387,24 +396,62 @@ impl Checks {
             seq: commit.seq,
             commit_id: commit_id.to_hex(),
         };
-        let records: Vec<EvidenceRecord> = self
-            .lock()
-            .evidence
-            .get(&archive_id)
-            .map(|r| r.iter().cloned().collect())
-            .unwrap_or_default();
+        let store = crate::history::store();
+        // The shared log and head history (Annex B.2.22), or, with local
+        // history off, this session's records and no anchor.
+        let (records, unreadable, seen) = match &store {
+            Some(st) => {
+                let ev = st.read_evidence(&commit.archive_id).unwrap_or_default();
+                let seen = st.get(&commit.archive_id).ok().flatten();
+                (ev.records, ev.unreadable, seen)
+            }
+            None => (
+                self.lock()
+                    .evidence
+                    .get(&archive_id)
+                    .map(|r| r.iter().cloned().collect())
+                    .unwrap_or_default(),
+                0,
+                None,
+            ),
+        };
+        let mut freshness = FreshnessJudgement {
+            status: Status::Unknown,
+            findings: Vec::new(),
+        };
+        let mut freshness_note = None;
+        if let Some(h) = seen {
+            match commit_history(&src, &read) {
+                Ok(history) => {
+                    freshness = judge_freshness_of(
+                        &FreshnessAnchor::LocalHistory {
+                            seq: h.seq,
+                            commit_id: h.commit_id,
+                        },
+                        &history,
+                    );
+                }
+                Err(e) => {
+                    freshness_note = Some(format!(
+                        "the commit history could not be read, so the head cannot be compared \
+                         with the one last seen: {}",
+                        e.message
+                    ));
+                }
+            }
+        }
         let report = health::assess(
             &Inputs {
                 evidence: &records,
-                unreadable_evidence: 0,
+                unreadable_evidence: unreadable,
                 evidence_unavailable: None,
                 current: &current,
-                anchor: None,
-                freshness: FreshnessJudgement {
-                    status: Status::Unknown,
-                    findings: Vec::new(),
-                },
-                freshness_note: None,
+                anchor: seen.map(|h| health::AnchorRef {
+                    seq: h.seq,
+                    commit_id: h.commit_id.to_hex(),
+                }),
+                freshness,
+                freshness_note,
                 now: Timestamp::now()?,
             },
             &health::HealthPolicy::default(),
@@ -560,13 +607,19 @@ impl Checks {
         let chosen = self.subject_of(subject)?;
         let path = chosen.path.clone();
         let src = OsReadStorage::open(&path).map_err(MochiError::from)?;
+        let read = chosen.read();
+        let store = crate::history::store();
+        // The head last seen on this computer, by the app or the CLI (D8).
+        let anchor = crate::history::anchor(
+            store.as_ref(),
+            crate::history::claimed_archive_id(&src, &read),
+        );
         let opts = VerifyOptions {
             level: verification_level(level),
             // With the passphrase every level runs; without one an Encrypted
             // archive is checked keylessly (D20 item 12).
-            read: chosen.read(),
-            // The app keeps no head history yet (plan D4 "Gap").
-            anchor: FreshnessAnchor::None,
+            read,
+            anchor,
             require_freshness: false,
             deep,
         };
@@ -576,6 +629,11 @@ impl Checks {
         }
         let keyless = head_encrypted(&src, &opts.read) && chosen.keys.is_none();
         let report = self.keep(ReportKind::Test, &path, deep, keyless, v.report.clone())?;
+        if v.head_is_anchorable() {
+            if let Some(h) = v.head {
+                crate::history::remember(store.as_ref(), h.archive_id, h.seq, h.commit_id);
+            }
+        }
         if let Some(h) = v.head {
             let command = if deep {
                 EvidenceCommand::Fsck
@@ -588,10 +646,13 @@ impl Checks {
             };
             // As the CLI records it: every completed run with a verified head,
             // failures included (a failure must outlive the run that found it).
-            self.record(
-                h.archive_id.to_hex(),
-                EvidenceRecord::from_report(command, &v.report, head),
-            );
+            let record = EvidenceRecord::from_report(command, &v.report, head);
+            match (&store, &record) {
+                (Some(_), Some(r)) => {
+                    crate::history::record_evidence(store.as_ref(), &h.archive_id, r);
+                }
+                _ => self.record(h.archive_id.to_hex(), record),
+            }
         }
         let summary = format!(
             "tested {}: overall {}, exit {}",
@@ -737,6 +798,24 @@ impl Checks {
             &options,
             ctx,
         )?;
+        // The new archive's head anchors a later test of it (D8), and its
+        // publication is durability evidence (Annex B.2.22), as the CLI does.
+        if let Ok(out) = OsReadStorage::open(&output) {
+            if let Ok(h) = open_head(&out, &read) {
+                let durability = match &report.durability_unconfirmed {
+                    None => mochi_core::publish::PublishDurability::Durable,
+                    Some(why) => {
+                        mochi_core::publish::PublishDurability::DirectoryUnconfirmed(why.clone())
+                    }
+                };
+                crate::history::committed_head(
+                    h.commit.archive_id,
+                    h.seq(),
+                    h.commit_id,
+                    &durability,
+                );
+            }
+        }
         {
             let mut s = self.lock();
             s.repaired = Some(output.clone());
@@ -1549,6 +1628,61 @@ mod tests {
         assert_eq!(status(&h.report, "integrity"), StatusView::Fail);
         assert_eq!(h.report.overall_status, StatusView::Fail);
         assert_eq!(h.report.exit_code, 1);
+    }
+
+    /// Annex B.2.22: with local history on, the app shares the CLI's head
+    /// history and evidence log. First sight is `UNKNOWN`; a test in which
+    /// nothing failed records the head, so the next one passes freshness; an
+    /// anchor the archive no longer contains (a rollback or substitution)
+    /// fails it; the health summary reads the shared log, not the session.
+    #[test]
+    fn local_history_anchors_freshness_and_is_shared_with_the_cli() {
+        use mochi_core::storage::os::history::{HeadStore, SeenHead};
+        let f = fx();
+        let state = f.at("state");
+        crate::history::use_dir_for_test(Some(&state));
+        let good = f.good("good.mochi");
+        let id = f.choose(&good);
+
+        let first = f.test(id, CheckLevel::Restoration, false);
+        assert_eq!(status(&first, "freshness"), StatusView::Unknown);
+        assert_eq!(status(&first, "retention_compliance"), StatusView::Pass);
+        assert!(state.join("heads.json").exists(), "the head was recorded");
+        let second = f.test(id, CheckLevel::Restoration, false);
+        assert_eq!(status(&second, "freshness"), StatusView::Pass);
+
+        // The log is the CLI's: a fresh `Checks` (a new session) reads it.
+        let later = Checks::default();
+        let again = later
+            .choose_subject(&f.archives, SubjectPick::Path(good.clone()))
+            .unwrap()
+            .id;
+        let h = later.health(again).unwrap();
+        assert_eq!(h.records, 2);
+        assert_eq!(status(&h.report, "integrity"), StatusView::Pass);
+        assert_eq!(status(&h.report, "freshness"), StatusView::Pass);
+        assert_eq!(status(&h.report, "retention_compliance"), StatusView::Pass);
+
+        // A head this archive does not contain was seen before: FAIL.
+        let src = OsReadStorage::open(&good).unwrap();
+        let archive = crate::history::claimed_archive_id(&src, &ReadOptions::default()).unwrap();
+        let store = HeadStore::locate(Some(&state)).unwrap();
+        store
+            .record(
+                &archive,
+                SeenHead {
+                    seq: 99,
+                    commit_id: mochi_format::digest::CommitId::from_bytes([9; 32]),
+                },
+            )
+            .unwrap();
+        let rolled = f.test(id, CheckLevel::Structural, false);
+        assert_eq!(status(&rolled, "freshness"), StatusView::Fail);
+        assert_eq!(rolled.exit_code, 1);
+        // A failing run never lowers or replaces the anchor.
+        assert_eq!(store.get(&archive).unwrap().unwrap().seq, 99);
+
+        crate::history::use_dir_for_test(None);
     }
 
     #[test]

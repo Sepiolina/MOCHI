@@ -1,0 +1,229 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mochi.invalid/schemas/json/cli-commit-v2.schema.json",
+  "title": "mochi create / append --move-sources-to-bin --json",
+  "description": "What `mochi create` and `mochi append` write with --json when --move-sources-to-bin is given (spec Annex B.2.23 item 3): every field of mochi-cli-commit-v1's commit document, plus what was moved to the Recycle Bin or Trash and what was kept. Without the switch the output stays mochi-cli-commit-v1, which is frozen. Frozen when written; a change is a new schema number.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "archive",
+    "status",
+    "archive_id",
+    "encrypted",
+    "seq",
+    "commit_id",
+    "durability",
+    "durability_note",
+    "added",
+    "deleted",
+    "skipped",
+    "truncation",
+    "exit_code",
+    "sources_moved",
+    "sources_kept"
+  ],
+  "properties": {
+    "schema": {
+      "const": "mochi-cli-commit-v2"
+    },
+    "command": {
+      "enum": [
+        "create",
+        "append"
+      ]
+    },
+    "archive": {
+      "type": "string"
+    },
+    "status": {
+      "$ref": "common.schema.json#/$defs/commit-status"
+    },
+    "archive_id": {
+      "$ref": "common.schema.json#/$defs/hex32"
+    },
+    "encrypted": {
+      "type": "boolean"
+    },
+    "seq": {
+      "$ref": "common.schema.json#/$defs/seq"
+    },
+    "commit_id": {
+      "$ref": "common.schema.json#/$defs/hex32"
+    },
+    "durability": {
+      "$ref": "common.schema.json#/$defs/durability"
+    },
+    "durability_note": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "added": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "files",
+        "directories",
+        "bytes"
+      ],
+      "properties": {
+        "files": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "directories": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "bytes": {
+          "$ref": "common.schema.json#/$defs/u64"
+        }
+      }
+    },
+    "deleted": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "path": {
+            "$ref": "common.schema.json#/$defs/path"
+          },
+          "path_hex": {
+            "$ref": "common.schema.json#/$defs/hex-bytes"
+          }
+        }
+      }
+    },
+    "skipped": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "kind",
+          "reason"
+        ],
+        "properties": {
+          "path": {
+            "$ref": "common.schema.json#/$defs/path"
+          },
+          "path_hex": {
+            "$ref": "common.schema.json#/$defs/hex-bytes"
+          },
+          "kind": {
+            "enum": [
+              "file",
+              "directory",
+              "symbolic link",
+              "special file"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "truncation": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/findings"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "exit_code": {
+      "enum": [
+        0,
+        2
+      ]
+    },
+    "sources_moved": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Inputs (files, and folders once empty) moved to the Recycle Bin or Trash."
+    },
+    "sources_kept": {
+      "type": "array",
+      "description": "Inputs kept, each with the reason (its archived copy did not read back, it changed, a folder is not empty, no Bin is available, ...).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "reason"
+        ],
+        "properties": {
+          "path": {
+            "$ref": "common.schema.json#/$defs/path"
+          },
+          "path_hex": {
+            "$ref": "common.schema.json#/$defs/hex-bytes"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "description": "durability_note says why exactly when the directory entry is unconfirmed, and that exits 2.",
+      "if": {
+        "properties": {
+          "durability": {
+            "const": "durable"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "durability_note": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "durability_note": {
+            "type": "string"
+          },
+          "exit_code": {
+            "const": 2
+          }
+        }
+      }
+    },
+    {
+      "description": "A skipped input makes the result incomplete: exit 2.",
+      "if": {
+        "properties": {
+          "skipped": {
+            "minItems": 1
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "const": 2
+          }
+        }
+      }
+    }
+  ]
+}

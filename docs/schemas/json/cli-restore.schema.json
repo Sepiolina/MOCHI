@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mochi.invalid/schemas/json/cli-restore.schema.json",
+  "title": "mochi get / restore-test --json",
+  "description": "What a restoration into a directory writes with --json: `mochi get -C DIR` and `mochi restore-test`. Exit 1 if a file failed verification, 2 if an entry was not restored for another reason.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "seq",
+    "commit_id",
+    "destination",
+    "files",
+    "directories",
+    "bytes",
+    "complete",
+    "attributes_complete",
+    "case_insensitive_destination",
+    "findings",
+    "exit_code"
+  ],
+  "properties": {
+    "schema": {
+      "const": "mochi-cli-restore-v1"
+    },
+    "command": {
+      "enum": [
+        "get",
+        "restore-test"
+      ]
+    },
+    "seq": {
+      "$ref": "common.schema.json#/$defs/seq"
+    },
+    "commit_id": {
+      "$ref": "common.schema.json#/$defs/hex32"
+    },
+    "destination": {
+      "type": "string"
+    },
+    "files": {
+      "$ref": "common.schema.json#/$defs/u64"
+    },
+    "directories": {
+      "$ref": "common.schema.json#/$defs/u64"
+    },
+    "bytes": {
+      "$ref": "common.schema.json#/$defs/u64"
+    },
+    "complete": {
+      "type": "boolean"
+    },
+    "attributes_complete": {
+      "type": "boolean"
+    },
+    "case_insensitive_destination": {
+      "type": "boolean"
+    },
+    "findings": {
+      "$ref": "common.schema.json#/$defs/findings"
+    },
+    "exit_code": {
+      "enum": [
+        0,
+        1,
+        2
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "complete": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "const": 0
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "exit_code": {
+            "enum": [
+              1,
+              2
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

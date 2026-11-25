@@ -32,7 +32,18 @@ passphrase?: Secret,
  * D5: give the archive a recovery record of this many percent
  * (D21; 1 to 100). Fixed at creation.
  */
-recovery_percent?: number, } | { "kind": "export_archive", format: ArchiveFormat, level: CompressionPreset, } | { "kind": "add_to_archive", handle: number, } | { "kind": "delete_from_archive", handle: number, 
+recovery_percent?: number, 
+/**
+ * "Delete files after archiving" (spec Annex B.2.23 item 3): once
+ * the commit is published, move each source whose archived copy
+ * reads back and still matches it to the Recycle Bin or Trash.
+ */
+delete_sources?: boolean, } | { "kind": "export_archive", format: ArchiveFormat, level: CompressionPreset, } | { "kind": "add_to_archive", handle: number, 
+/**
+ * "Delete files after archiving" (spec Annex B.2.23 item 3), as for
+ * `CreateArchive`.
+ */
+delete_sources?: boolean, } | { "kind": "delete_from_archive", handle: number, 
 /**
  * Entries of the head snapshot, as the listing returned them.
  */

@@ -1,0 +1,1 @@
+Pre-release of MOCHI 1.0. Minimal WinRAR-style window; the writer lock file is hidden on Windows, and leftover lock files are cleaned up on Unix.

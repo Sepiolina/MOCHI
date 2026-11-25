@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mochi.invalid/schemas/json/health-evidence-v2.schema.json",
+  "title": "MOCHI health evidence record, schema 2 (a commit)",
+  "description": "One line of the evidence log `<state dir>/evidence/<archive id>.jsonl` recording a commit this client published (mochi_core::health::EvidenceRecord::from_commit; spec Annex B.2.22; docs/cli.md rule 13): written by create, append, the other commands that commit, the rewrites (for the new archive's head), and the desktop app's New archive and Add. It speaks for durability only, which is DEGRADED whatever the flush showed (one copy on one device); the scope says what the flush showed. Every other record stays schema 1 (health-evidence-v1.schema.json), so a log mixes both; a reader of schema 1 only counts these lines as unreadable, which blocks a PASS and never hides a failure. Frozen when written; a change is a new schema number.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "level",
+    "completed_at",
+    "head",
+    "dimensions",
+    "exit_code",
+    "scope"
+  ],
+  "properties": {
+    "schema": {
+      "const": 2
+    },
+    "command": {
+      "const": "commit"
+    },
+    "level": {
+      "type": "null"
+    },
+    "completed_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "head": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seq",
+        "commit_id"
+      ],
+      "properties": {
+        "seq": {
+          "$ref": "common.schema.json#/$defs/seq"
+        },
+        "commit_id": {
+          "$ref": "common.schema.json#/$defs/hex32"
+        }
+      }
+    },
+    "dimensions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "durability"
+      ],
+      "properties": {
+        "durability": {
+          "const": "DEGRADED"
+        }
+      },
+      "description": "Durability only, never better than DEGRADED."
+    },
+    "exit_code": {
+      "enum": [
+        0,
+        2
+      ],
+      "description": "0 when every sync was confirmed, 2 when the directory entry is unconfirmed."
+    },
+    "scope": {
+      "type": "string",
+      "minLength": 1,
+      "description": "What the publication knew: every sync confirmed, or why the directory entry is unconfirmed."
+    }
+  }
+}

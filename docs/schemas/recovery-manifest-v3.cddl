@@ -1,0 +1,209 @@
+; MOCHI recovery manifest, schema version 3 (FROZEN with draft 2; ratification items R3, R5).
+; Key 13 and the provenance reason (key 12.3) are FROZEN with R5 (2026-10-11);
+; the rest of this file freezes with R3. This file is complete and standalone:
+; every rule it uses is defined here.
+; Decisions: spec Annex B.2.10 (D20), rule 6 and 10; Annex B D10 item 3
+; ("key-envelope references join both manifest kinds in the phases that
+; introduce them, each as a new manifest schema version"), D18.
+;
+; Schema 3 is written EXACTLY for the manifests of an Encrypted-profile
+; archive (it lists required feature 1): it is schema 2 with key 13 added and
+; keys 11 and 13 both required (an empty array or state is allowed in key 11).
+; Readers accept schemas 1, 2, and 3. A schema-3 manifest in an archive whose
+; descriptor does not list feature 1, or a schema-1 or schema-2 manifest in
+; one that does, is RECORD_INVALID.
+;
+; A manifest of an Encrypted archive is stored SEALED (sealed-object-v0, kinds
+; 2 and 3): this schema describes the PLAINTEXT, which only a reader holding
+; the data key can see. Features (key 9) list 1.
+;
+; Encoding, frame, hash, and envelope: as recovery-manifest-v1.cddl (the
+; deterministic-CBOR subset of Annex B.1 D2; the plaintext is the payload of
+; one RECOVERY_MANIFEST record; envelope keys 0, 1, 2, 9, and 10).
+;
+; Key 11 (retention) is as in recovery-manifest-v2.cddl, but required even
+; when empty; key 12 (provenance) is allowed in the delta of commit 0 only.
+;
+; Key 13 (new):
+;   * delta: key operations, applied in order after the namespace operations
+;     and before the retention operations, atomically, each judged against the
+;     state the previous one left. add: the envelope ID must not be in the
+;     set. remove: it must be, and the set must not become empty. A commit's
+;     key 11 envelope set (commit-record-v2.cddl) MUST equal the replayed set
+;     after this delta, checked wherever a manifest is replayed with a key.
+;     Commit 0's delta lists one add per initial envelope (and no remove).
+;   * snapshot: the complete set of valid envelope IDs, strictly increasing
+;     bytewise, equal to the replayed set at that commit; 1 to 16 entries.
+;   A rewrap (rekey --add-passphrase / --remove-passphrase) is a commit whose
+;   delta carries key operations and typically nothing else. It is the
+;   rewrap audit record (spec 14.4). It never changes the data key.
+; Key 12 provenance gains key 3 in schema 3 (the re-encryption audit record):
+;   reason 1 = re-encryption (rekey --reencrypt). Collection or compaction is
+;   the default and is written by ABSENCE: an explicit 0 is refused, so one
+;   provenance has one encoding. Every rewrite of an Encrypted archive
+;   creates a new data key (D20 item 10), so the DEK change is implied by any
+;   provenance; the reason says why.
+;
+; Rules CDDL cannot state, checked by the code (R3 section 7 lists them):
+;   * Everything listed in recovery-manifest-v1.cddl and recovery-manifest-v2.cddl.
+;   * Key operations replay validly (no duplicate add, no remove of a
+;     stranger, never an empty set); a delta adds the same envelope at most
+;     once; at most 32 operations in one commit.
+
+manifest = root-delta / child-delta / snapshot
+
+root-delta = {
+  0: 3,
+  1: archive-id,
+  2: 0,
+  3: null,
+  4: 0,                       ; kind: delta
+  delta-contents,
+  common-tail,
+  11: [* retention-op],       ; required in schema 3 (may be empty)
+  ? 12: provenance,           ; delta of commit 0 of a rewritten archive only
+  13: [1*32 add-key],         ; commit 0 adds its initial envelopes and removes none
+}
+
+child-delta = {
+  0: 3,
+  1: archive-id,
+  2: uint .ge 1,
+  3: parent,
+  4: 0,
+  delta-contents,
+  common-tail,
+  11: [* retention-op],       ; required in schema 3 (may be empty)
+  13: [0*32 key-op],          ; required in schema 3 (may be empty)
+}
+
+snapshot = {
+  0: 3,
+  1: archive-id,
+  2: seq,
+  3: null,
+  4: 1,                       ; kind: snapshot
+  5: [* chunk],
+  6: [* file-version],
+  7: [],
+  8: [* entry],
+  9: [1],
+  10: txid,
+  11: retention-state,        ; required in schema 3 (may be empty)
+  13: key-state,
+}
+
+delta-contents = (
+  5: [* chunk],
+  6: [* file-version],
+  7: [* op],
+  8: [],
+)
+
+; The Encrypted profile's required feature identifier, exactly.
+common-tail = (
+  9: [1],
+  10: txid,
+)
+
+key-op = add-key / remove-key
+add-key = [0, envelope-id]
+remove-key = [1, envelope-id]
+key-state = [1*16 envelope-id]   ; strictly increasing bytewise
+
+retention-op = expire / hold / release
+expire = [0, seq]             ; seq < this commit's sequence
+hold = [1, label, seq]        ; seq <= this commit's sequence
+release = [2, label]
+label = bstr .size (1..255)
+
+; May be empty in schema 3.
+retention-state = {
+  0: [* seq],                 ; expired, strictly increasing, each < this sequence
+  1: [* [label, seq]],        ; active holds, strictly increasing by label (bytewise), seq <= this sequence
+}
+
+provenance = {
+  0: archive-id,              ; source archive ID
+  1: [+ [seq, hash32]],       ; per new commit: source sequence, source commit ID; strictly increasing
+  2: [* seq],                 ; collected source snapshots; strictly increasing, each before the source head and not kept
+  ? 3: 1,                     ; re-encryption (rekey --reencrypt). Absent = collection or compaction; an explicit 0 is refused
+}
+
+envelope-id = bstr .size 16
+
+parent = {
+  0: seq,                     ; parent sequence (= this - 1)
+  1: hash32,                  ; stored-object hash of the parent commit's delta manifest
+}
+
+; Every chunk of an Encrypted archive is a sealed object (sealed-object v0,
+; kind 0): protection is AEAD, the stored length and hash cover the WHOLE
+; sealed frame (8 + 48 + the ciphertext, which is the Zstandard frame plus a
+; 16-byte tag), key 1 (encoding) describes the sealed plaintext (one
+; Zstandard frame), and key 7 (dependencies) is EMPTY: the data key is
+; archive-wide, not per chunk, so dependency kind 1 stays reserved.
+chunk = {
+  0: hash32,                  ; object ID
+  1: 0,                       ; encoding of the plaintext: one Zstandard frame
+  2: 1,                       ; protection: AEAD
+  3: uint .ge 1,              ; stored length of the whole sealed frame
+  4: hash32,                  ; stored-object hash of the whole sealed frame
+  5: uint,                    ; decoded length
+  6: hash32,                  ; chunk content hash (of the decoded bytes)
+  7: [],                      ; no dependencies
+  8: opt-offset,              ; stored offset in a monolithic archive; null = rediscover by scan + stored hash
+}
+opt-offset = uint / null
+; A file version is a file or a directory; the two forms are separate rules.
+file-version = regular / directory
+
+regular = {
+  0: hash32,                  ; file-version ID
+  1: 0,                       ; kind: file
+  2: uint,                    ; logical length
+  3: hash32,                  ; plain BLAKE3 file-content hash (plan O20)
+  4: [* extent],              ; must cover exactly [0, logical length) (spec 10.3)
+  5: attributes,
+}
+
+; Kind 2 (symbolic link) is reserved: a reader answers UNSUPPORTED_FEATURE.
+directory = {
+  0: hash32,
+  1: 1,                       ; kind: directory
+  2: 0,                       ; logical length 0
+  3: null,                    ; no content hash
+  4: [],                      ; no extents
+  5: attributes,
+}
+
+; logical offset, length (> 0), chunk ID, chunk offset; or a hole.
+extent = data-extent / hole
+data-extent = [uint, uint, hash32, uint]
+hole = [uint, uint, null, 0]
+
+; Promised attributes (spec Annex B.1 D6). Absent key = not recorded.
+attributes = {
+  ? 0: [mode, u32, u32],      ; POSIX: permission bits, numeric uid, numeric gid
+  ? 1: windows-bits,          ; Windows attributes
+  ? 2: mtime,
+}
+mode = uint .le 4095          ; permission bits only (<= 0o7777)
+u32 = uint .le 4294967295
+; READONLY 0x01 | HIDDEN 0x02 | SYSTEM 0x04 | ARCHIVE 0x20 (mask 0x27):
+; exactly these sixteen values (0 to 7, and 0x20 to 0x27).
+windows-bits = 0 / 1 / 2 / 3 / 4 / 5 / 6 / 7 / 32 / 33 / 34 / 35 / 36 / 37 / 38 / 39
+mtime = [secs, nanos]         ; seconds since the Unix epoch, nanoseconds
+secs = int                    ; must fit a signed 64-bit integer (checked by the code)
+
+op = put / delete
+put = [0, path, hash32]       ; path (stored form, spec 10.4 / plan O24), file-version ID
+delete = [1, path]
+entry = [path, hash32]        ; path, file-version ID
+path = bstr
+
+archive-id = bstr .size 32
+txid = bstr .size 16
+hash32 = bstr .size 32
+seq = uint
+nanos = uint .lt 1000000000

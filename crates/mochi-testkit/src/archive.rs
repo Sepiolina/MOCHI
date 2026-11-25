@@ -70,6 +70,7 @@ pub fn test_options() -> WriterOptions {
         dedup: Dedup::default(),
         kdf: None,
         threads: None,
+        lock_wait: None,
     }
 }
 

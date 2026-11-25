@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mochi.invalid/schemas/json/cli-rewrite.schema.json",
+  "title": "mochi compact / gc apply / rekey --reencrypt --json",
+  "description": "What a rewrite into a new archive writes with --json (mochi_core::compact::CompactReport plus the command, paths, and exit code): `mochi compact`, `mochi gc apply`, and `mochi rekey --reencrypt` (which adds action and revocation). The source is never changed (source_kept).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "source",
+    "output",
+    "source_archive_id",
+    "source_head",
+    "source_len",
+    "new_archive_id",
+    "new_len",
+    "commits",
+    "collected",
+    "chunks_copied",
+    "stored_bytes_copied",
+    "file_versions",
+    "versions_verified",
+    "recovery_copies",
+    "durability_unconfirmed",
+    "source_kept",
+    "resealed",
+    "exit_code"
+  ],
+  "properties": {
+    "schema": {
+      "const": "mochi-cli-rewrite-v1"
+    },
+    "command": {
+      "enum": [
+        "compact",
+        "gc apply",
+        "rekey"
+      ]
+    },
+    "action": {
+      "const": "reencrypt"
+    },
+    "source": {
+      "type": "string"
+    },
+    "output": {
+      "type": "string"
+    },
+    "source_archive_id": {
+      "$ref": "common.schema.json#/$defs/hex32"
+    },
+    "source_head": {
+      "$ref": "common.schema.json#/$defs/plan-head"
+    },
+    "source_len": {
+      "$ref": "common.schema.json#/$defs/u64"
+    },
+    "new_archive_id": {
+      "$ref": "common.schema.json#/$defs/hex32"
+    },
+    "new_len": {
+      "$ref": "common.schema.json#/$defs/u64"
+    },
+    "commits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_seq",
+          "source_commit_id",
+          "new_seq",
+          "new_commit_id"
+        ],
+        "properties": {
+          "source_seq": {
+            "$ref": "common.schema.json#/$defs/seq"
+          },
+          "source_commit_id": {
+            "$ref": "common.schema.json#/$defs/hex32"
+          },
+          "new_seq": {
+            "$ref": "common.schema.json#/$defs/seq"
+          },
+          "new_commit_id": {
+            "$ref": "common.schema.json#/$defs/hex32"
+          }
+        }
+      }
+    },
+    "collected": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/seq"
+      },
+      "uniqueItems": true
+    },
+    "chunks_copied": {
+      "$ref": "common.schema.json#/$defs/u64"
+    },
+    "stored_bytes_copied": {
+      "$ref": "common.schema.json#/$defs/u64"
+    },
+    "file_versions": {
+      "$ref": "common.schema.json#/$defs/u64"
+    },
+    "versions_verified": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "recovery_copies": {
+      "type": "string"
+    },
+    "durability_unconfirmed": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source_kept": {
+      "const": true
+    },
+    "resealed": {
+      "type": "boolean"
+    },
+    "revocation": {
+      "const": false
+    },
+    "exit_code": {
+      "enum": [
+        0,
+        2
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "rekey"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "action",
+          "revocation"
+        ],
+        "properties": {
+          "resealed": {
+            "const": true
+          }
+        }
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "action"
+              ]
+            },
+            {
+              "required": [
+                "revocation"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "durability_unconfirmed": {
+            "type": "null"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "const": 0
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "exit_code": {
+            "const": 2
+          }
+        }
+      }
+    }
+  ]
+}

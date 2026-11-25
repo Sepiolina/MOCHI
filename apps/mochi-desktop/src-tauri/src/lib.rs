@@ -22,6 +22,7 @@ pub mod foreign;
 pub mod formats;
 pub mod frame;
 pub mod help;
+pub mod history;
 pub mod ipc;
 pub mod jobs;
 pub mod launch;

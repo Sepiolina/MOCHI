@@ -45,6 +45,12 @@ pub enum JobRequest {
         #[serde(default)]
         #[ts(optional)]
         recovery_percent: Option<u16>,
+        /// "Delete files after archiving" (spec Annex B.2.23 item 3): once
+        /// the commit is published, move each source whose archived copy
+        /// reads back and still matches it to the Recycle Bin or Trash.
+        #[serde(default)]
+        #[ts(optional)]
+        delete_sources: Option<bool>,
     },
     /// Plan O31: write the staged sources as a plain ZIP, `.tar`, `.tar.gz`, or
     /// `.tar.zst` file at the destination the user chose (`mochi-export`; a
@@ -56,7 +62,14 @@ pub enum JobRequest {
         level: CompressionPreset,
     },
     /// D2: add the staged sources to an open archive as one new commit.
-    AddToArchive { handle: ArchiveHandle },
+    AddToArchive {
+        handle: ArchiveHandle,
+        /// "Delete files after archiving" (spec Annex B.2.23 item 3), as for
+        /// `CreateArchive`.
+        #[serde(default)]
+        #[ts(optional)]
+        delete_sources: Option<bool>,
+    },
     /// D2: remove entries from an open archive's current snapshot as one
     /// new commit. Their content stays in the archive's history.
     DeleteFromArchive {
@@ -715,6 +728,14 @@ pub struct CommitReport {
     #[ts(type = "number")]
     pub removed: u64,
     pub skipped: Vec<SkippedView>,
+    /// "Delete files after archiving" (Annex B.2.23 item 3): sources moved
+    /// to the Recycle Bin or Trash (files and emptied folders). 0 when it
+    /// was not asked for.
+    #[ts(type = "number")]
+    pub sources_moved: u64,
+    /// Sources kept although it was asked for, each with its reason (its
+    /// archived copy did not read back, it changed, a folder is not empty, …).
+    pub sources_kept: Vec<SkippedView>,
     /// Set when the new file's directory entry is not confirmed durable
     /// (the commit is reported degraded, never durable).
     pub durability_note: Option<String>,
@@ -1782,6 +1803,15 @@ pub struct SpeedSettingsView {
     /// Windows: a folder flush on a local NTFS drive counts as saved when an
     /// archive is created (spec Annex B.2.20). Off by default (policy B).
     pub trust_ntfs_flush: bool,
+    /// Remember archives on this computer: each one's last-seen head (for the
+    /// freshness check) and the results of tests and commits, in the state
+    /// directory the command-line tool shares (spec Annex B.2.22). On by
+    /// default.
+    pub local_history: bool,
+    /// Adding to an archive another MOCHI program is writing to waits up to
+    /// two minutes for it instead of refusing at once (spec Annex B.2.23).
+    /// Off by default.
+    pub wait_for_writer: bool,
     /// Whether that setting applies here (Windows only); the UI shows it then.
     pub windows: bool,
 }

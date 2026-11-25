@@ -1,0 +1,1 @@
+Pre-release of MOCHI 1.0. Explorer right-click on files and folders now shows two entries directly, "Add to archive..." and Add to "<name>.mochi" (on Windows 11 they are under "Show more options"). "Add to archive..." opens a small options window instead of the full program, and works again when a ZIP, 7z or RAR is open. New archives can also be ZIP, .tar, .tar.gz or .tar.zst.

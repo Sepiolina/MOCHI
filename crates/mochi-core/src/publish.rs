@@ -218,7 +218,19 @@ pub struct WriterOptions {
     /// `Some(1)`: everything on the calling thread. Writer policy: the
     /// archive written is byte for byte the same for every value.
     pub threads: Option<usize>,
+    /// Appending: how long to wait for another writer's publication lock
+    /// before giving up with `LOCK_CONFLICT` (spec Annex B.2.23). `None` (the
+    /// default) is §12.5's fail-on-conflict: no wait. Waiting changes no
+    /// rule: the lock is still taken before the head is read, so the commit
+    /// is built on the head the other writer left. At most
+    /// [`MAX_LOCK_WAIT`]. Writer policy: not recorded in the archive.
+    pub lock_wait: Option<std::time::Duration>,
 }
+
+/// The longest [`WriterOptions::lock_wait`] a writer accepts.
+pub const MAX_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3600);
+/// How often a waiting writer tries the lock again.
+const LOCK_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// The thread count [`WriterOptions::threads`] `None` stands for: the
 /// processor count, at most 8.
@@ -3094,13 +3106,40 @@ pub fn temporary_name(name: &str, tag: &[u8; 32]) -> String {
 }
 
 fn lock(storage: &mut dyn Storage) -> Result<()> {
-    storage.try_lock_exclusive().map_err(|e| match e {
-        StorageError::LockHeld => MochiError::new(
-            ErrorCode::LockConflict,
-            "another writer holds this archive's publication lock (spec §12.5: fail on conflict)",
-        ),
-        other => other.into(),
-    })
+    lock_waiting(storage, None)
+}
+
+/// Take the publication lock, trying again every [`LOCK_RETRY`] for at most
+/// `wait` (Annex B.2.23); `None` tries once (§12.5: fail on conflict).
+fn lock_waiting(storage: &mut dyn Storage, wait: Option<std::time::Duration>) -> Result<()> {
+    let wait = wait.map(|w| w.min(MAX_LOCK_WAIT));
+    let start = std::time::Instant::now();
+    loop {
+        match storage.try_lock_exclusive() {
+            Ok(()) => return Ok(()),
+            Err(StorageError::LockHeld) => match wait {
+                Some(w) if start.elapsed() < w => std::thread::sleep(LOCK_RETRY),
+                Some(w) => {
+                    return Err(MochiError::new(
+                        ErrorCode::LockConflict,
+                        format!(
+                            "another writer held this archive's publication lock for the {} s \
+                             this writer waited; nothing was committed",
+                            w.as_secs()
+                        ),
+                    ))
+                }
+                None => {
+                    return Err(MochiError::new(
+                        ErrorCode::LockConflict,
+                        "another writer holds this archive's publication lock (spec §12.5: \
+                         fail on conflict)",
+                    ))
+                }
+            },
+            Err(other) => return Err(other.into()),
+        }
+    }
 }
 
 impl<S: Storage> ArchiveWriter<S> {
@@ -3427,7 +3466,7 @@ impl<S: Storage> ArchiveWriter<S> {
         opts: WriterOptions,
         tail: TailAction<'_>,
     ) -> Result<(Self, Option<TailTruncation>)> {
-        lock(&mut storage)?;
+        lock_waiting(&mut storage, opts.lock_wait)?;
         match Self::open_locked(&mut storage, &opts, tail) {
             Ok((head, params, state, truncation)) => {
                 // The profile is the archive's own (D12); an append that asks

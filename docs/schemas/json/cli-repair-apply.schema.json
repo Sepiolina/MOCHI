@@ -1,0 +1,263 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mochi.invalid/schemas/json/cli-repair-apply.schema.json",
+  "title": "mochi repair apply --json",
+  "description": "What `mochi repair apply` writes with --json (mochi_core::repair::RepairReport plus the command and paths). A partial repair exits 2 and is labelled so (spec 22.2, 23.3 #4).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "source",
+    "output",
+    "outcome",
+    "exit_code",
+    "source_archive_id",
+    "source_len",
+    "new_archive_id",
+    "new_len",
+    "commits",
+    "lost_snapshots",
+    "omitted",
+    "copies",
+    "donations",
+    "salvage",
+    "profile_constraints_lost",
+    "retention",
+    "retention_loss_accepted",
+    "chunks_copied",
+    "stored_bytes_copied",
+    "reverification",
+    "durability_unconfirmed",
+    "source_kept"
+  ],
+  "properties": {
+    "schema": {
+      "const": "mochi-cli-repair-apply-v1"
+    },
+    "command": {
+      "const": "repair apply"
+    },
+    "source": {
+      "type": "string"
+    },
+    "output": {
+      "type": "string"
+    },
+    "outcome": {
+      "enum": [
+        "complete",
+        "partial"
+      ]
+    },
+    "exit_code": {
+      "enum": [
+        0,
+        2
+      ]
+    },
+    "source_archive_id": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/hex32"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source_len": {
+      "$ref": "common.schema.json#/$defs/u64"
+    },
+    "new_archive_id": {
+      "$ref": "common.schema.json#/$defs/hex32"
+    },
+    "new_len": {
+      "$ref": "common.schema.json#/$defs/u64"
+    },
+    "commits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_seq",
+          "source_commit_id",
+          "new_seq",
+          "new_commit_id",
+          "entries",
+          "omitted",
+          "trust"
+        ],
+        "properties": {
+          "source_seq": {
+            "$ref": "common.schema.json#/$defs/seq"
+          },
+          "source_commit_id": {
+            "anyOf": [
+              {
+                "$ref": "common.schema.json#/$defs/hex32"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "new_seq": {
+            "$ref": "common.schema.json#/$defs/seq"
+          },
+          "new_commit_id": {
+            "$ref": "common.schema.json#/$defs/hex32"
+          },
+          "entries": {
+            "$ref": "common.schema.json#/$defs/u64"
+          },
+          "omitted": {
+            "$ref": "common.schema.json#/$defs/u64"
+          },
+          "trust": {
+            "$ref": "repair-plan-v2.schema.json#/$defs/recovered-snapshot/properties/trust"
+          }
+        }
+      }
+    },
+    "lost_snapshots": {
+      "type": "array",
+      "items": {
+        "$ref": "repair-plan-v2.schema.json#/$defs/lost-snapshot"
+      }
+    },
+    "omitted": {
+      "type": "array",
+      "items": {
+        "$ref": "repair-plan-v2.schema.json#/$defs/omitted-entry"
+      }
+    },
+    "copies": {
+      "type": "array",
+      "items": {
+        "$ref": "repair-plan-v2.schema.json#/$defs/copy"
+      }
+    },
+    "donations": {
+      "type": "array",
+      "items": {
+        "$ref": "repair-plan-v2.schema.json#/$defs/donation"
+      }
+    },
+    "salvage": {
+      "anyOf": [
+        {
+          "$ref": "repair-plan-v2.schema.json#/$defs/salvage"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "profile_constraints_lost": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "retention": {
+      "anyOf": [
+        {
+          "$ref": "repair-plan-v2.schema.json#/$defs/retention"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "retention_loss_accepted": {
+      "type": "boolean"
+    },
+    "chunks_copied": {
+      "$ref": "common.schema.json#/$defs/u64"
+    },
+    "stored_bytes_copied": {
+      "$ref": "common.schema.json#/$defs/u64"
+    },
+    "reverification": {
+      "description": "The verification of the new archive before it was published (spec 22.2).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "level",
+        "overall_status",
+        "policy_result",
+        "exit_code",
+        "findings"
+      ],
+      "properties": {
+        "level": {
+          "$ref": "common.schema.json#/$defs/level"
+        },
+        "overall_status": {
+          "$ref": "common.schema.json#/$defs/status"
+        },
+        "policy_result": {
+          "$ref": "common.schema.json#/$defs/status"
+        },
+        "exit_code": {
+          "$ref": "common.schema.json#/$defs/exit-code"
+        },
+        "findings": {
+          "$ref": "common.schema.json#/$defs/u64"
+        }
+      }
+    },
+    "durability_unconfirmed": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source_kept": {
+      "const": true
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "partial"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "const": 2
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "complete"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "lost_snapshots": {
+            "maxItems": 0
+          },
+          "omitted": {
+            "maxItems": 0
+          }
+        }
+      }
+    }
+  ]
+}

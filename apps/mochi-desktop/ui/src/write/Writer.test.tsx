@@ -55,6 +55,8 @@ function commit(operation: CommitReport["operation"], archive: ArchiveSummary | 
     bytes: 2048,
     removed: operation === "delete" ? 1 : 0,
     skipped: [],
+    sources_moved: 0,
+    sources_kept: [],
     durability_note: null,
     archive,
     reopen_error: null,
@@ -637,6 +639,24 @@ test("add: starts an add job for the open archive and says the archive's profile
   await user.click(await screen.findByTestId("add-confirm"));
   await screen.findByTestId("write-running");
   expect(b.request()).toEqual({ kind: "add_to_archive", handle: 3 });
+});
+
+// Spec Annex B.2.23 item 3: "Delete files after archiving" is off unless
+// ticked, says it moves files to the Bin, and is sent only when ticked.
+test("delete after archiving is off by default and sent only when ticked", async () => {
+  const user = userEvent.setup();
+  const b = backend();
+  const archive = summary(3, 2);
+  renderWriter({ archive });
+  await user.click(screen.getByTestId("add-to-archive"));
+  const box = screen.getByTestId("delete-sources");
+  expect(box).not.toBeChecked();
+  expect(screen.getByTestId("delete-sources-note")).toBeInTheDocument();
+  await user.click(screen.getByTestId("stage-files"));
+  await user.click(box);
+  await user.click(await screen.findByTestId("add-confirm"));
+  await screen.findByTestId("write-running");
+  expect(b.request()).toEqual({ kind: "add_to_archive", handle: 3, delete_sources: true });
 });
 
 test("adding is only offered with an archive open", () => {

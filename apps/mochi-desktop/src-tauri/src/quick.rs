@@ -1199,6 +1199,7 @@ impl Quick {
             tar_compatible: false,
             passphrase: None,
             recovery_percent: None,
+            delete_sources: None,
         };
         for attempt in 1..=MAX_NAME_TRIES {
             let target = dir.join(candidate(&stem, ".mochi", attempt));
@@ -1253,6 +1254,8 @@ impl Quick {
                 tar_compatible: false,
                 passphrase,
                 recovery_percent,
+                // The quick form offers no source removal (Annex B.2.23).
+                delete_sources: None,
             }
         } else {
             JobRequest::ExportArchive { format, level }
@@ -2227,6 +2230,7 @@ mod tests {
             tar_compatible: false,
             passphrase: Some(Secret::new(passphrase)),
             recovery_percent: None,
+            delete_sources: None,
         };
         services.validate(&request).unwrap();
         let token = CancellationToken::new();

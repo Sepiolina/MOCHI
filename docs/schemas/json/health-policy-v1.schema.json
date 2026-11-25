@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mochi.invalid/schemas/json/health-policy-v1.schema.json",
+  "title": "MOCHI health policy, mochi-health-policy-v1",
+  "description": "The policy file `mochi health --policy FILE.json` reads (mochi_core::health::HealthPolicy; docs/cli.md rule 13). An input, not an output: a file the CLI refuses (exit 3, INVALID_ARGUMENT) fails this schema, and a file this schema accepts is accepted. A dimension listed twice counts once. Frozen with R7 (gate G15); a change is a new schema string.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "required"
+  ],
+  "properties": {
+    "schema": {
+      "const": "mochi-health-policy-v1"
+    },
+    "required": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/dimension"
+      },
+      "minItems": 1
+    },
+    "max_age_days": {
+      "description": "A kind named here is required to have evidence at most this many days old; a kind not named has no age limit and is not required.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "verify": {
+          "$ref": "common.schema.json#/$defs/u32"
+        },
+        "restore_test": {
+          "$ref": "common.schema.json#/$defs/u32"
+        }
+      }
+    }
+  }
+}

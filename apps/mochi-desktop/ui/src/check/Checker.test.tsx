@@ -198,7 +198,10 @@ test("a failing report shows FAIL overall and names the failing dimension", asyn
   // The failing and the reduced dimensions are in the default view; none is folded away.
   const shown = within(screen.getByTestId("report")).getAllByTestId("dimension");
   expect(shown.map((x) => x.dataset.dimension)).toEqual(["integrity", "recoverability", "freshness"]);
-  expect(screen.getByTestId("report-quiet")).toHaveTextContent("1 check does not apply");
+  // Searchability (UNSUPPORTED, not required) is not shown at all, not even
+  // under Details: 1.0 builds no search index (owner decision 2026-11-23).
+  expect(screen.queryByTestId("report-quiet")).toBeNull();
+  expect(document.querySelector('[data-dimension="searchability"]')).toBeNull();
   expect(screen.getByTestId("report-overall")).toHaveTextContent("Failing: Integrity");
   expect(screen.getByTestId("report-overall")).toHaveTextContent("exit code 1");
   const badges = assertBadges();
@@ -250,8 +253,9 @@ test("a passing report says no problems; an unfinished one says it could not fin
   expect(screen.getByTestId("report-headline")).toHaveTextContent("No problems found");
   expect(screen.getByTestId("report-headline")).not.toHaveTextContent("in the checks that ran");
   expect(screen.getByTestId("report-verdict").className).toContain("verdict-pass");
-  expect(screen.getAllByTestId("dimension-quiet")).toHaveLength(3);
-  expect(screen.getByTestId("report-quiet")).toHaveTextContent("3 checks do not apply to this archive.");
+  expect(screen.getAllByTestId("dimension-quiet")).toHaveLength(2);
+  expect(screen.getByTestId("report-quiet")).toHaveTextContent("2 checks do not apply to this archive.");
+  expect(document.querySelector('[data-dimension="searchability"]')).toBeNull();
   // Nothing shown by default is UNSUPPORTED or UNKNOWN.
   for (const row of screen.getAllByTestId("dimension")) expect(row.dataset.status).toBe("PASS");
   assertBadges();

@@ -190,8 +190,13 @@ fn health_with_no_evidence_is_unknown_and_exits_2() {
         assert_eq!(dim(&v, d), "UNKNOWN", "{d}: {v}");
     }
     assert_eq!(dim(&v, "searchability"), "UNSUPPORTED");
-    assert_eq!(dim(&v, "retention_compliance"), "UNSUPPORTED");
+    // Retention compliance is recorded by `verify` (Annex B.2.22): none yet.
+    assert_eq!(dim(&v, "retention_compliance"), "UNKNOWN");
     assert!(skipped_for(&v, "integrity").contains("no "), "{v}");
+    assert!(
+        skipped_for(&v, "durability").contains("did not record publishing"),
+        "{v}"
+    );
     assert_eq!(v["freshness_anchor"], "none");
     assert_eq!(
         v["policy"]["required"],
@@ -262,7 +267,15 @@ fn verify_then_health_passes_and_new_commits_make_it_unknown() {
         h["overall_status"], "PASS",
         "durability etc. are not established"
     );
-    assert_eq!(dim(&h, "durability"), "UNKNOWN");
+    // `create` recorded how its commit was published (Annex B.2.22): one
+    // local copy is never better than DEGRADED.
+    assert_eq!(dim(&h, "durability"), "DEGRADED");
+    assert!(
+        skipped_for(&h, "durability").contains("no recovery copy"),
+        "{h}"
+    );
+    // `verify` at the restoration level checked local retention.
+    assert_eq!(dim(&h, "retention_compliance"), "PASS");
     assert!(h["coverage"]["evidence_age_seconds"].is_u64());
 
     // Read-only: nothing it read changed.
@@ -281,6 +294,9 @@ fn verify_then_health_passes_and_new_commits_make_it_unknown() {
         "PASS",
         "the head is the one last seen"
     );
+    // `append` recorded the new head's publication.
+    assert_eq!(dim(&h, "durability"), "DEGRADED");
+    assert_eq!(dim(&h, "retention_compliance"), "UNKNOWN");
     let why = skipped_for(&h, "integrity");
     assert!(
         why.contains("commit 0") && why.contains("commit 1"),
@@ -451,10 +467,20 @@ fn a_damaged_evidence_line_is_reported_and_blocks_a_pass() {
 fn no_local_history_neither_records_nor_reads_evidence() {
     let a = Area::new();
     let archive = a.archive(true);
+    // `create` recorded its commit; `verify --no-local-history` adds nothing.
+    let evidence_dir = a.p("state/evidence");
+    let log = fs::read_dir(&evidence_dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let before = fs::read(&log).unwrap();
     let (code, v) = a.json(&["verify", &archive, "--no-local-history"]);
     assert_eq!(code, exit::OK, "{v}");
-    assert!(
-        !a.p("state/evidence").exists(),
+    assert_eq!(
+        fs::read(&log).unwrap(),
+        before,
         "verify wrote evidence under --no-local-history"
     );
     let (_, h) = health_of(&a, &archive, &[]);

@@ -134,3 +134,12 @@ test("keys are unique and stable for repeated items", () => {
   expect(m.progressText("repair-check", 3, 10)).toBe("Reading file versions: 3 of 10");
   expect(m.coverageLine(report({ coverage: { ...report().coverage, checked_objects: null } }))).toBeNull();
 });
+
+// Owner decision 2026-11-23: searchability is hidden only while it can mean
+// nothing (UNSUPPORTED and not required); anything else is shown.
+test("only an UNSUPPORTED, unrequired searchability is hidden", () => {
+  expect(m.isHidden({ dimension: "searchability", status: "UNSUPPORTED", required: false })).toBe(true);
+  expect(m.isHidden({ dimension: "searchability", status: "UNSUPPORTED", required: true })).toBe(false);
+  expect(m.isHidden({ dimension: "searchability", status: "FAIL", required: false })).toBe(false);
+  expect(m.isHidden({ dimension: "retention_compliance", status: "UNSUPPORTED", required: false })).toBe(false);
+});

@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mochi.invalid/schemas/json/cli-commit.schema.json",
+  "title": "mochi create / append --json",
+  "description": "What `mochi create` and `mochi append` write with --json: the new commit, or, for `append --truncate-tail` with nothing to commit, the truncation alone.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "command",
+        "archive",
+        "status",
+        "archive_id",
+        "encrypted",
+        "seq",
+        "commit_id",
+        "durability",
+        "durability_note",
+        "added",
+        "deleted",
+        "skipped",
+        "truncation",
+        "exit_code"
+      ],
+      "properties": {
+        "schema": {
+          "const": "mochi-cli-commit-v1"
+        },
+        "command": {
+          "enum": [
+            "create",
+            "append"
+          ]
+        },
+        "archive": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "common.schema.json#/$defs/commit-status"
+        },
+        "archive_id": {
+          "$ref": "common.schema.json#/$defs/hex32"
+        },
+        "encrypted": {
+          "type": "boolean"
+        },
+        "seq": {
+          "$ref": "common.schema.json#/$defs/seq"
+        },
+        "commit_id": {
+          "$ref": "common.schema.json#/$defs/hex32"
+        },
+        "durability": {
+          "$ref": "common.schema.json#/$defs/durability"
+        },
+        "durability_note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "added": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "files",
+            "directories",
+            "bytes"
+          ],
+          "properties": {
+            "files": {
+              "$ref": "common.schema.json#/$defs/u64"
+            },
+            "directories": {
+              "$ref": "common.schema.json#/$defs/u64"
+            },
+            "bytes": {
+              "$ref": "common.schema.json#/$defs/u64"
+            }
+          }
+        },
+        "deleted": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path"
+            ],
+            "properties": {
+              "path": {
+                "$ref": "common.schema.json#/$defs/path"
+              },
+              "path_hex": {
+                "$ref": "common.schema.json#/$defs/hex-bytes"
+              }
+            }
+          }
+        },
+        "skipped": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "kind",
+              "reason"
+            ],
+            "properties": {
+              "path": {
+                "$ref": "common.schema.json#/$defs/path"
+              },
+              "path_hex": {
+                "$ref": "common.schema.json#/$defs/hex-bytes"
+              },
+              "kind": {
+                "enum": [
+                  "file",
+                  "directory",
+                  "symbolic link",
+                  "special file"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "truncation": {
+          "anyOf": [
+            {
+              "$ref": "common.schema.json#/$defs/findings"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "exit_code": {
+          "enum": [
+            0,
+            2
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "description": "durability_note says why exactly when the directory entry is unconfirmed, and that exits 2.",
+          "if": {
+            "properties": {
+              "durability": {
+                "const": "durable"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "durability_note": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "durability_note": {
+                "type": "string"
+              },
+              "exit_code": {
+                "const": 2
+              }
+            }
+          }
+        },
+        {
+          "description": "A skipped input makes the result incomplete: exit 2.",
+          "if": {
+            "properties": {
+              "skipped": {
+                "minItems": 1
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "const": 2
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "command",
+        "archive",
+        "committed",
+        "truncation",
+        "exit_code"
+      ],
+      "properties": {
+        "schema": {
+          "const": "mochi-cli-commit-v1"
+        },
+        "command": {
+          "const": "append"
+        },
+        "archive": {
+          "type": "string"
+        },
+        "committed": {
+          "const": false
+        },
+        "truncation": {
+          "$ref": "common.schema.json#/$defs/findings"
+        },
+        "exit_code": {
+          "const": 0
+        }
+      }
+    }
+  ]
+}

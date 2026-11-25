@@ -176,6 +176,8 @@ test("on the latest version the comment is edited and saved as a new version", a
             bytes: "0",
             removed: 0,
             skipped: [],
+            sources_moved: 0,
+            sources_kept: [],
             durability_note: null,
             archive: after,
             reopen_error: null,

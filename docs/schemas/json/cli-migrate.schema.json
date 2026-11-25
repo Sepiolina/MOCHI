@@ -1,0 +1,291 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mochi.invalid/schemas/json/cli-migrate.schema.json",
+  "title": "mochi migrate --json",
+  "description": "What `mochi migrate SRC --output DST` writes with --json (mochi_core::migrate::MigrateReport plus the command, paths, and exit code): a draft-2 archive rewritten into a new 1.0 archive (spec \u00a726, Annex B.2.14). The source is opened read-only and never changed (source_kept). Both verifications are required to exit 0, or nothing is published; a refusal or failure is an error line instead (error.schema.json). `not_done` states what \u00a726 steps 7 and 9 leave to the user.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "source",
+    "output",
+    "source_archive_id",
+    "source_draft",
+    "source_head",
+    "source_len",
+    "source_verification",
+    "new_archive_id",
+    "new_len",
+    "new_ratified",
+    "profile",
+    "commits",
+    "chunks_copied",
+    "stored_bytes_copied",
+    "file_versions",
+    "comparison",
+    "new_verification",
+    "resealed",
+    "durability_unconfirmed",
+    "source_kept",
+    "not_done",
+    "exit_code"
+  ],
+  "properties": {
+    "schema": {
+      "const": "mochi-cli-migrate-v1"
+    },
+    "command": {
+      "const": "migrate"
+    },
+    "source": {
+      "type": "string"
+    },
+    "output": {
+      "type": "string"
+    },
+    "source_archive_id": {
+      "$ref": "common.schema.json#/$defs/hex32"
+    },
+    "source_draft": {
+      "const": 2
+    },
+    "source_head": {
+      "$ref": "common.schema.json#/$defs/plan-head"
+    },
+    "source_len": {
+      "$ref": "common.schema.json#/$defs/u64"
+    },
+    "source_verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "level",
+        "overall_status",
+        "exit_code",
+        "findings"
+      ],
+      "properties": {
+        "level": {
+          "type": "string"
+        },
+        "overall_status": {
+          "$ref": "common.schema.json#/$defs/status"
+        },
+        "exit_code": {
+          "const": 0
+        },
+        "findings": {
+          "$ref": "common.schema.json#/$defs/u64"
+        }
+      }
+    },
+    "new_archive_id": {
+      "$ref": "common.schema.json#/$defs/hex32"
+    },
+    "new_len": {
+      "$ref": "common.schema.json#/$defs/u64"
+    },
+    "new_ratified": {
+      "const": true
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tar_compatible",
+        "encrypted",
+        "redundancy_percent"
+      ],
+      "properties": {
+        "tar_compatible": {
+          "type": "boolean"
+        },
+        "encrypted": {
+          "type": "boolean"
+        },
+        "redundancy_percent": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "commits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_seq",
+          "source_commit_id",
+          "new_seq",
+          "new_commit_id"
+        ],
+        "properties": {
+          "source_seq": {
+            "$ref": "common.schema.json#/$defs/seq"
+          },
+          "source_commit_id": {
+            "$ref": "common.schema.json#/$defs/hex32"
+          },
+          "new_seq": {
+            "$ref": "common.schema.json#/$defs/seq"
+          },
+          "new_commit_id": {
+            "$ref": "common.schema.json#/$defs/hex32"
+          }
+        }
+      }
+    },
+    "chunks_copied": {
+      "$ref": "common.schema.json#/$defs/u64"
+    },
+    "stored_bytes_copied": {
+      "$ref": "common.schema.json#/$defs/u64"
+    },
+    "file_versions": {
+      "$ref": "common.schema.json#/$defs/u64"
+    },
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "snapshots_compared",
+        "file_versions_compared",
+        "attributes_compared",
+        "retention_equal",
+        "versions_read_back"
+      ],
+      "properties": {
+        "snapshots_compared": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "file_versions_compared": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "attributes_compared": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "retention_equal": {
+          "const": true
+        },
+        "versions_read_back": {
+          "$ref": "common.schema.json#/$defs/u64"
+        }
+      }
+    },
+    "new_verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "level",
+        "overall_status",
+        "policy_result",
+        "exit_code",
+        "findings"
+      ],
+      "properties": {
+        "level": {
+          "type": "string"
+        },
+        "overall_status": {
+          "$ref": "common.schema.json#/$defs/status"
+        },
+        "policy_result": {
+          "$ref": "common.schema.json#/$defs/status"
+        },
+        "exit_code": {
+          "const": 0
+        },
+        "findings": {
+          "$ref": "common.schema.json#/$defs/u64"
+        }
+      }
+    },
+    "resealed": {
+      "type": "boolean"
+    },
+    "durability_unconfirmed": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source_kept": {
+      "const": true
+    },
+    "not_done": {
+      "type": "string"
+    },
+    "exit_code": {
+      "enum": [
+        0,
+        2
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "durability_unconfirmed": {
+            "type": "null"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "const": 0
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "exit_code": {
+            "const": 2
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "profile": {
+            "properties": {
+              "encrypted": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "resealed": {
+            "const": true
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "resealed": {
+            "const": false
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,496 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mochi.invalid/schemas/json/report-v1.schema.json",
+  "title": "MOCHI report, schema version 1",
+  "description": "The machine-readable report of spec 20.5 (mochi_core::report::Report): what `mochi verify --json`, `mochi fsck --json`, `mochi health --json`, and the desktop app's \"Test archive\" export write. Field meanings: docs/report-schema-v1.md. Frozen with R7 (gate G15): a change other than a new error code is a new schema_version.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "archive_id",
+    "checked_commit",
+    "expected_head",
+    "freshness_anchor",
+    "tool",
+    "started_at",
+    "completed_at",
+    "level",
+    "scope",
+    "coverage",
+    "skipped",
+    "findings",
+    "repair_actions",
+    "dimensions",
+    "overall_status",
+    "policy",
+    "policy_result",
+    "operational_error",
+    "exit_code"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "archive_id": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/hex32"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "checked_commit": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/hex32"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "expected_head": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/hex32"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "freshness_anchor": {
+      "enum": [
+        "none",
+        "user",
+        "local-history"
+      ]
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "spec_revision",
+        "wire_generation",
+        "format_status"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "spec_revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "wire_generation": {
+          "$ref": "common.schema.json#/$defs/u32"
+        },
+        "format_status": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "started_at": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/timestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "completed_at": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/timestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "level": {
+      "$ref": "common.schema.json#/$defs/level"
+    },
+    "scope": {
+      "type": "string",
+      "minLength": 1
+    },
+    "coverage": {
+      "description": "Data objects only; null means not measured, which is not zero.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_objects",
+        "checked_objects",
+        "expected_bytes",
+        "checked_bytes",
+        "evidence_age_seconds"
+      ],
+      "properties": {
+        "expected_objects": {
+          "anyOf": [
+            {
+              "$ref": "common.schema.json#/$defs/u64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checked_objects": {
+          "anyOf": [
+            {
+              "$ref": "common.schema.json#/$defs/u64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expected_bytes": {
+          "anyOf": [
+            {
+              "$ref": "common.schema.json#/$defs/u64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checked_bytes": {
+          "anyOf": [
+            {
+              "$ref": "common.schema.json#/$defs/u64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence_age_seconds": {
+          "anyOf": [
+            {
+              "$ref": "common.schema.json#/$defs/u64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "skipped": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "item",
+          "reason"
+        ],
+        "properties": {
+          "item": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "findings": {
+      "$ref": "common.schema.json#/$defs/findings"
+    },
+    "repair_actions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 0,
+      "description": "Always empty in v1: verification never repairs (spec 20.2)."
+    },
+    "dimensions": {
+      "$ref": "common.schema.json#/$defs/dimensions"
+    },
+    "overall_status": {
+      "$ref": "common.schema.json#/$defs/status"
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required",
+        "freshness"
+      ],
+      "properties": {
+        "required": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/dimension"
+          },
+          "uniqueItems": true
+        },
+        "freshness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "expected_head_supplied",
+            "archive_in_local_history",
+            "requested"
+          ],
+          "properties": {
+            "expected_head_supplied": {
+              "type": "boolean"
+            },
+            "archive_in_local_history": {
+              "type": "boolean"
+            },
+            "requested": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "policy_result": {
+      "$ref": "common.schema.json#/$defs/status"
+    },
+    "operational_error": {
+      "type": "boolean"
+    },
+    "exit_code": {
+      "$ref": "common.schema.json#/$defs/exit-code"
+    }
+  },
+  "allOf": [
+    {
+      "description": "D8: expected_head is null exactly when there is no freshness anchor.",
+      "if": {
+        "properties": {
+          "freshness_anchor": {
+            "const": "none"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "expected_head": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "expected_head": {
+            "$ref": "common.schema.json#/$defs/hex32"
+          }
+        }
+      }
+    },
+    {
+      "description": "Spec 20.3 and D15: a FAIL dimension makes the overall status FAIL and the exit code 1.",
+      "if": {
+        "properties": {
+          "dimensions": {
+            "not": {
+              "additionalProperties": {
+                "not": {
+                  "const": "FAIL"
+                }
+              }
+            }
+          }
+        },
+        "required": [
+          "dimensions"
+        ]
+      },
+      "then": {
+        "properties": {
+          "overall_status": {
+            "const": "FAIL"
+          },
+          "exit_code": {
+            "const": 1
+          }
+        }
+      }
+    },
+    {
+      "description": "Spec 5.4 and 20.3: PASS overall needs every dimension PASS, no skipped item, and no error finding.",
+      "if": {
+        "properties": {
+          "overall_status": {
+            "const": "PASS"
+          }
+        },
+        "required": [
+          "overall_status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "dimensions": {
+            "additionalProperties": {
+              "const": "PASS"
+            }
+          },
+          "skipped": {
+            "maxItems": 0
+          },
+          "findings": {
+            "items": {
+              "properties": {
+                "severity": {
+                  "not": {
+                    "const": "error"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "Spec 5.7: freshness cannot be PASS without an expected head.",
+      "if": {
+        "properties": {
+          "dimensions": {
+            "properties": {
+              "freshness": {
+                "const": "PASS"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "expected_head": {
+            "$ref": "common.schema.json#/$defs/hex32"
+          }
+        }
+      }
+    },
+    {
+      "description": "D15: an operational error with no FAIL dimension exits 3.",
+      "if": {
+        "allOf": [
+          {
+            "properties": {
+              "operational_error": {
+                "const": true
+              }
+            },
+            "required": [
+              "operational_error"
+            ]
+          },
+          {
+            "properties": {
+              "dimensions": {
+                "additionalProperties": {
+                  "not": {
+                    "const": "FAIL"
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "const": 3
+          }
+        }
+      }
+    },
+    {
+      "description": "D15: exit 0 only when the policy result is PASS and the run was not compromised.",
+      "if": {
+        "properties": {
+          "exit_code": {
+            "const": 0
+          }
+        },
+        "required": [
+          "exit_code"
+        ]
+      },
+      "then": {
+        "properties": {
+          "policy_result": {
+            "const": "PASS"
+          },
+          "operational_error": {
+            "const": false
+          }
+        }
+      }
+    },
+    {
+      "description": "D15: freshness is required whenever one of its three conditions holds.",
+      "if": {
+        "properties": {
+          "policy": {
+            "properties": {
+              "freshness": {
+                "anyOf": [
+                  {
+                    "properties": {
+                      "expected_head_supplied": {
+                        "const": true
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "archive_in_local_history": {
+                        "const": true
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "requested": {
+                        "const": true
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "policy": {
+            "properties": {
+              "required": {
+                "contains": {
+                  "const": "freshness"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

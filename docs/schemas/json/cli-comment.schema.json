@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mochi.invalid/schemas/json/cli-comment.schema.json",
+  "title": "mochi comment --json",
+  "description": "The archive comment at one commit (spec Annex B.2.19, D29): `mochi comment --json`. `comment` is null when that version has no comment (an Encrypted archive never has one). The text is exactly as written: 1 to 16,384 bytes, no control character but tab and line feed.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "archive_id",
+    "seq",
+    "commit_id",
+    "comment"
+  ],
+  "properties": {
+    "schema": {
+      "const": "mochi-cli-comment-v1"
+    },
+    "archive_id": {
+      "$ref": "common.schema.json#/$defs/hex32"
+    },
+    "seq": {
+      "$ref": "common.schema.json#/$defs/seq"
+    },
+    "commit_id": {
+      "$ref": "common.schema.json#/$defs/hex32"
+    },
+    "comment": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384,
+          "pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]+$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}

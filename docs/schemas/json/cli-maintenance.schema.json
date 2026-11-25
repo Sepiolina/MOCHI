@@ -1,0 +1,273 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mochi.invalid/schemas/json/cli-maintenance.schema.json",
+  "title": "mochi snapshot retain|expire|release, checkpoint, rekey (rewrap) --json",
+  "description": "What the one-commit maintenance commands write with --json: `snapshot retain` (alias hold), `snapshot expire`, `snapshot release`, `checkpoint`, and `rekey --add-passphrase` / `--remove-passphrase`. `change` says what the commit did.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "archive",
+    "status",
+    "archive_id",
+    "seq",
+    "commit_id",
+    "checkpoint",
+    "durability",
+    "durability_note",
+    "change",
+    "exit_code"
+  ],
+  "properties": {
+    "schema": {
+      "const": "mochi-cli-maintenance-v1"
+    },
+    "command": {
+      "enum": [
+        "snapshot retain",
+        "snapshot expire",
+        "snapshot release",
+        "checkpoint",
+        "rekey"
+      ]
+    },
+    "archive": {
+      "type": "string"
+    },
+    "status": {
+      "$ref": "common.schema.json#/$defs/commit-status"
+    },
+    "archive_id": {
+      "$ref": "common.schema.json#/$defs/hex32"
+    },
+    "seq": {
+      "$ref": "common.schema.json#/$defs/seq"
+    },
+    "commit_id": {
+      "$ref": "common.schema.json#/$defs/hex32"
+    },
+    "checkpoint": {
+      "type": "boolean"
+    },
+    "durability": {
+      "$ref": "common.schema.json#/$defs/durability"
+    },
+    "durability_note": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "change": {},
+    "exit_code": {
+      "enum": [
+        0,
+        2
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "description": "durability_note says why exactly when the directory entry is unconfirmed, and that exits 2.",
+      "if": {
+        "properties": {
+          "durability": {
+            "const": "durable"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "durability_note": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "durability_note": {
+            "type": "string"
+          },
+          "exit_code": {
+            "const": 2
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "snapshot retain"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "change": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "hold"
+            ],
+            "properties": {
+              "hold": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "label",
+                  "seq"
+                ],
+                "properties": {
+                  "label": {
+                    "type": "string"
+                  },
+                  "seq": {
+                    "$ref": "common.schema.json#/$defs/seq"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "snapshot expire"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "change": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "expire"
+            ],
+            "properties": {
+              "expire": {
+                "type": "array",
+                "items": {
+                  "$ref": "common.schema.json#/$defs/seq"
+                },
+                "minItems": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "snapshot release"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "change": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "release"
+            ],
+            "properties": {
+              "release": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "label"
+                ],
+                "properties": {
+                  "label": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "checkpoint"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "change": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "checkpoint"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "checkpoint": {
+            "const": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "rekey"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "change": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "added",
+              "removed",
+              "revocation"
+            ],
+            "properties": {
+              "added": {
+                "$ref": "common.schema.json#/$defs/u64"
+              },
+              "removed": {
+                "type": "array",
+                "items": {
+                  "$ref": "common.schema.json#/$defs/hex16"
+                }
+              },
+              "revocation": {
+                "const": false,
+                "description": "Removing a key envelope is not revocation (D20)."
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

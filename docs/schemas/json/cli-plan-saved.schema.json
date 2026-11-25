@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mochi.invalid/schemas/json/cli-plan-saved.schema.json",
+  "title": "mochi gc plan / repair plan --output --json",
+  "description": "What `mochi gc plan` and `mochi repair plan` write to standard output with both --output and --json: where the plan was saved, a summary, and the plan itself (the same value as the file).",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "command",
+        "plan_file",
+        "collects_anything",
+        "plan"
+      ],
+      "properties": {
+        "schema": {
+          "const": "mochi-cli-plan-saved-v1"
+        },
+        "command": {
+          "const": "gc plan"
+        },
+        "plan_file": {
+          "type": "string"
+        },
+        "collects_anything": {
+          "type": "boolean"
+        },
+        "plan": {
+          "$ref": "gc-plan-v1.schema.json"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "command",
+        "plan_file",
+        "outcome",
+        "exit_code",
+        "plan"
+      ],
+      "properties": {
+        "schema": {
+          "const": "mochi-cli-plan-saved-v1"
+        },
+        "command": {
+          "const": "repair plan"
+        },
+        "plan_file": {
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "repair-plan-v2.schema.json#/$defs/outcome"
+        },
+        "exit_code": {
+          "$ref": "common.schema.json#/$defs/exit-code"
+        },
+        "plan": {
+          "$ref": "repair-plan-v2.schema.json"
+        }
+      }
+    }
+  ]
+}

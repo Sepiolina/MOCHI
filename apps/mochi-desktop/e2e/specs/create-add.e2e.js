@@ -380,4 +380,33 @@ describe("create and add", () => {
     expect(readdirSync(out).filter((n) => n.startsWith("cancelled-zip") || n.endsWith(".part"))).toEqual([]);
     await expect($('[data-testid="window-title"]')).toHaveText(expect.stringContaining("tar.mochi"));
   });
+
+  // Spec Annex B.2.23 item 3: "Delete files after archiving" moves each
+  // source to the Bin (MOCHI_E2E_TRASH_DIR in this build) only after the new
+  // archive holds it, folders too once empty; the line says so.
+  it("deletes files after archiving by moving them to the Bin, and says so", async () => {
+    const sources = path.join(src, "to-move");
+    mkdirSync(path.join(sources, "inner"), { recursive: true });
+    writeFileSync(path.join(sources, "one.txt"), "one");
+    writeFileSync(path.join(sources, "inner", "two.txt"), "two");
+    const archive = path.join(out, "moved.mochi");
+    queuePicks(sources, archive);
+    await startFresh();
+    await $('[data-testid="stage-folder"]').click();
+    await browser.waitUntil(async () => (await $$('[data-testid="staged-item"]')).length === 1);
+    await $('[data-testid="create-format"]').selectByAttribute("value", "mochi");
+    await $('[data-testid="change-destination"]').click();
+    await browser.waitUntil(async () => (await textOf("save-location")).includes("moved.mochi"));
+    const box = await $('[data-testid="delete-sources"]');
+    await expect(box).not.toBeSelected();
+    await box.click();
+    await $('[data-testid="create-confirm"]').click();
+    await waitForStatus("moved to the Bin");
+    expect(await $('[data-testid="write-status"]').getText()).toContain("4 moved to the Bin");
+    expect(existsSync(archive)).toBe(true);
+    expect(existsSync(sources)).toBe(false);
+    // In the stand-in Bin, not deleted.
+    expect(readdirSync(process.env.MOCHI_E2E_TRASH_DIR)).toContain("to-move");
+    await assertNoBannedWording();
+  });
 });

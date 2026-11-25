@@ -1,0 +1,1 @@
+Pre-release of MOCHI 1.0. A desktop-style window with icons instead of words: a search box for names (MOCHI, ZIP, 7z, RAR, tar, tar.zst), tools in their own window, multiple selection, drag files out of an archive and drop files in to add them, one Open for every format, music and video file icons, and .tar.zst archives can be read.

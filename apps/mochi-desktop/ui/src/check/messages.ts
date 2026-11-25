@@ -254,6 +254,18 @@ export function progressText(phase: string, completed: number, total: number | n
  * Details. A required check, or any other status, is never folded away, so
  * a failing (or degraded, overdue) dimension is always in the default view.
  */
+/**
+ * Dimensions the app does not show (owner decision 2026-11-23): searchability
+ * while it is `UNSUPPORTED` and not required, which it always is in a 1.0 test
+ * because no search index exists to assess; Find's own coverage line says
+ * whether a search was complete. Any other status, or a required one, is
+ * shown, so nothing failing and no reason for a policy result is ever hidden.
+ * The exported JSON keeps every dimension.
+ */
+export function isHidden(d: { dimension: string; status: StatusView; required: boolean }): boolean {
+  return d.dimension === "searchability" && d.status === "UNSUPPORTED" && !d.required;
+}
+
 export function isQuiet(d: { status: StatusView; required: boolean }): boolean {
   return !d.required && (d.status === "UNSUPPORTED" || d.status === "UNKNOWN");
 }

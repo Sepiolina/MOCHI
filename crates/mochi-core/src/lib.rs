@@ -57,6 +57,7 @@ pub mod retention;
 pub mod salvage;
 pub mod search;
 pub mod segment;
+pub mod sources;
 pub mod state;
 pub mod status;
 pub mod storage;

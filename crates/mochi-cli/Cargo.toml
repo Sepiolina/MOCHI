@@ -22,6 +22,9 @@ clap.workspace = true
 serde_json.workspace = true
 rpassword.workspace = true
 zeroize.workspace = true
+# `--move-sources-to-bin` (spec Annex B.2.23 item 3): the Recycle Bin or the
+# Trash, never a deletion. MIT, the same crate the desktop app uses.
+trash = "5"
 
 [dev-dependencies]
 mochi-testkit.workspace = true

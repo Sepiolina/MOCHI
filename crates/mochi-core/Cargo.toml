@@ -18,6 +18,9 @@ test-controls = []
 [dependencies]
 mochi-format.workspace = true
 serde.workspace = true
+# The local head history and evidence log (`storage/os/history.rs`), shared by
+# the CLI and the desktop app (Annex B.2.22). Already in every client's build.
+serde_json.workspace = true
 getrandom.workspace = true
 rusqlite.workspace = true
 
@@ -35,7 +38,6 @@ mochi-sys.workspace = true
 # `trace`: the T13 work-bound tests count SQL statements and full-scan steps
 # with SQLite's own profiler, independently of the code under test.
 rusqlite = { workspace = true, features = ["trace"] }
-serde_json.workspace = true
 tempfile.workspace = true
 proptest.workspace = true
 

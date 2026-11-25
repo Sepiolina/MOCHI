@@ -38,6 +38,12 @@ export const settings = {
   "settings.ntfsFlushTitle": "将文件夹刷新视为已保存（NTFS）",
   "settings.ntfsFlushShort": "关：Windows 上新建的压缩包显示为\"已保存，文件夹条目未确认\"。开：在本地 NTFS 驱动器上显示为已保存。",
   "settings.ntfsFlushNote": "MOCHI 创建压缩包时，数据总会写入磁盘。只有在几秒后断电时，新文件在文件夹中的名称才可能不确定。MOCHI 也会刷新文件夹；微软没有文档说明这能让名称持久保存，但 MOCHI 的断电测试发现它在 NTFS 上有效。关（默认）只报告 Windows 文档保证的内容。网络位置、FAT32 或 exFAT 格式的 U 盘以及其他文件系统无论如何都保持未确认。",
+  "settings.localHistoryTitle": "在这台电脑上记住压缩文件",
+  "settings.localHistoryShort": "开：每次测试都能判断压缩文件是否比以前见过的版本更旧，状况汇总也会保留以前的结果。",
+  "settings.localHistoryNote": "把每个压缩文件见过的最新版本以及测试和更改的结果，保存在 mochi 命令行使用的同一个文件夹中，两者看到的是同一份记录。不会向任何压缩文件写入内容。关：新旧程度始终为 UNKNOWN，状况汇总只包括此窗口。默认开启。",
+  "settings.waitForWriterTitle": "其他 MOCHI 程序正在写入时等待",
+  "settings.waitForWriterShort": "向另一个 MOCHI 窗口或 mochi 命令行正在写入的压缩文件添加内容时，最多等待两分钟让它完成，而不是立即停止。",
+  "settings.waitForWriterNote": "同一时间只有一个程序写入一个压缩文件。开启后，更改会排队等待，然后添加在另一个程序的更改之后。关闭（默认）：立即停止并说明有另一个程序正在写入，不更改任何内容。",
   "settings.heading": "设置",
   "settings.crashHeading": "崩溃报告",
   "settings.crashPolicy":

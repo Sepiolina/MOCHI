@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mochi.invalid/schemas/json/cli-dump-index.schema.json",
+  "title": "mochi dump-index --json",
+  "description": "The catalog of the opened commit, table by table: `mochi dump-index --json` (docs/cli.md rule 12). Table and column names come from the catalog's own schema (R4).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "archive_id",
+    "commit",
+    "tables"
+  ],
+  "properties": {
+    "schema": {
+      "const": "mochi-cli-dump-index-v1"
+    },
+    "archive_id": {
+      "$ref": "common.schema.json#/$defs/hex32"
+    },
+    "commit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seq",
+        "commit_id",
+        "catalog_source"
+      ],
+      "properties": {
+        "seq": {
+          "$ref": "common.schema.json#/$defs/seq"
+        },
+        "commit_id": {
+          "$ref": "common.schema.json#/$defs/hex32"
+        },
+        "catalog_source": {
+          "$ref": "common.schema.json#/$defs/catalog-source"
+        }
+      }
+    },
+    "tables": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "columns",
+          "rows"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "description": "TEXT whose bytes are not UTF-8.",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "text_hex"
+                    ],
+                    "properties": {
+                      "text_hex": {
+                        "$ref": "common.schema.json#/$defs/hex-bytes"
+                      }
+                    }
+                  },
+                  {
+                    "description": "A BLOB, always in this form.",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "blob_hex"
+                    ],
+                    "properties": {
+                      "blob_hex": {
+                        "$ref": "common.schema.json#/$defs/hex-bytes"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

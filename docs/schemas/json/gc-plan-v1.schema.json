@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mochi.invalid/schemas/json/gc-plan-v1.schema.json",
+  "title": "MOCHI GC plan, version 1",
+  "description": "The collection plan of `mochi gc plan` (mochi_core::gc::GcPlan), written to standard output with --json and, byte for byte the same value pretty-printed, to the --output file that `mochi gc apply --plan` accepts. It has no in-band version tag: `gc apply` compares the whole value with a fresh plan, so a plan from a build that writes another shape is refused as stale. Frozen with R7 (gate G15); a change is a new schema identifier (gc-plan-v2) and adds a tag.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "archive_id",
+    "head",
+    "expired",
+    "holds",
+    "roots",
+    "collectable_snapshots",
+    "retained",
+    "collectable",
+    "stream_framing",
+    "collectable_chunks",
+    "collectable_versions"
+  ],
+  "properties": {
+    "archive_id": {
+      "$ref": "common.schema.json#/$defs/hex32"
+    },
+    "head": {
+      "$ref": "common.schema.json#/$defs/plan-head"
+    },
+    "expired": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/seq"
+      },
+      "uniqueItems": true
+    },
+    "holds": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "label",
+          "label_hex",
+          "seq"
+        ],
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "label_hex": {
+            "$ref": "common.schema.json#/$defs/hex-bytes"
+          },
+          "seq": {
+            "$ref": "common.schema.json#/$defs/seq"
+          }
+        }
+      }
+    },
+    "roots": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/seq"
+      },
+      "uniqueItems": true
+    },
+    "collectable_snapshots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "seq",
+          "commit_id",
+          "reason"
+        ],
+        "properties": {
+          "seq": {
+            "$ref": "common.schema.json#/$defs/seq"
+          },
+          "commit_id": {
+            "$ref": "common.schema.json#/$defs/hex32"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "retained": {
+      "$ref": "#/$defs/totals"
+    },
+    "collectable": {
+      "$ref": "#/$defs/totals"
+    },
+    "stream_framing": {
+      "$ref": "#/$defs/totals",
+      "description": "TAR-compatible archives only (D19 rule 7): stream-only chunks, never collectable; all zero otherwise."
+    },
+    "collectable_chunks": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/hex32"
+      },
+      "uniqueItems": true
+    },
+    "collectable_versions": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/hex32"
+      },
+      "uniqueItems": true
+    }
+  },
+  "$defs": {
+    "totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file_versions",
+        "chunks",
+        "stored_bytes"
+      ],
+      "properties": {
+        "file_versions": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "chunks": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "stored_bytes": {
+          "$ref": "common.schema.json#/$defs/u64"
+        }
+      }
+    }
+  }
+}

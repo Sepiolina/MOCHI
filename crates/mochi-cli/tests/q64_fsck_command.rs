@@ -95,11 +95,29 @@ fn q64_fsck_exits_1_with_the_finding_and_verify_does_not() {
         .collect();
     assert_eq!(hits.len(), 1, "{v}");
     assert!(hits[0]["message"].as_str().unwrap().contains("commit 4"));
+    // The same baseline replay rebuilds the retention state (D10.10): fsck
+    // cannot say what must be kept (Annex B.2.22).
+    assert_eq!(v["dimensions"]["retention_compliance"], "FAIL", "{v}");
+    assert!(
+        findings.iter().any(|f| f["code"] == "RETENTION_UNRESOLVED"),
+        "{v}"
+    );
 
     // Not deep: the same archive verifies as before, and lists and reads.
     let (code, v) = go(&state, &["verify", &archive, "--no-local-history"]);
     assert_eq!(code, exit::OK, "{v}");
     assert_eq!(v["dimensions"]["recoverability"], "PASS", "{v}");
+    // Plain verify leaves retention open and points at fsck (Q64).
+    assert_eq!(v["dimensions"]["retention_compliance"], "UNKNOWN", "{v}");
+    assert!(
+        v["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["item"] == "retention compliance"
+                && s["reason"].as_str().unwrap().contains("fsck")),
+        "{v}"
+    );
     let (code, _) = go(&state, &["list", &archive]);
     assert_eq!(code, exit::OK);
 

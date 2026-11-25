@@ -1,0 +1,1223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mochi.invalid/schemas/json/repair-plan-v2.schema.json",
+  "title": "MOCHI repair plan, mochi-repair-plan-v2",
+  "description": "The plan of `mochi repair plan` (mochi_core::repair::RepairPlan, spec 22), written to standard output with --json and, the same value pretty-printed, to the --output file that `mochi repair apply --plan` accepts (only if it equals a fresh plan). In-band identifier: format. Frozen with R7 (gate G15); a change is a new format string. Writers always write every field; `repair apply` also reads a v2 plan without parity, copies, donations, or salvage (they default to empty), which this schema, describing what is written, does not allow.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "archive_id",
+    "source_len",
+    "head",
+    "tail",
+    "chain_break",
+    "ladder",
+    "snapshots",
+    "lost_snapshots",
+    "omitted",
+    "manifest_failures",
+    "retention",
+    "parity",
+    "copies",
+    "donations",
+    "salvage",
+    "writer_parameters",
+    "damage_found",
+    "outcome",
+    "exit_code"
+  ],
+  "properties": {
+    "format": {
+      "const": "mochi-repair-plan-v2"
+    },
+    "archive_id": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/hex32"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source_len": {
+      "$ref": "common.schema.json#/$defs/u64"
+    },
+    "head": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/source-head"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "tail": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/tail"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "chain_break": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/chain-break"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "ladder": {
+      "type": "array",
+      "description": "The seven steps of spec 22, in order.",
+      "minItems": 7,
+      "items": false,
+      "prefixItems": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ladder-step"
+            },
+            {
+              "properties": {
+                "step": {
+                  "const": 1
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ladder-step"
+            },
+            {
+              "properties": {
+                "step": {
+                  "const": 2
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ladder-step"
+            },
+            {
+              "properties": {
+                "step": {
+                  "const": 3
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ladder-step"
+            },
+            {
+              "properties": {
+                "step": {
+                  "const": 4
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ladder-step"
+            },
+            {
+              "properties": {
+                "step": {
+                  "const": 5
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ladder-step"
+            },
+            {
+              "properties": {
+                "step": {
+                  "const": 6
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ladder-step"
+            },
+            {
+              "properties": {
+                "step": {
+                  "const": 7
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "snapshots": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/recovered-snapshot"
+      }
+    },
+    "lost_snapshots": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/lost-snapshot"
+      }
+    },
+    "omitted": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/omitted-entry"
+      }
+    },
+    "manifest_failures": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/manifest-failure"
+      }
+    },
+    "retention": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/retention"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "parity": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/parity"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "copies": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/copy"
+      }
+    },
+    "donations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/donation"
+      }
+    },
+    "salvage": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/salvage"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "writer_parameters": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/writer-parameters"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "damage_found": {
+      "type": "boolean"
+    },
+    "outcome": {
+      "$ref": "#/$defs/outcome"
+    },
+    "exit_code": {
+      "$ref": "common.schema.json#/$defs/exit-code"
+    }
+  },
+  "allOf": [
+    {
+      "description": "Spec 22.2: the exit code follows the outcome (0 complete, 2 partial, 1 nothing recoverable).",
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "complete"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "const": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "partial"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "const": 2
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "nothing_recoverable"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "const": 1
+          },
+          "snapshots": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "description": "A complete repair loses nothing: no lost snapshot, no left-out entry.",
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "complete"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "lost_snapshots": {
+            "maxItems": 0
+          },
+          "omitted": {
+            "maxItems": 0
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "ladder-step": {
+      "description": "One rung of the spec 22 ladder. not_attempted and incomplete are never a pass.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "step",
+        "name",
+        "status",
+        "detail"
+      ],
+      "properties": {
+        "step": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 7
+        },
+        "name": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "used",
+            "not_needed",
+            "not_available",
+            "not_attempted",
+            "incomplete"
+          ]
+        },
+        "detail": {
+          "type": "string"
+        }
+      }
+    },
+    "source-head": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seq",
+        "commit_id",
+        "footer_offset",
+        "committed_len",
+        "found_by"
+      ],
+      "properties": {
+        "seq": {
+          "$ref": "common.schema.json#/$defs/seq"
+        },
+        "commit_id": {
+          "$ref": "common.schema.json#/$defs/hex32"
+        },
+        "footer_offset": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "committed_len": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "found_by": {
+          "enum": [
+            "eof",
+            "scan"
+          ]
+        }
+      }
+    },
+    "tail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "len",
+        "detail"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "clean",
+            "uncommitted",
+            "unresolved"
+          ]
+        },
+        "len": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "chain-break": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "first_trusted_seq",
+        "reason"
+      ],
+      "properties": {
+        "first_trusted_seq": {
+          "$ref": "common.schema.json#/$defs/seq"
+        },
+        "reason": {
+          "$ref": "common.schema.json#/$defs/problem"
+        }
+      }
+    },
+    "recovered-snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seq",
+        "commit_id",
+        "opened_at",
+        "catalog",
+        "entries",
+        "omitted",
+        "trust"
+      ],
+      "properties": {
+        "seq": {
+          "$ref": "common.schema.json#/$defs/seq"
+        },
+        "commit_id": {
+          "anyOf": [
+            {
+              "$ref": "common.schema.json#/$defs/hex32"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "opened_at": {
+          "$ref": "common.schema.json#/$defs/seq"
+        },
+        "catalog": {
+          "enum": [
+            "image",
+            "snapshot_manifest"
+          ]
+        },
+        "entries": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "omitted": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "trust": {
+          "description": "How a snapshot's commit is established (D22 item 6, D23).",
+          "enum": [
+            "chain",
+            "copy_confirmed",
+            "salvage"
+          ]
+        }
+      }
+    },
+    "lost-snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seq",
+        "commit_id",
+        "reason"
+      ],
+      "properties": {
+        "seq": {
+          "$ref": "common.schema.json#/$defs/seq"
+        },
+        "commit_id": {
+          "anyOf": [
+            {
+              "$ref": "common.schema.json#/$defs/hex32"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "$ref": "common.schema.json#/$defs/problem"
+        }
+      }
+    },
+    "omitted-entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "path_hex",
+        "version_id",
+        "kind",
+        "snapshots",
+        "reason"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "common.schema.json#/$defs/path"
+        },
+        "path_hex": {
+          "$ref": "common.schema.json#/$defs/hex-bytes"
+        },
+        "version_id": {
+          "$ref": "common.schema.json#/$defs/hex32"
+        },
+        "kind": {
+          "$ref": "common.schema.json#/$defs/entry-kind"
+        },
+        "snapshots": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/seq"
+          },
+          "minItems": 1
+        },
+        "reason": {
+          "$ref": "common.schema.json#/$defs/problem"
+        }
+      }
+    },
+    "manifest-failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seq",
+        "kind",
+        "reason"
+      ],
+      "properties": {
+        "seq": {
+          "$ref": "common.schema.json#/$defs/seq"
+        },
+        "kind": {
+          "enum": [
+            "delta",
+            "snapshot"
+          ]
+        },
+        "reason": {
+          "$ref": "common.schema.json#/$defs/problem"
+        }
+      }
+    },
+    "planned-hold": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "label_hex",
+        "seq",
+        "new_seq"
+      ],
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "label_hex": {
+          "$ref": "common.schema.json#/$defs/hex-bytes"
+        },
+        "seq": {
+          "$ref": "common.schema.json#/$defs/seq"
+        },
+        "new_seq": {
+          "anyOf": [
+            {
+              "$ref": "common.schema.json#/$defs/seq"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "retention": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "holds",
+            "expired"
+          ],
+          "properties": {
+            "state": {
+              "const": "carried"
+            },
+            "holds": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/planned-hold"
+              }
+            },
+            "expired": {
+              "type": "array",
+              "items": {
+                "$ref": "common.schema.json#/$defs/seq"
+              },
+              "uniqueItems": true
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "reason"
+          ],
+          "properties": {
+            "state": {
+              "const": "unresolved"
+            },
+            "reason": {
+              "$ref": "common.schema.json#/$defs/problem"
+            }
+          }
+        }
+      ]
+    },
+    "group-loss": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "group",
+        "damaged_shards",
+        "intact_parity",
+        "ranges"
+      ],
+      "properties": {
+        "group": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "damaged_shards": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "intact_parity": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "ranges": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "$ref": "common.schema.json#/$defs/u64"
+              },
+              {
+                "$ref": "common.schema.json#/$defs/u64"
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2,
+            "items": false
+          },
+          "description": "Damaged shards' byte ranges [offset, offset + len)."
+        }
+      }
+    },
+    "commit-parity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seq",
+        "footer_offset",
+        "range_offset",
+        "range_len",
+        "frames",
+        "frames_damaged",
+        "shards_damaged",
+        "shards_rebuilt",
+        "shards_unchecked",
+        "beyond_capacity",
+        "violation"
+      ],
+      "properties": {
+        "seq": {
+          "$ref": "common.schema.json#/$defs/seq"
+        },
+        "footer_offset": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "range_offset": {
+          "anyOf": [
+            {
+              "$ref": "common.schema.json#/$defs/u64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "range_len": {
+          "anyOf": [
+            {
+              "$ref": "common.schema.json#/$defs/u64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "frames": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "frames_damaged": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "shards_damaged": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "shards_rebuilt": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "shards_unchecked": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "beyond_capacity": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/group-loss"
+          }
+        },
+        "violation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "parity": {
+      "description": "Ladder step 6, the Redundancy profile (D21).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "declared_percent",
+        "commits",
+        "stopped"
+      ],
+      "properties": {
+        "declared_percent": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "commits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/commit-parity"
+          }
+        },
+        "stopped": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "copy": {
+      "description": "Ladder step 5: one --copy, in argument order (D22).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "len",
+        "match",
+        "agreed_through",
+        "diverged_at",
+        "later_commits",
+        "frames_donated",
+        "bytes_donated",
+        "status",
+        "detail"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "len": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "match": {
+          "anyOf": [
+            {
+              "enum": [
+                "identical_descriptor",
+                "descriptor_hash",
+                "not_a_copy"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "agreed_through": {
+          "anyOf": [
+            {
+              "$ref": "common.schema.json#/$defs/seq"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "diverged_at": {
+          "anyOf": [
+            {
+              "$ref": "common.schema.json#/$defs/seq"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "later_commits": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "frames_donated": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "bytes_donated": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "status": {
+          "enum": [
+            "used",
+            "not_needed",
+            "not_available",
+            "unreadable"
+          ]
+        },
+        "detail": {
+          "type": "string"
+        }
+      }
+    },
+    "donation": {
+      "description": "One frame a copy supplies; copy indexes the copies list.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "offset",
+        "len",
+        "kind",
+        "copy"
+      ],
+      "properties": {
+        "offset": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "len": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "kind": {
+          "enum": [
+            "descriptor",
+            "commit_record",
+            "footer",
+            "parity_frame",
+            "delta_manifest",
+            "catalog_image",
+            "snapshot_manifest",
+            "key_envelope",
+            "data_object"
+          ]
+        },
+        "copy": {
+          "$ref": "common.schema.json#/$defs/u64"
+        }
+      }
+    },
+    "salvaged-commit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seq",
+        "commit_id",
+        "offset",
+        "by"
+      ],
+      "properties": {
+        "seq": {
+          "$ref": "common.schema.json#/$defs/seq"
+        },
+        "commit_id": {
+          "$ref": "common.schema.json#/$defs/hex32"
+        },
+        "offset": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "by": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "salvage": {
+      "description": "Ladder step 7, the bounded salvage scan (D23). Counts are exact; lists stop at 1,024 entries (lists_truncated).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "archive_id",
+        "archive_id_source",
+        "candidates",
+        "candidate_limit",
+        "limit_reached",
+        "frames_walked",
+        "resyncs",
+        "kept_commits",
+        "kept_footers",
+        "confirmed",
+        "unconfirmed",
+        "unconfirmed_count",
+        "rejected",
+        "rejected_count",
+        "contradictory",
+        "contradictory_count",
+        "foreign_commits",
+        "orphan_data_objects",
+        "orphan_bytes",
+        "segments",
+        "footers_regenerated",
+        "profile_inference",
+        "lists_truncated"
+      ],
+      "properties": {
+        "archive_id": {
+          "anyOf": [
+            {
+              "$ref": "common.schema.json#/$defs/hex32"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "archive_id_source": {
+          "enum": [
+            "descriptor",
+            "option",
+            "commits"
+          ]
+        },
+        "candidates": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "candidate_limit": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "limit_reached": {
+          "type": "boolean"
+        },
+        "frames_walked": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "resyncs": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "kept_commits": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "kept_footers": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "confirmed": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/salvaged-commit"
+          },
+          "maxItems": 1024
+        },
+        "unconfirmed": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/salvaged-commit"
+          },
+          "maxItems": 1024
+        },
+        "unconfirmed_count": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "rejected": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/salvaged-commit"
+          },
+          "maxItems": 1024
+        },
+        "rejected_count": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "contradictory": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "seq",
+              "commits",
+              "reason"
+            ],
+            "properties": {
+              "seq": {
+                "$ref": "common.schema.json#/$defs/seq"
+              },
+              "commits": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/salvaged-commit"
+                }
+              },
+              "reason": {
+                "type": "string"
+              }
+            }
+          },
+          "maxItems": 1024
+        },
+        "contradictory_count": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "foreign_commits": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "orphan_data_objects": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "orphan_bytes": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "segments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "top_seq",
+              "top_commit_id",
+              "bottom_seq",
+              "commits",
+              "footer_offset",
+              "footer_regenerated"
+            ],
+            "properties": {
+              "top_seq": {
+                "$ref": "common.schema.json#/$defs/seq"
+              },
+              "top_commit_id": {
+                "$ref": "common.schema.json#/$defs/hex32"
+              },
+              "bottom_seq": {
+                "$ref": "common.schema.json#/$defs/seq"
+              },
+              "commits": {
+                "$ref": "common.schema.json#/$defs/u64"
+              },
+              "footer_offset": {
+                "$ref": "common.schema.json#/$defs/u64"
+              },
+              "footer_regenerated": {
+                "type": "boolean"
+              }
+            }
+          },
+          "maxItems": 1024
+        },
+        "footers_regenerated": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/u64"
+          },
+          "maxItems": 1024
+        },
+        "profile_inference": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "descriptor_reconstructed",
+                "evidence",
+                "encrypted",
+                "redundancy_percent",
+                "profile_constraints_lost",
+                "writer_parameters"
+              ],
+              "properties": {
+                "descriptor_reconstructed": {
+                  "type": "boolean"
+                },
+                "evidence": {
+                  "type": "string"
+                },
+                "encrypted": {
+                  "type": "boolean"
+                },
+                "redundancy_percent": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 100
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "profile_constraints_lost": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "writer_parameters": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lists_truncated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "writer-parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "chunk_size",
+        "zstd_level"
+      ],
+      "properties": {
+        "chunk_size": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "zstd_level": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      }
+    },
+    "outcome": {
+      "enum": [
+        "complete",
+        "partial",
+        "nothing_recoverable"
+      ]
+    }
+  }
+}

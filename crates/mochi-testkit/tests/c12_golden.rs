@@ -2,7 +2,7 @@
 //!
 //! * `c12/valid-parity-frame.bin` and `c12/reject-parity-*.bin`: the R6
 //!   vectors' frames as files (fuzz seeds, and byte-exact against
-//!   `docs/ratification/R6-vectors/vectors.json`).
+//!   `fixtures/R6-vectors/vectors.json`).
 //! * `c12/valid-archive-recovery-record.mochi`: the scripted 3-commit history
 //!   with a 50 % recovery record. It **must keep verifying** clean, and its
 //!   parity must keep decoding. Like the C5 archives it is not compared with
@@ -42,10 +42,7 @@ fn dir() -> PathBuf {
 }
 
 fn vectors() -> serde_json::Value {
-    serde_json::from_str(include_str!(
-        "../../../docs/ratification/R6-vectors/vectors.json"
-    ))
-    .unwrap()
+    serde_json::from_str(include_str!("../../../fixtures/R6-vectors/vectors.json")).unwrap()
 }
 
 fn hex(s: &serde_json::Value) -> Vec<u8> {

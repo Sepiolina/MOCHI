@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mochi.invalid/schemas/json/cli-list.schema.json",
+  "title": "mochi list --json",
+  "description": "The namespace of the opened commit: `mochi list --json`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "archive_id",
+    "seq",
+    "commit_id",
+    "entries"
+  ],
+  "properties": {
+    "schema": {
+      "const": "mochi-cli-list-v1"
+    },
+    "archive_id": {
+      "$ref": "common.schema.json#/$defs/hex32"
+    },
+    "seq": {
+      "$ref": "common.schema.json#/$defs/seq"
+    },
+    "commit_id": {
+      "$ref": "common.schema.json#/$defs/hex32"
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "kind",
+          "size",
+          "content_hash"
+        ],
+        "properties": {
+          "path": {
+            "$ref": "common.schema.json#/$defs/path"
+          },
+          "path_hex": {
+            "$ref": "common.schema.json#/$defs/hex-bytes"
+          },
+          "kind": {
+            "$ref": "common.schema.json#/$defs/entry-kind"
+          },
+          "size": {
+            "$ref": "common.schema.json#/$defs/u64"
+          },
+          "content_hash": {
+            "anyOf": [
+              {
+                "$ref": "common.schema.json#/$defs/hex32"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "allOf": [
+          {
+            "description": "A directory has no content.",
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "directory"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "content_hash": {
+                  "type": "null"
+                },
+                "size": {
+                  "const": 0
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

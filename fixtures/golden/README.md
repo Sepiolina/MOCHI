@@ -449,7 +449,7 @@ Redundancy profile (spec Annex B.2.11 D21; ratification artifact R6; plan C12).
 Written by `c12_golden.rs`.
 
 `c12/valid-parity-frame.bin` and `c12/reject-parity-*.bin` (7): the frames of
-`docs/ratification/R6-vectors/vectors.json` (an independent implementation's
+`fixtures/R6-vectors/vectors.json` (an independent implementation's
 output) as files, compared byte for byte with the JSON; each reject is refused
 for its stated reason (digest, unknown suite, layout fields, signature, the
 wrong payload encoding). They seed the `parity_frame` fuzz target.

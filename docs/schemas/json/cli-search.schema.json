@@ -1,0 +1,235 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mochi.invalid/schemas/json/cli-search.schema.json",
+  "title": "mochi search --json",
+  "description": "Hits and coverage: `mochi search --json` (spec 19.1, 19.3).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "archive_id",
+    "scope",
+    "coverage",
+    "hits"
+  ],
+  "properties": {
+    "schema": {
+      "const": "mochi-cli-search-v1"
+    },
+    "archive_id": {
+      "$ref": "common.schema.json#/$defs/hex32"
+    },
+    "scope": {
+      "anyOf": [
+        {
+          "enum": [
+            "head",
+            "retained",
+            "all"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "commit"
+          ],
+          "properties": {
+            "commit": {
+              "$ref": "common.schema.json#/$defs/seq"
+            }
+          }
+        }
+      ]
+    },
+    "coverage": {
+      "description": "Spec 19.3 coverage. Partial coverage (complete false) exits 2, or 1 with --require-complete.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "complete",
+        "indexed_seq",
+        "indexed_commit_id",
+        "catalog_source",
+        "requested",
+        "searched",
+        "opened_separately",
+        "unavailable",
+        "entries_examined",
+        "pending",
+        "failed",
+        "unsupported",
+        "excluded",
+        "full_text"
+      ],
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "indexed_seq": {
+          "$ref": "common.schema.json#/$defs/seq"
+        },
+        "indexed_commit_id": {
+          "$ref": "common.schema.json#/$defs/hex32"
+        },
+        "catalog_source": {
+          "$ref": "common.schema.json#/$defs/catalog-source"
+        },
+        "requested": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/seq"
+          }
+        },
+        "searched": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/seq"
+          }
+        },
+        "opened_separately": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/seq"
+          }
+        },
+        "unavailable": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "seq",
+              "code",
+              "message"
+            ],
+            "properties": {
+              "seq": {
+                "$ref": "common.schema.json#/$defs/seq"
+              },
+              "code": {
+                "$ref": "common.schema.json#/$defs/error-code"
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "entries_examined": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "pending": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "failed": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "unsupported": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "excluded": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "full_text": {
+          "const": "not-built",
+          "description": "Full-text search (spec 19.2) is not built in 1.0."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "complete": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "unavailable": {
+                "maxItems": 0
+              },
+              "pending": {
+                "const": 0
+              },
+              "failed": {
+                "const": 0
+              },
+              "unsupported": {
+                "const": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "hits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "seq",
+          "kind",
+          "size",
+          "file_version_id",
+          "content_hash"
+        ],
+        "properties": {
+          "path": {
+            "$ref": "common.schema.json#/$defs/path"
+          },
+          "path_hex": {
+            "$ref": "common.schema.json#/$defs/hex-bytes"
+          },
+          "seq": {
+            "$ref": "common.schema.json#/$defs/seq"
+          },
+          "kind": {
+            "$ref": "common.schema.json#/$defs/entry-kind"
+          },
+          "size": {
+            "$ref": "common.schema.json#/$defs/u64"
+          },
+          "file_version_id": {
+            "$ref": "common.schema.json#/$defs/hex32"
+          },
+          "content_hash": {
+            "anyOf": [
+              {
+                "$ref": "common.schema.json#/$defs/hex32"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "allOf": [
+          {
+            "description": "A directory has no content.",
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "directory"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "content_hash": {
+                  "type": "null"
+                },
+                "size": {
+                  "const": 0
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

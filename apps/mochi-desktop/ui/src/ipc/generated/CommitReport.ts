@@ -18,6 +18,17 @@ bytes: number,
  */
 removed: number, skipped: Array<SkippedView>, 
 /**
+ * "Delete files after archiving" (Annex B.2.23 item 3): sources moved
+ * to the Recycle Bin or Trash (files and emptied folders). 0 when it
+ * was not asked for.
+ */
+sources_moved: number, 
+/**
+ * Sources kept although it was asked for, each with its reason (its
+ * archived copy did not read back, it changed, a folder is not empty, …).
+ */
+sources_kept: Array<SkippedView>, 
+/**
  * Set when the new file's directory entry is not confirmed durable
  * (the commit is reported degraded, never durable).
  */

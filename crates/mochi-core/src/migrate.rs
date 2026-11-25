@@ -364,6 +364,7 @@ where
 
     let wopts = WriterOptions {
         threads: None,
+        lock_wait: None,
         chunk_size: Some(chunk_size),
         zstd_level: Some(zstd_level),
         record_time: false,

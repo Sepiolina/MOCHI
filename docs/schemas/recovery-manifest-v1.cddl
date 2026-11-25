@@ -1,0 +1,167 @@
+; MOCHI recovery manifest, schema version 1 (FROZEN with draft 2; ratification item R3).
+; Decisions: spec Annex B.2 D10, D11. Supersedes recovery-manifest-v0.cddl.
+; Changes from v0: keys 9 (required features) and 10 (transaction ID) are
+; added, and the parent-link and snapshot rules below are made exact.
+; This file is complete and standalone: every rule it uses is defined here.
+;
+; Encoding: the deterministic-CBOR subset of Annex B.1 D2. Unknown keys and
+; non-canonical input are rejected. Stored as the payload of exactly ONE
+; skippable frame of kind RECOVERY_MANIFEST (0x184D2A58). 1.0 never splits a
+; manifest across frames; an oversized one is rejected (D10.8). The
+; manifest's hash is the stored-object hash of the whole frame (plan O20).
+; The CBOR-native envelope (D11) is keys 0, 1, 2, 9, and 10.
+;
+; Schema 1 is written exactly when the manifest carries no retention data,
+; no provenance, and does not list the Encrypted required feature; schema 2
+; (recovery-manifest-v2.cddl) and schema 3 (recovery-manifest-v3.cddl) are
+; written otherwise. A manifest written under the wrong schema is refused.
+;
+; Kind 0 (delta): the logical transition of commit `2`.
+;   * parent is null exactly when sequence = 0 (the two delta rules below).
+;   * parent.1 is the stored-object hash of the PARENT COMMIT's delta
+;     manifest (that commit's key 6), never of a snapshot manifest. A
+;     baseline recovery that starts from snapshot S(b) checks the next
+;     delta's parent.1 against commit b's key 6 hash, without reading
+;     delta(b).
+;   * Arrays 5 and 6 hold what is new in this commit, array 7 holds the
+;     namespace operations in order, and array 8 is empty.
+; Kind 1 (snapshot): the complete authoritative state after commit `2`.
+;   * parent MUST be null. A snapshot is a self-contained baseline: recovery
+;     from it needs neither SQLite nor any other manifest.
+;   * Arrays 5, 6, and 8 are complete, and array 7 is empty. Every chunk ID
+;     in an extent, and every file-version ID in an entry, appears in 5 or 6.
+;   * Keys 2 and 10 equal the checkpoint commit's sequence and transaction ID.
+;
+; Rules CDDL cannot state, checked by the code (R3 section 7 lists them):
+;   * Arrays 5, 6, and 8 are sorted by their first field (bytewise) without
+;     duplicates; array 7 keeps operation order. Chunk dependencies are
+;     sorted by (kind, ID) without duplicates.
+;   * parent.0 = key 2 - 1.
+;   * features are strictly increasing, and every entry is known (otherwise
+;     UNSUPPORTED_FEATURE); feature 1 (Encrypted) requires schema 3.
+;   * A snapshot is self-contained (every referenced version and chunk is in
+;     it). Extents cover exactly [0, logical length) with ordinal = position.
+;   * Paths are valid stored paths (spec 10.4, plan O24).
+
+manifest = root-delta / child-delta / snapshot
+
+; Delta of commit 0: no parent.
+root-delta = {
+  0: 1,                       ; schema version
+  1: archive-id,
+  2: 0,                       ; commit sequence
+  3: null,                    ; no parent exactly when sequence = 0
+  4: 0,                       ; kind: delta
+  delta-contents,
+  common-tail,
+}
+
+; Delta of commit n >= 1: linked to its parent commit's delta manifest.
+child-delta = {
+  0: 1,
+  1: archive-id,
+  2: uint .ge 1,
+  3: parent,
+  4: 0,
+  delta-contents,
+  common-tail,
+}
+
+snapshot = {
+  0: 1,
+  1: archive-id,
+  2: seq,                     ; the checkpoint commit's sequence
+  3: null,                    ; a snapshot is a self-contained baseline
+  4: 1,                       ; kind: snapshot
+  5: [* chunk],               ; every chunk referenced
+  6: [* file-version],        ; every file version referenced
+  7: [],                      ; empty for a snapshot
+  8: [* entry],               ; the complete namespace
+  common-tail,
+}
+
+delta-contents = (
+  5: [* chunk],               ; chunks new in this commit
+  6: [* file-version],        ; file versions new in this commit
+  7: [* op],                  ; namespace operations, in order
+  8: [],                      ; empty for a delta
+)
+
+common-tail = (
+  9: features,                ; required features; unknown entry => refuse
+  10: txid,                   ; transaction ID of commit `2`
+)
+
+parent = {
+  0: seq,                     ; parent sequence (= this - 1)
+  1: hash32,                  ; stored-object hash of the parent commit's delta manifest
+}
+
+chunk = {
+  0: hash32,                  ; object ID
+  1: 0,                       ; encoding: one Zstandard frame (plan O21)
+  2: 0,                       ; protection: 0 none (1 AEAD is the Encrypted profile, schema 3)
+  3: uint .ge 1,              ; stored length (> 0)
+  4: hash32,                  ; stored-object hash
+  5: uint,                    ; decoded length
+  6: hash32,                  ; chunk content hash
+  7: [* dependency],          ; sorted, no duplicates
+  8: opt-offset,              ; stored offset in a monolithic archive; null = rediscover by scan + stored hash
+}
+opt-offset = uint / null
+dependency = [dep-kind, hash32]
+dep-kind = 0 / 1              ; 0 dictionary, 1 key envelope; then the object ID
+
+; A file version is a file or a directory; the two forms are separate rules.
+file-version = regular / directory
+
+regular = {
+  0: hash32,                  ; file-version ID
+  1: 0,                       ; kind: file
+  2: uint,                    ; logical length
+  3: hash32,                  ; plain BLAKE3 file-content hash (plan O20)
+  4: [* extent],              ; must cover exactly [0, logical length) (spec 10.3)
+  5: attributes,
+}
+
+; Kind 2 (symbolic link) is reserved: a reader answers UNSUPPORTED_FEATURE.
+directory = {
+  0: hash32,
+  1: 1,                       ; kind: directory
+  2: 0,                       ; logical length 0
+  3: null,                    ; no content hash
+  4: [],                      ; no extents
+  5: attributes,
+}
+
+; logical offset, length (> 0), chunk ID, chunk offset; or a hole.
+extent = data-extent / hole
+data-extent = [uint, uint, hash32, uint]
+hole = [uint, uint, null, 0]
+
+; Promised attributes (spec Annex B.1 D6). Absent key = not recorded.
+attributes = {
+  ? 0: [mode, u32, u32],      ; POSIX: permission bits, numeric uid, numeric gid
+  ? 1: windows-bits,          ; Windows attributes
+  ? 2: mtime,
+}
+mode = uint .le 4095          ; permission bits only (<= 0o7777)
+u32 = uint .le 4294967295
+; READONLY 0x01 | HIDDEN 0x02 | SYSTEM 0x04 | ARCHIVE 0x20 (mask 0x27):
+; exactly these sixteen values (0 to 7, and 0x20 to 0x27).
+windows-bits = 0 / 1 / 2 / 3 / 4 / 5 / 6 / 7 / 32 / 33 / 34 / 35 / 36 / 37 / 38 / 39
+mtime = [secs, nanos]         ; seconds since the Unix epoch, nanoseconds
+secs = int                    ; must fit a signed 64-bit integer (checked by the code)
+
+op = put / delete
+put = [0, path, hash32]       ; path (stored form, spec 10.4 / plan O24), file-version ID
+delete = [1, path]
+entry = [path, hash32]        ; path, file-version ID
+path = bstr
+
+archive-id = bstr .size 32
+txid = bstr .size 16
+hash32 = bstr .size 32
+seq = uint
+features = [* uint]           ; strictly increasing
+nanos = uint .lt 1000000000

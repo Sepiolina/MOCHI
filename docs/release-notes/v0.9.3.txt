@@ -1,0 +1,1 @@
+Pre-release of MOCHI 1.0. Results are one short line with a Details panel; no more lock files: the writer locks the archive itself, and leftover .mochi-lock files are cleaned up on Windows and Linux.

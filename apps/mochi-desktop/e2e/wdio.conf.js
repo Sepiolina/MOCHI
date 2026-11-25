@@ -58,6 +58,12 @@ process.env.MOCHI_E2E_PICK = picks.join(path.delimiter);
 // slowed per entry so that its cancel case is deterministic.
 process.env.MOCHI_E2E_PICK_FILE = path.join(os.tmpdir(), "mochi-e2e-picks.txt");
 process.env.MOCHI_E2E_PACE_MS = "100";
+// The local head history and evidence log the app shares with the command-line tool (spec
+// Annex B.2.22): never the runner's own state directory. A fixed path, emptied once in
+// onPrepare: this file is evaluated again in every worker, and the app (started by the
+// launcher's tauri-driver) and the specs (in workers) must name the same directory.
+const stateDir = path.join(os.tmpdir(), "mochi-e2e-state");
+process.env.MOCHI_STATE_DIR = stateDir;
 
 // The `e2e` build resolves the guide from this directory instead of the installer's
 // resource directory, and appends the path it opens to this file instead of starting a
@@ -136,6 +142,9 @@ export const config = {
   },
 
   onPrepare: () => {
+    // No head history or evidence left over from an earlier run.
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
     // The files the cold start adds, made fresh.
     rmSync(path.dirname(coldDir), { recursive: true, force: true });
     mkdirSync(coldDir, { recursive: true });

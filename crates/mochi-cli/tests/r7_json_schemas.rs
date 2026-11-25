@@ -23,7 +23,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use mochi_cli::{exit_code_for, run};
+use mochi_cli::exit_code_for;
 use mochi_core::report::{Report, Severity};
 use mochi_core::status::{Dimension, Status, VerificationLevel};
 use mochi_core::ErrorCode;
@@ -41,9 +41,11 @@ const SCHEMAS: &[&str] = &[
     "repair-plan-v2.schema.json",
     "gc-plan-v1.schema.json",
     "health-evidence-v1.schema.json",
+    "health-evidence-v2.schema.json",
     "health-policy-v1.schema.json",
     "local-heads-v1.schema.json",
     "cli-commit.schema.json",
+    "cli-commit-v2.schema.json",
     "cli-maintenance.schema.json",
     "cli-list.schema.json",
     "cli-snapshot-list.schema.json",
@@ -64,6 +66,16 @@ const SCHEMAS: &[&str] = &[
 const SPEC_EXAMPLE_CASE: &str = "core-corrupt-chunk-older";
 
 // ---- files ----------------------------------------------------------------------
+
+/// The schema of one evidence log line, by its in-band number: a commit
+/// record is schema 2 (Annex B.2.22), every other record schema 1.
+fn evidence_schema(v: &Value) -> &'static str {
+    if v["schema"] == 2 {
+        "health-evidence-v2.schema.json"
+    } else {
+        "health-evidence-v1.schema.json"
+    }
+}
 
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -151,6 +163,25 @@ fn valid(schema: &str, v: &Value, what: &str) {
 
 // ---- running the CLI ------------------------------------------------------------
 
+/// The stand-in Bin: move `path` into a folder of this test process under a
+/// free name.
+fn test_bin(path: &Path) -> std::io::Result<()> {
+    let dir = std::env::temp_dir().join(format!("mochi-r7-bin-{}", std::process::id()));
+    fs::create_dir_all(&dir)?;
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    for n in 0..1000 {
+        let to = dir.join(format!("{n}-{name}"));
+        if !to.exists() {
+            return fs::rename(path, to);
+        }
+    }
+    Err(std::io::Error::other("no free name in the stand-in bin"))
+}
+
 struct Out {
     code: u8,
     stdout: String,
@@ -161,7 +192,9 @@ fn mochi<S: AsRef<str>>(args: &[S]) -> Out {
     let mut argv: Vec<OsString> = vec!["mochi".into()];
     argv.extend(args.iter().map(|a| OsString::from(a.as_ref())));
     let (mut out, mut err) = (Vec::new(), Vec::new());
-    let code = run(argv, &mut out, &mut err);
+    // `--move-sources-to-bin` moves into a folder of this test process, never
+    // into the machine's Recycle Bin or Trash.
+    let code = mochi_cli::run_with_bin(argv, &mut out, &mut err, std::sync::Arc::new(test_bin));
     Out {
         code,
         stdout: String::from_utf8(out).expect("JSON output is UTF-8"),
@@ -364,16 +397,20 @@ fn readme_table() -> Vec<(String, BTreeSet<String>)> {
 
 /// Every function in the CLI's sources that writes JSON: it emits a value,
 /// serializes one to bytes, or prints the error line. Test modules excluded.
+/// The local head history and evidence log the CLI writes live in
+/// `mochi-core` (shared with the desktop app, Annex B.2.22) and are scanned
+/// too.
 fn json_writing_functions() -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     for file in [
-        "commands.rs",
-        "lib.rs",
-        "state.rs",
-        "render.rs",
-        "passphrase.rs",
+        "crates/mochi-cli/src/commands.rs",
+        "crates/mochi-cli/src/lib.rs",
+        "crates/mochi-cli/src/state.rs",
+        "crates/mochi-cli/src/render.rs",
+        "crates/mochi-cli/src/passphrase.rs",
+        "crates/mochi-core/src/storage/os/history.rs",
     ] {
-        let text = repo_file(&format!("crates/mochi-cli/src/{file}"));
+        let text = repo_file(file);
         let mut current = String::new();
         for line in text.lines() {
             if line.starts_with("#[cfg(test)]") {
@@ -465,7 +502,7 @@ fn command_output_schemas_require_their_in_band_tag() {
         }
         seen += 1;
     }
-    assert_eq!(seen, 15, "the fifteen command-output schemas");
+    assert_eq!(seen, 16, "the sixteen command-output schemas");
 }
 
 // ---- enumerations ------------------------------------------------------------------
@@ -540,28 +577,6 @@ fn enum_of(def: &str) -> Vec<String> {
 }
 
 /// R7 section 6's first column, in order.
-fn r7_codes() -> Vec<String> {
-    let doc = repo_file("docs/ratification/R7-reports-and-error-codes-draft.md");
-    let lines: Vec<&str> = doc.lines().collect();
-    let start = lines
-        .iter()
-        .position(|l| l.starts_with("## 6. Error codes"))
-        .unwrap();
-    lines[start + 1..]
-        .iter()
-        .take_while(|l| !l.starts_with("## "))
-        .filter(|l| l.starts_with("| `"))
-        .map(|l| {
-            l.split('|')
-                .nth(1)
-                .unwrap()
-                .trim()
-                .trim_matches('`')
-                .to_owned()
-        })
-        .collect()
-}
-
 #[test]
 fn enumerations_are_the_code_registries() {
     let registry: Vec<String> = ErrorCode::ALL
@@ -573,7 +588,6 @@ fn enumerations_are_the_code_registries() {
         registry,
         "error codes, in registry order"
     );
-    assert_eq!(r7_codes(), registry, "R7 section 6 is the registry");
     // Each code's serialized form is its registered string.
     assert_eq!(strings!(ErrorCode::ALL), registry);
 
@@ -670,7 +684,7 @@ fn r8_reports_evidence_and_heads_validate() {
                 let text = fs::read_to_string(e.unwrap().path()).unwrap();
                 for line in text.lines() {
                     let v: Value = serde_json::from_str(line).unwrap();
-                    valid("health-evidence-v1.schema.json", &v, &c.name);
+                    valid(evidence_schema(&v), &v, &c.name);
                     evidence += 1;
                 }
             }
@@ -875,6 +889,29 @@ fn corpus() -> Vec<(&'static str, Value)> {
     );
     assert_eq!(v["deleted"].as_array().unwrap().len(), 2);
     keep("cli-commit.schema.json", v);
+
+    // --move-sources-to-bin: commit v2 (Annex B.2.23), one folder moved whole
+    // and one kept because it still holds what was not archived.
+    fs::create_dir_all(a.p("tobin/inner")).unwrap();
+    fs::write(a.p("tobin/inner/x.txt"), b"x").unwrap();
+    fs::create_dir_all(a.p("stays")).unwrap();
+    fs::write(a.p("stays/y.txt"), b"y").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("y.txt", a.p("stays/link")).unwrap();
+    let (_, v) = ok(
+        "cli-commit-v2.schema.json",
+        &a.g(&[
+            "create",
+            &a.s("moved.mochi"),
+            &a.s("tobin"),
+            &a.s("stays"),
+            "--move-sources-to-bin",
+        ]),
+    );
+    assert!(!a.p("tobin").exists());
+    #[cfg(unix)]
+    assert_eq!(v["sources_kept"][0]["reason"], "it is not empty");
+    keep("cli-commit-v2.schema.json", v);
 
     // An interrupted write's tail truncated, with nothing else to commit.
     let torn = a.copy_r8("core-interrupted-after-data");
@@ -1302,8 +1339,8 @@ fn corpus() -> Vec<(&'static str, Value)> {
         let text = fs::read_to_string(e.unwrap().path()).unwrap();
         for line in text.lines() {
             let v: Value = serde_json::from_str(line).unwrap();
-            valid("health-evidence-v1.schema.json", &v, line);
-            keep("health-evidence-v1.schema.json", v);
+            valid(evidence_schema(&v), &v, line);
+            keep(evidence_schema(&v), v);
         }
     }
     let heads = read_json(&a.p("state/heads.json"));

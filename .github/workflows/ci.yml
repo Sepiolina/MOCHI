@@ -162,8 +162,8 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/r6"
           "$RUNNER_TEMP/r6/bin/pip" install --quiet blake3==1.0.8
-          "$RUNNER_TEMP/r6/bin/python" docs/ratification/R6-vectors/gen_vectors.py \
-            | diff - docs/ratification/R6-vectors/vectors.json
+          "$RUNNER_TEMP/r6/bin/python" fixtures/R6-vectors/gen_vectors.py \
+            | diff - fixtures/R6-vectors/vectors.json
 
   ui:
     # Desktop frontend (plan D0, O1, K9): Node 24 LTS, pnpm from

@@ -1,0 +1,123 @@
+; MOCHI commit record, schema version 4 (Annex B.2.19, D29; decided by the owner
+; 2026-11-14). A commit that carries the ARCHIVE COMMENT. Schema 1 plus key 13.
+; This file is complete and standalone: every rule it uses is defined here.
+; Readers accept schemas 1, 2 and 4. Schema 3 is NOT assigned: the frozen
+; golden vectors (c5/reject-commit-schema-version.bin) use 3 as the version no
+; build knows, and so does required feature 2 (c5/reject-commit-required-
+; feature.bin); both stay unassigned so those vectors keep their meaning.
+;
+; Encoding, frame, and commit ID: as commit-record-v1.cddl (the
+; deterministic-CBOR subset of Annex B.1 D2; one skippable frame of kind
+; COMMIT_RECORD, 0x184D2A51; the ID is BLAKE3-256 over
+; "MOCHI2-COMMIT-ID" || 0x00 and the canonical encoding of this map with
+; key 9 removed; the envelope is keys 0, 1, 3, and 7). A reader MUST reject
+; input that does not re-encode to identical bytes, and MUST reject unknown
+; keys.
+;
+; Schema 4 is used EXACTLY for a commit that carries a comment, and such a
+; commit lists EXACTLY the required feature 3 (the comment). A reader that does
+; not know feature 3 (every build before D29) refuses the commit as
+; UNSUPPORTED_FEATURE (exit 4), never as damage. A schema-4 commit without the
+; feature, a schema-1 commit that lists it, and a commit that lists both the
+; Encrypted feature (1) and the comment feature are RECORD_INVALID: an
+; Encrypted archive has no comment (its commit records are readable without
+; the passphrase, B.2.10), and no schema combines keys 11-12 with key 13.
+;
+; Key 13 is the archive's comment AS OF THIS COMMIT: a complete value, not a
+; change (the rule key 11 follows for key envelopes). A writer repeats it in
+; every later commit until it is changed; a commit without a comment (schema 1)
+; means the archive has no comment at that version. So a reader learns the
+; comment of any version from that version's commit alone, and earlier
+; versions keep the comment they had (history, like everything else).
+;
+; Rules CDDL cannot state, checked by the code (in addition to those of
+; commit-record-v1.cddl):
+;   * the comment has no control character other than tab (U+0009) and line
+;     feed (U+000A), and no C1 control (U+0080 to U+009F): no carriage return,
+;     no escape sequences. It is kept exactly as written: never normalized,
+;     case-folded, or trimmed;
+;   * features are exactly [3] (CDDL states it below; the code reports the
+;     combinations above as RECORD_INVALID).
+;
+; Differences from v1: key 0 is 4; key 7 is exactly [3]; key 13 is present.
+; The commit ID covers key 13, so the comment is bound by the footer chain
+; exactly like every other field.
+
+commit = root-commit / child-commit
+
+; Sequence 0: no parent, and the metadata MUST be a checkpoint.
+root-commit = {
+  0: 4,                       ; schema version (D29)
+  1: archive-id,
+  2: 0,                       ; sequence
+  3: txid,                    ; random 128-bit; written as an RFC 9562 version-4 UUID
+  4: null,                    ; no parent
+  5: checkpoint,
+  6: object-ref,              ; this commit's DELTA manifest (kind 0), always present (§11)
+  7: [3],                     ; required features: exactly [3] (the archive comment)
+  ? 8: info-time,             ; informational; never used for ordering (§12.1)
+  9: hash32,                  ; commit ID (excluded from the body)
+  10: object-ref,             ; archive descriptor (D12); offset MUST be 0
+  13: comment,                ; the archive comment as of this commit
+}
+
+child-commit = {
+  0: 4,
+  1: archive-id,
+  2: uint .ge 1,
+  3: txid,
+  4: parent,
+  5: metadata,
+  6: object-ref,
+  7: [3],
+  ? 8: info-time,
+  9: hash32,
+  10: object-ref,
+  13: comment,
+}
+
+parent = {
+  0: hash32,                  ; parent commit ID
+  1: seq,                     ; parent sequence; MUST equal this sequence - 1
+  2: uint,                    ; parent footer offset: the traversal offset (D10.6);
+                              ; must resolve to the parent's valid footer
+}
+
+; Exactly one of the two forms.
+metadata = checkpoint / delta-on-base
+checkpoint = {
+  0: 0,
+  1: object-ref,              ; catalog image: METADATA_DELTA frame, binary envelope v0, encoding 2 (Zstandard-compressed SQLite image; encoding 0 in draft 2)
+  2: object-ref,              ; snapshot manifest: RECOVERY_MANIFEST frame, kind 1
+}
+delta-on-base = {
+  0: 1,
+  1: base-ref,
+}
+; Base rule (deterministic): if the parent is a checkpoint, base = parent;
+; otherwise base = the parent's base. A reader MUST check equality, and
+; MUST NOT search for any other checkpoint.
+base-ref = {
+  0: hash32,                  ; base checkpoint commit ID
+  1: seq,                     ; its sequence (< this sequence)
+  2: uint,                    ; its footer offset: non-authoritative hint (D10.6)
+}
+
+; A stored object in a monolithic archive. The range MUST end at or before
+; this commit frame's offset (§5.1).
+object-ref = {
+  0: uint,                    ; offset of the frame's first byte
+  1: uint .ge 8,              ; stored length including the frame header (>= 8)
+  2: hash32,                  ; stored-object hash; verified BEFORE parsing
+}
+
+archive-id = bstr .size 32
+txid = bstr .size 16
+hash32 = bstr .size 32
+seq = uint
+; 1 to 16,384 bytes of UTF-8 (CBOR text). No control character but tab and line
+; feed, no C1 control (checked by the code).
+comment = tstr .size (1..16384)
+info-time = [secs, nanos]     ; seconds since the Unix epoch, nanoseconds
+secs = int                    ; must fit a signed 64-bit integer (checked by the code)
+nanos = uint .lt 1000000000

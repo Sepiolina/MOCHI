@@ -588,3 +588,64 @@ fn windows_hidden_legacy_lock_file_is_removed_and_the_lock_does_not_block_reads(
     assert_eq!(read_state(&r, &head).unwrap(), steps[2].after);
     w.close().unwrap();
 }
+
+/// Annex B.2.23: `lock_wait` is opt-in. Without it a second writer is refused
+/// at once (§12.5 fail-on-conflict); with a wait shorter than the holder's it
+/// is refused after waiting; with a longer one it takes the lock when the
+/// holder lets go, and builds on the head that writer left.
+#[test]
+fn b2_23_a_waiting_writer_gets_the_lock_when_the_holder_lets_go() {
+    use std::time::{Duration, Instant};
+    let (_tmp, file, steps) = archive(2);
+    let open = |wait: Option<Duration>, seed: u64| {
+        let mut o = test_options();
+        o.lock_wait = wait;
+        ArchiveWriter::open_append(
+            OsStorage::open_existing(&file).unwrap(),
+            Box::new(SeqIds::new(seed)),
+            o,
+            TailPolicy::Refuse,
+        )
+    };
+    let (mut holder, _) = open(None, 9).unwrap();
+
+    let start = Instant::now();
+    let e = open(None, 10).map(|_| ()).unwrap_err();
+    assert_eq!(e.code, ErrorCode::LockConflict);
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "no wait by default"
+    );
+
+    let start = Instant::now();
+    let e = open(Some(Duration::from_millis(300)), 11)
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::LockConflict);
+    assert!(start.elapsed() >= Duration::from_millis(300));
+    assert!(e.message.contains("waited"), "{}", e.message);
+
+    // The holder commits and lets go while another writer waits.
+    let path = file.clone();
+    let waiter = std::thread::spawn(move || {
+        let mut o = test_options();
+        o.lock_wait = Some(Duration::from_secs(30));
+        ArchiveWriter::open_append(
+            OsStorage::open_existing(&path).unwrap(),
+            Box::new(SeqIds::new(12)),
+            o,
+            TailPolicy::Refuse,
+        )
+        .map(|(w, _)| w.head_seq())
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    holder
+        .commit(steps[2].tx.clone(), &Job::new().ctx())
+        .unwrap();
+    holder.close().unwrap();
+    assert_eq!(
+        waiter.join().unwrap().unwrap(),
+        Some(2),
+        "the waiter built on the head the holder left"
+    );
+}

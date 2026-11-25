@@ -88,7 +88,7 @@ export function outcomeResult(operation: Operation, outcome: JobOutcome): WriteR
 export function commitView(c: CommitReport): ResultView {
   const file = c.archive?.file_name ?? "";
   const isDelete = c.operation === "delete";
-  const warn = c.skipped.length > 0 || c.reopen_error !== null;
+  const warn = c.skipped.length > 0 || c.reopen_error !== null || c.sources_kept.length > 0;
 
   const head = isDelete
     ? tn(c.removed, "write.committedDeleteOne", "write.committedDeleteMany", {
@@ -101,6 +101,9 @@ export function commitView(c: CommitReport): ResultView {
   const tail: string[] = [];
   if (c.skipped.length > 0) tail.push(tc(c.skipped.length, "write.lineNotStoredOne", "write.lineNotStoredMany"));
   if (c.reopen_error) tail.push(t("write.lineNotReopened"));
+  // Annex B.2.23 item 3: what went to the Bin, and what was kept.
+  if (c.sources_moved > 0) tail.push(tc(c.sources_moved, "write.lineMovedOne", "write.lineMovedMany"));
+  if (c.sources_kept.length > 0) tail.push(tc(c.sources_kept.length, "write.lineKeptOne", "write.lineKeptMany"));
   const line = tail.length === 0 ? head : `${head}${t("common.statusSeparator")}${joinParts(tail)}`;
 
   const rows: DetailRow[] = [];
@@ -138,6 +141,23 @@ export function commitView(c: CommitReport): ResultView {
       itemTestId: "write-not-stored-item",
     });
   }
+  if (c.sources_moved > 0) {
+    rows.push({
+      label: t("write.rowMoved"),
+      value: tc(c.sources_moved, "common.itemOne", "common.itemMany"),
+      testId: "write-sources-moved",
+    });
+  }
+  if (c.sources_kept.length > 0) {
+    rows.push({
+      label: t("write.rowKept"),
+      value: tc(c.sources_kept.length, "common.itemOne", "common.itemMany"),
+      items: c.sources_kept.map((s) => ({ name: s.path, text: s.reason })),
+      caution: true,
+      testId: "write-sources-kept",
+      itemTestId: "write-sources-kept-item",
+    });
+  }
   if (c.reopen_error) {
     rows.push({
       label: t("write.rowReopen"),
@@ -152,6 +172,7 @@ export function commitView(c: CommitReport): ResultView {
     `${c.operation} commit ${c.seq} ${c.status}`,
     `files ${c.files}, folders ${c.directories}, bytes ${c.bytes}, removed ${c.removed}`,
     `not stored ${c.skipped.length}`,
+    `sources moved to the Bin ${c.sources_moved}, kept ${c.sources_kept.length}`,
     c.durability_note ? `directory entry not confirmed durable (${c.durability_note})` : "directory entry confirmed",
     ...(c.reopen_error ? [`reopen failed ${c.reopen_error.code}`] : []),
   ].join("; ");

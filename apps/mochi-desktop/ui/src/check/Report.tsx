@@ -6,6 +6,7 @@ import {
   dimensionLabel,
   freshnessNote,
   headline,
+  isHidden,
   isQuiet,
   keyed,
   keylessNote,
@@ -100,8 +101,9 @@ export function Report({ report: r, onExport, exporting, onRepair }: ReportProps
   const freshness = r.dimensions.find((d) => d.dimension === "freshness");
   const coverage = coverageLine(r);
   const v = verdict(r);
-  const shown = r.dimensions.filter((d) => !isQuiet(d));
-  const quiet = r.dimensions.filter(isQuiet);
+  const listed = r.dimensions.filter((d) => !isHidden(d));
+  const shown = listed.filter((d) => !isQuiet(d));
+  const quiet = listed.filter(isQuiet);
   return (
     <div
       className="panel report"

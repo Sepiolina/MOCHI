@@ -203,6 +203,30 @@ xvfb-run -a pnpm test     # Linux (apt: webkit2gtk-driver xvfb); on Windows: pnp
   rendered once, exactly as `mochi verify --json` prints it, and exporting writes those
   bytes to a new file. With the `e2e` feature only, these dialogs take paths from the pick
   queue and `MOCHI_E2E_PACE_MS` slows tests and repairs per progress event.
+- **Shared head history and evidence (spec Annex B.2.22).** `src/history.rs` uses
+  `mochi_core::storage::os::history`, the CLI's `heads.json` and evidence log at the same
+  default location (`MOCHI_STATE_DIR` overrides it; the E2E run sets a fresh one). A test is
+  anchored at the head last seen on this computer, by the app or `mochi` (freshness `PASS`,
+  or `FAIL` on a rollback or substitution; first sight `UNKNOWN`); a test in which nothing
+  failed records the head; every completed test and every commit the app publishes (New
+  archive, Add, Delete, Comment, and a repair's new archive) is appended to the evidence log,
+  which the health summary reads. Settings → Performance, **Remember archives on this
+  computer** (`compression-settings.json`, `local_history`, on when absent) turns it off: then
+  no anchor and this session's evidence in memory only. Unit tests never touch the real state
+  directory (`history::use_dir_for_test`).
+- **Waiting for another writer (spec Annex B.2.23).** Settings → Performance, **Wait if another
+  MOCHI program is writing** (`compression-settings.json`, `wait_for_writer`, off when absent):
+  Add, Delete and Comment then wait up to two minutes for another writer's lock
+  (`speed::lock_wait`, passed as `WriterOptions::lock_wait`) instead of failing at once.
+- **Delete files after archiving (spec Annex B.2.23 item 3).** A per-job checkbox on New archive
+  (`.mochi` only) and Add, off by default (`delete_sources`). After the commit, `move_sources` in
+  `src/write.rs` asks `mochi_core::sources::check_removable` which sources may go (the archived
+  copy reads back and the source still hashes to it), moves those to the Bin through
+  `trashbin.rs` (files, then folders once empty), and reports `sources_moved` and
+  `sources_kept` with reasons. It never fails the job and never deletes outright.
+- **Searchability is not listed in a report while it means nothing.** In 1.0 it is always
+  `UNSUPPORTED` (no search index exists); the report hides it unless it is required or has any
+  other status (`check/messages.ts`, `isHidden`). The exported JSON keeps it.
 - **Browsing pages over IPC (D1 exit).** `mochi_core::browse::SnapshotIndex` keeps a
   snapshot's tree in Rust; the webview asks for at most 1,000 entries per call (the
   list asks for 200) and renders only the rows in view, so a folder of 100,000 entries

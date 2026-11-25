@@ -1,0 +1,282 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mochi.invalid/schemas/json/cli-find.schema.json",
+  "title": "mochi find --json",
+  "description": "Names found across the archives under some folders, and the coverage: `mochi find --json` (spec Annex B.2.18, D28; 19.1, 19.3). Exit 0 when coverage is complete (whatever matched), 2 when it is not.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "query",
+    "scopes",
+    "coverage",
+    "total_hits",
+    "hits"
+  ],
+  "properties": {
+    "schema": {
+      "const": "mochi-cli-find-v1"
+    },
+    "query": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "match",
+        "whole_path",
+        "ignore_case"
+      ],
+      "properties": {
+        "text": {
+          "description": "The name asked for, trimmed.",
+          "type": "string",
+          "minLength": 1
+        },
+        "match": {
+          "description": "substring: anywhere in the name; glob: the text has * or ? and covers the whole name.",
+          "enum": [
+            "substring",
+            "glob"
+          ]
+        },
+        "whole_path": {
+          "description": "The text has a /, so it is matched against the whole path inside the archive, not the last component.",
+          "type": "boolean"
+        },
+        "ignore_case": {
+          "description": "Always true: names are compared with case folded.",
+          "const": true
+        }
+      }
+    },
+    "scopes": {
+      "description": "The folders walked, absolute, after duplicates and folders inside another were removed. Text (lossy for names that are not Unicode).",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "complete",
+        "folders_visited",
+        "folders_unreadable",
+        "links_not_followed",
+        "limit",
+        "archives_found",
+        "archives_searched",
+        "archives_skipped",
+        "skipped",
+        "names_searched",
+        "content_searched"
+      ],
+      "properties": {
+        "complete": {
+          "description": "Every archive found was searched, every folder was read, no link was left unfollowed, and no limit was hit. Only then does zero hits mean no such name.",
+          "type": "boolean"
+        },
+        "folders_visited": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "folders_unreadable": {
+          "description": "Folders that could not be listed and entries whose type or size could not be read.",
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "links_not_followed": {
+          "description": "Symbolic links and junctions to folders or to .mochi files below the scopes.",
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "limit": {
+          "description": "The bound that stopped the walk, if one did.",
+          "enum": [
+            "depth",
+            "folders",
+            "archives",
+            null
+          ]
+        },
+        "archives_found": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "archives_searched": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "archives_skipped": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "skipped": {
+          "description": "Every archive found and not searched, in the order found.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "archive",
+              "reason",
+              "code",
+              "message"
+            ],
+            "properties": {
+              "archive": {
+                "type": "string"
+              },
+              "reason": {
+                "enum": [
+                  "not_mochi",
+                  "encrypted",
+                  "unsupported",
+                  "damaged",
+                  "too_large",
+                  "unreadable"
+                ]
+              },
+              "code": {
+                "description": "The stable error code, for unsupported and damaged.",
+                "anyOf": [
+                  {
+                    "$ref": "common.schema.json#/$defs/error-code"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "message": {
+                "description": "The reader's sentence, for unsupported, damaged and unreadable. It can quote archive content.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "reason": {
+                      "enum": [
+                        "unsupported",
+                        "damaged"
+                      ]
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "code": {
+                      "$ref": "common.schema.json#/$defs/error-code"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "else": {
+                  "properties": {
+                    "code": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "names_searched": {
+          "$ref": "common.schema.json#/$defs/u64"
+        },
+        "content_searched": {
+          "description": "Always false: only names are searched (spec 19.2).",
+          "const": false
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "complete": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "skipped": {
+                "maxItems": 0
+              },
+              "archives_skipped": {
+                "const": 0
+              },
+              "folders_unreadable": {
+                "const": 0
+              },
+              "links_not_followed": {
+                "const": 0
+              },
+              "limit": {
+                "const": null
+              }
+            }
+          }
+        }
+      ]
+    },
+    "total_hits": {
+      "$ref": "common.schema.json#/$defs/u64"
+    },
+    "hits": {
+      "description": "Every matching entry, by archive path, then path order in the archive.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "archive",
+          "path",
+          "kind",
+          "size"
+        ],
+        "properties": {
+          "archive": {
+            "description": "The archive file on this computer, as text (lossy for names that are not Unicode).",
+            "type": "string"
+          },
+          "path": {
+            "$ref": "common.schema.json#/$defs/path"
+          },
+          "path_hex": {
+            "$ref": "common.schema.json#/$defs/hex-bytes"
+          },
+          "kind": {
+            "$ref": "common.schema.json#/$defs/entry-kind"
+          },
+          "size": {
+            "$ref": "common.schema.json#/$defs/u64"
+          }
+        },
+        "allOf": [
+          {
+            "description": "A directory has no content.",
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "directory"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "size": {
+                  "const": 0
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

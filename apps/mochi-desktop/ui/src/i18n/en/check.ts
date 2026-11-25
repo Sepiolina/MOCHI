@@ -39,9 +39,9 @@ export const check = {
   "level.structural": "Structure only",
   "level.structuralDetail": "checks control records; data is not read",
   "check.testNote": "A test only reads the archive. It never changes it.",
-  "check.freshnessNote": "Freshness is UNKNOWN. This app cannot tell if this file is the latest copy. That is not a failure, and it is never shown as a pass.",
+  "check.freshnessNote": "Freshness is UNKNOWN. This computer has not seen this archive before (or \"Remember archives on this computer\" is off in Settings), so the app cannot tell if this file is the latest copy. That is not a failure, and it is never shown as a pass. Test it again later: the app now remembers this version.",
   "check.keylessNote": "Checked without its passphrase, so this archive is never PASS overall. Names and contents were not checked. Enter the passphrase above and test again.",
-  "check.healthNote": "Health runs no new check. It sums up the tests run in this window since the app started. Nothing is saved.",
+  "check.healthNote": "Health runs no new check. It sums up the tests and changes recorded on this computer by this app and the mochi command line. With \"Remember archives on this computer\" off, it sums up only the tests run in this window, and nothing is saved.",
   "check.planNote": "Planning changed nothing. Applying writes a new file; this archive is never changed.",
   "check.approvalNote": "This writes exactly the plan into a new file, which is checked before it is kept. If anything changed since planning, nothing is written.",
   "check.overall":

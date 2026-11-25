@@ -133,11 +133,35 @@ fn render_error(err: &MochiError, json: bool, out: &mut dyn Write, errw: &mut dy
     }
 }
 
+/// Move `path` to the system's Recycle Bin (Windows) or Trash (Ubuntu,
+/// freedesktop.org), never deleting it: `--move-sources-to-bin` (spec Annex
+/// B.2.23 item 3). Where the system has no Bin for that location (a server
+/// without a desktop, a network share), this fails and the source is kept.
+pub fn system_bin(path: &std::path::Path) -> std::io::Result<()> {
+    trash::delete(path).map_err(std::io::Error::other)
+}
+
 /// Run the CLI. Returns the process exit code.
 ///
 /// `args` includes the program name. Output goes to the supplied writers so the
 /// whole surface is testable in-process.
 pub fn run<I, T>(args: I, out: &mut dyn Write, errw: &mut dyn Write) -> u8
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    run_with_bin(args, out, errw, std::sync::Arc::new(system_bin))
+}
+
+/// [`run`] with `set_aside` in place of the system Bin, for
+/// `--move-sources-to-bin`: tests pass a folder of their own so that they
+/// never fill the real Recycle Bin or Trash.
+pub fn run_with_bin<I, T>(
+    args: I,
+    out: &mut dyn Write,
+    errw: &mut dyn Write,
+    set_aside: std::sync::Arc<mochi_core::storage::os::SetAside>,
+) -> u8
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
@@ -192,6 +216,8 @@ where
         state::HeadStore::locate(cli.state_dir.as_deref())
     };
     let mut env = commands::Env {
+        set_aside,
+        lock_wait: cli.wait_for_lock.map(std::time::Duration::from_secs),
         flush: if cli.trust_ntfs_directory_flush {
             mochi_core::storage::os::WindowsDirectoryFlush::TrustLocalNtfs
         } else {

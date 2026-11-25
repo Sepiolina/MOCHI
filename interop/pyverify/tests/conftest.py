@@ -5,7 +5,7 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 GOLDEN = ROOT / "fixtures" / "golden"
-RATIFICATION = ROOT / "docs" / "ratification"
+VECTORS = ROOT / "fixtures"
 GOLDEN_PASSPHRASE = "golden passphrase"      # found by trial; see READING-LOG.md (c11 archive)
 
 
@@ -31,9 +31,9 @@ def vectors_lines(path):
 
 @pytest.fixture(scope="session")
 def r5():
-    return json.loads((RATIFICATION / "R5-vectors" / "vectors.json").read_text())
+    return json.loads((VECTORS / "R5-vectors" / "vectors.json").read_text())
 
 
 @pytest.fixture(scope="session")
 def r6():
-    return json.loads((RATIFICATION / "R6-vectors" / "vectors.json").read_text())
+    return json.loads((VECTORS / "R6-vectors" / "vectors.json").read_text())

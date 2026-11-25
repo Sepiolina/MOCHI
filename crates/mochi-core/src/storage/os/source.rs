@@ -225,13 +225,42 @@ impl FileReader for OsReader<'_> {
     }
 }
 
+/// Open a source file for reading without changing its last access time
+/// where the platform allows it (spec Annex B.2.23): archiving a file should
+/// not change it. Linux: `O_NOATIME`, which the kernel grants only to the
+/// file's owner (or with `CAP_FOWNER`); otherwise, and on a filesystem that
+/// refuses the flag, the file is opened normally and the system's own access
+/// time policy (usually `relatime`) applies. Elsewhere: a normal open.
+#[cfg(target_os = "linux")]
+fn open_keeping_access_time(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let noatime = i32::try_from(rustix::fs::OFlags::NOATIME.bits()).unwrap_or(0);
+    match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(noatime)
+        .open(path)
+    {
+        Ok(f) => Ok(f),
+        Err(e) if e.raw_os_error() == Some(rustix::io::Errno::PERM.raw_os_error()) => {
+            fs::File::open(path)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// See the Linux variant: a normal open.
+#[cfg(not(target_os = "linux"))]
+fn open_keeping_access_time(path: &Path) -> std::io::Result<fs::File> {
+    fs::File::open(path)
+}
+
 impl FileSource for OsFile {
     fn len(&self) -> u64 {
         self.len
     }
 
     fn open(&self) -> Result<Box<dyn FileReader + '_>> {
-        let file = fs::File::open(&self.path).map_err(|e| io(&self.path, e))?;
+        let file = open_keeping_access_time(&self.path).map_err(|e| io(&self.path, e))?;
         Ok(Box::new(OsReader {
             path: &self.path,
             file,
@@ -246,6 +275,37 @@ impl FileSource for OsFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Annex B.2.23: reading a file to archive it leaves its access time as
+    /// it was (Linux, where the file is the user's own).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reading_a_source_file_keeps_its_access_time() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a");
+        let mut f = fs::File::create(&path).unwrap();
+        f.write_all(&[7u8; 4096]).unwrap();
+        drop(f);
+        // Two days ago: old enough that `relatime` would update it on read.
+        let old = SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+        let set = |p: &Path| {
+            fs::File::options()
+                .write(true)
+                .open(p)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_accessed(old))
+                .unwrap();
+        };
+        set(&path);
+        let src = OsFile::new(path.clone(), 4096);
+        let mut r = src.open().unwrap();
+        let mut buf = [0u8; 8192];
+        while r.read(&mut buf).unwrap() > 0 {}
+        drop(r);
+        let after = fs::metadata(&path).unwrap().accessed().unwrap();
+        assert_eq!(after, old, "archiving changed the access time");
+    }
 
     #[test]
     fn times_before_the_epoch_keep_nanoseconds_non_negative() {

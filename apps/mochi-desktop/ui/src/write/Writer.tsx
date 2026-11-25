@@ -120,6 +120,36 @@ interface LastRun {
 
 const EMPTY: StagedView = { items: [], destination: null, default_destination: null, format: "mochi" };
 
+/**
+ * "Delete files after archiving" (spec Annex B.2.23 item 3). Rust moves a
+ * source to the Recycle Bin or Trash only after its copy in the archive has
+ * been read back and still matches it; the note says so in plain words.
+ */
+function DeleteSourcesChoice({
+  checked,
+  disabled,
+  onChange,
+}: {
+  checked: boolean;
+  disabled: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <fieldset disabled={disabled}>
+      <label>
+        <input
+          type="checkbox"
+          data-testid="delete-sources"
+          checked={checked}
+          onChange={(e) => onChange(e.target.checked)}
+        />{" "}
+        {t("write.deleteSources")}
+      </label>
+      <Hint testId="delete-sources-note" text={t("write.deleteSourcesNote")} />
+    </fieldset>
+  );
+}
+
 function kindLabel(kind: "file" | "folder" | "other"): string {
   return t(kind === "folder" ? "write.kindFolder" : kind === "file" ? "write.kindFile" : "write.kindOther");
 }
@@ -150,6 +180,9 @@ export function Writer({
   const [tar, setTar] = useState(false);
   const [encrypt, setEncrypt] = useState(false);
   const [recovery, setRecovery] = useState<number | null>(null);
+  // Spec Annex B.2.23 item 3: off unless the user ticks it for this job.
+  const [deleteSources, setDeleteSources] = useState(false);
+  const removal = deleteSources ? { delete_sources: true } : {};
   // The passphrase is read from these inputs when the button is pressed and
   // goes straight into the request; it is never put in state.
   const passRef = useRef<HTMLInputElement>(null);
@@ -446,6 +479,7 @@ export function Writer({
           tar_compatible: tar,
           ...(passphrase === undefined ? {} : { passphrase }),
           ...(recovery === null ? {} : { recovery_percent: recovery }),
+          ...removal,
         },
         over,
       );
@@ -855,6 +889,9 @@ export function Writer({
               </>
             )}
           </details>
+          {isMochi(format) && (
+            <DeleteSourcesChoice checked={deleteSources} disabled={busy} onChange={setDeleteSources} />
+          )}
           {errorLine}
           {progressLine}
           <div className="actions dialog-actions">
@@ -883,6 +920,7 @@ export function Writer({
           onClose={busy ? undefined : close}
         >
           {stagedList}
+          <DeleteSourcesChoice checked={deleteSources} disabled={busy} onChange={setDeleteSources} />
           {errorLine}
           {progressLine}
           <div className="actions dialog-actions">
@@ -891,7 +929,7 @@ export function Writer({
               type="button"
               className="primary"
               data-testid="add-confirm"
-              onClick={() => run("add", { kind: "add_to_archive", handle: archive.handle })}
+              onClick={() => run("add", { kind: "add_to_archive", handle: archive.handle, ...removal })}
               disabled={busy || staged.items.length === 0}
             >
               {t("write.addConfirm")}

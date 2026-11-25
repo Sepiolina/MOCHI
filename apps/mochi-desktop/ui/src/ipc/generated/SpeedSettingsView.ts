@@ -24,6 +24,19 @@ cores: number,
  */
 trust_ntfs_flush: boolean, 
 /**
+ * Remember archives on this computer: each one's last-seen head (for the
+ * freshness check) and the results of tests and commits, in the state
+ * directory the command-line tool shares (spec Annex B.2.22). On by
+ * default.
+ */
+local_history: boolean, 
+/**
+ * Adding to an archive another MOCHI program is writing to waits up to
+ * two minutes for it instead of refusing at once (spec Annex B.2.23).
+ * Off by default.
+ */
+wait_for_writer: boolean, 
+/**
  * Whether that setting applies here (Windows only); the UI shows it then.
  */
 windows: boolean, };

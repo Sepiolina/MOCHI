@@ -352,6 +352,7 @@ mod tests {
             tar_streams: false,
             keyless: false,
             undecodable: Default::default(),
+            retention: None,
         }
     }
 

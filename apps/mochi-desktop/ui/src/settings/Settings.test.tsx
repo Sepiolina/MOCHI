@@ -19,7 +19,7 @@ function backend(initial: Partial<ExtractSettingsView> = {}, pick: string | null
       case "get_crash_settings":
         return { enabled: false, include_details: false, entries: 0, bytes: 0 };
       case "get_speed_settings":
-        return { all_cores: true, fast_extract: false, cores: 8, trust_ntfs_flush: false, windows: false };
+        return { all_cores: true, fast_extract: false, cores: 8, trust_ntfs_flush: false, local_history: true, wait_for_writer: false, windows: false };
       case "get_update_settings":
         return {
           check_on_start: false,

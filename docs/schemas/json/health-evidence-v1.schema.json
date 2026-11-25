@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mochi.invalid/schemas/json/health-evidence-v1.schema.json",
+  "title": "MOCHI health evidence record, schema 1",
+  "description": "One line of the evidence log `<state dir>/evidence/<archive id>.jsonl` (mochi_core::health::EvidenceRecord; docs/cli.md rule 13), appended by verify, fsck, restore-test, and a complete repair apply, and read by `mochi health`. Each line is one JSON object. Frozen with R7 (gate G15); a change is a new schema number.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "level",
+    "completed_at",
+    "head",
+    "dimensions",
+    "exit_code"
+  ],
+  "properties": {
+    "schema": {
+      "const": 1
+    },
+    "command": {
+      "enum": [
+        "verify",
+        "fsck",
+        "restore-test",
+        "repair-apply"
+      ]
+    },
+    "level": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/level"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "completed_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "head": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seq",
+        "commit_id"
+      ],
+      "properties": {
+        "seq": {
+          "$ref": "common.schema.json#/$defs/seq"
+        },
+        "commit_id": {
+          "$ref": "common.schema.json#/$defs/hex32"
+        }
+      }
+    },
+    "dimensions": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "common.schema.json#/$defs/dimension"
+      },
+      "additionalProperties": {
+        "$ref": "common.schema.json#/$defs/status"
+      },
+      "description": "Every dimension the run reported; UNKNOWN means not assessed."
+    },
+    "exit_code": {
+      "$ref": "common.schema.json#/$defs/exit-code"
+    },
+    "scope": {
+      "type": "string"
+    },
+    "finding_codes": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/error-code"
+      },
+      "minItems": 1,
+      "uniqueItems": true,
+      "description": "The run's error findings' codes; omitted when there are none."
+    }
+  }
+}

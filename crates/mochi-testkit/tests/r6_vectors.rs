@@ -1,5 +1,5 @@
 //! R6: the Redundancy profile's suite against the vectors in
-//! `docs/ratification/R6-vectors/vectors.json`, which an independent Python
+//! `fixtures/R6-vectors/vectors.json`, which an independent Python
 //! implementation (`gen_vectors.py`, bit-by-bit field arithmetic, no shared
 //! code) generated from the R6 text. CI regenerates the file and fails if it
 //! differs, so the two implementations agree on every value here.
@@ -11,7 +11,7 @@ use mochi_format::Limits;
 use serde_json::Value;
 
 fn vectors() -> Value {
-    let text = include_str!("../../../docs/ratification/R6-vectors/vectors.json");
+    let text = include_str!("../../../fixtures/R6-vectors/vectors.json");
     serde_json::from_str(text).expect("vectors.json parses")
 }
 

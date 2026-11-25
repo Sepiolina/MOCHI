@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mochi.invalid/schemas/json/local-heads-v1.schema.json",
+  "title": "MOCHI local head history, version 1",
+  "description": "The freshness anchors the CLI keeps in `<state dir>/heads.json` (docs/cli.md rule 3; Annex B.1 D8): the last head seen per archive ID. In-band identifier: version. Local state, not a report, but JSON the CLI writes. Frozen with R7 (gate G15); a change is a new version.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "heads"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "heads": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "common.schema.json#/$defs/hex32"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "seq",
+          "commit_id"
+        ],
+        "properties": {
+          "seq": {
+            "$ref": "common.schema.json#/$defs/seq"
+          },
+          "commit_id": {
+            "$ref": "common.schema.json#/$defs/hex32"
+          }
+        }
+      }
+    }
+  }
+}

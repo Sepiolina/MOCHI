@@ -11,13 +11,21 @@ export function getSpeedSettings(): Promise<SpeedSettingsView> {
   return invoke<SpeedSettingsView>("get_speed_settings");
 }
 
-/** `trustNtfsFlush` (Windows, spec Annex B.2.20) is kept as saved when omitted. */
+/**
+ * `trustNtfsFlush` (Windows, spec Annex B.2.20), `localHistory` (remember
+ * archives on this computer, Annex B.2.22) and `waitForWriter` (wait for
+ * another MOCHI program, Annex B.2.23) are kept as saved when omitted.
+ */
 export function setSpeedSettings(
   allCores: boolean,
   fastExtract: boolean,
   trustNtfsFlush?: boolean,
+  localHistory?: boolean,
+  waitForWriter?: boolean,
 ): Promise<SpeedSettingsView> {
-  return trustNtfsFlush === undefined
-    ? invoke<SpeedSettingsView>("set_speed_settings", { allCores, fastExtract })
-    : invoke<SpeedSettingsView>("set_speed_settings", { allCores, fastExtract, trustNtfsFlush });
+  const args: Record<string, boolean> = { allCores, fastExtract };
+  if (trustNtfsFlush !== undefined) args.trustNtfsFlush = trustNtfsFlush;
+  if (localHistory !== undefined) args.localHistory = localHistory;
+  if (waitForWriter !== undefined) args.waitForWriter = waitForWriter;
+  return invoke<SpeedSettingsView>("set_speed_settings", args);
 }

@@ -25,7 +25,7 @@ independence claim.
   `key-envelope-v0`, `recovery-manifest-v1`, `-v2` and `-v3` (v3 as a diff against v2's rules). Their header
   comments in full for the commit, key-envelope and manifest-v1 schemas, in part for the others. Not opened: the
   three v0 schemas and `tail-quarantine-v0`.
-* `docs/ratification/R5-vectors/vectors.json` and `R6-vectors/vectors.json`, as test data.
+* `fixtures/R5-vectors/vectors.json` and `fixtures/R6-vectors/vectors.json`, as test data.
 * `fixtures/golden/`: `README.md`, every `vectors.txt` and `descriptor-vectors.txt`, and the
   fixture files themselves, as test data.
 * The task description (section W17 of the ratification plan, a document since retired; it set the

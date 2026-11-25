@@ -4,7 +4,7 @@ import type { CommitReport } from "../ipc/write";
 import type { JobOutcome } from "../ipc/jobs";
 import { cautionCount } from "../result/details";
 import type { ResultDetails } from "../result/details";
-import { deleteNote, localCommitNote, outcomeResult, tarNotes } from "./messages";
+import { commitView, deleteNote, localCommitNote, outcomeResult, tarNotes } from "./messages";
 import type { WriteResult } from "./messages";
 import type { Operation } from "./messages";
 
@@ -28,6 +28,8 @@ function report(operation: CommitReport["operation"], extra: Partial<CommitRepor
     bytes: 1536,
     removed: 0,
     skipped: [],
+    sources_moved: 0,
+    sources_kept: [],
     durability_note: null,
     archive: ARCHIVE,
     reopen_error: null,
@@ -193,5 +195,29 @@ test("cancelled and failed jobs say what did not happen; an unconfirmed commit c
     const text = lines("add", { status: "failed", code, message: "m" }).join(" ");
     expect(text).toContain("may or may not have been published");
     expect(text).not.toContain("Nothing was committed");
+  }
+});
+
+// Spec Annex B.2.23 item 3: what went to the Bin is in the line; anything
+// kept is in the line too, marks the result for attention, and is listed
+// with its reason. Nothing says "deleted" or "safe".
+test("delete after archiving reports what moved to the Bin and what was kept", () => {
+  const moved = commitView(report("create", { sources_moved: 4 }));
+  expect(moved.line).toContain("4 moved to the Bin");
+  expect(moved.warn).toBe(false);
+  const kept = commitView(
+    report("add", {
+      sources_moved: 2,
+      sources_kept: [{ path: { text: "notes.txt", verbatim: true }, reason: "it changed after it was read for the archive" }],
+    }),
+  );
+  expect(kept.line).toContain("2 moved to the Bin");
+  expect(kept.line).toContain("1 kept");
+  expect(kept.warn).toBe(true);
+  const row = kept.details.rows.find((r) => r.testId === "write-sources-kept");
+  expect(row?.items?.[0]?.text).toContain("changed");
+  for (const v of [moved, kept]) {
+    expect(v.line.toLowerCase()).not.toContain("deleted");
+    expect(v.line.toLowerCase()).not.toContain("safe");
   }
 });

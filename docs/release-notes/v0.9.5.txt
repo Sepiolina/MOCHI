@@ -1,0 +1,1 @@
+Pre-release of MOCHI 1.0. No more flashing console windows when opening ZIP, 7z, RAR or tar archives on Windows; a right-click menu on the file list (Select all, Copy full names, Extract to…, Delete) replaces the browser's menu; Shift-click and Select all now work in folders with more than 1,000 entries, so large selections drag out in full.

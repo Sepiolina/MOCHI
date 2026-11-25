@@ -65,7 +65,13 @@
 //!   media; an interrupted write is reported as a finding.
 //! * **key availability:** `PASS` when the descriptor declares no encryption
 //!   (no key is needed); `UNKNOWN` if the descriptor was not read.
-//! * **searchability, retention compliance:** `UNSUPPORTED` (C13, C9).
+//! * **retention compliance** (local; Annex B.2.22, [`judge_retention`]):
+//!   the retention state rebuilt at the head, and every snapshot it keeps
+//!   reassembled at the `restoration` level. `PASS` only when integrity and
+//!   recoverability pass there; `FAIL` when `deep` cannot rebuild the state
+//!   (`RETENTION_UNRESOLVED`; plain `verify` leaves it `UNKNOWN`, Q64) or, with nothing expired, damage makes a
+//!   retained snapshot unrecoverable. No inventory is consulted.
+//! * **searchability:** `UNSUPPORTED` (C13: no index exists to assess).
 //!
 //! The policy requires integrity and recoverability, plus freshness when
 //! D15 says so. Exit codes follow D15 through [`Report::conclude`].
@@ -105,6 +111,7 @@ use crate::read::read_version;
 use crate::report::{
     Finding, FreshnessAnchorKind, FreshnessBasis, Policy, Report, Severity, SkippedItem,
 };
+use crate::retention::RetentionState;
 use crate::status::{Dimension, Status, VerificationLevel};
 use crate::storage::{ReadStorage, StorageReader};
 use crate::timestamp::Timestamp;
@@ -327,6 +334,10 @@ struct Run {
     /// a dictionary dependency, plan K17). Their dependents are listed by
     /// [`report_dependents`].
     undecodable: BTreeSet<crate::object::ObjectId>,
+    /// The retention state rebuilt at the head (D10.10), once the head was
+    /// opened with a key or without needing one: retention compliance
+    /// (Annex B.2.22) is judged from it.
+    retention: Option<Result<RetentionState, MochiError>>,
 }
 
 impl Run {
@@ -514,6 +525,7 @@ fn verify_with(
         tar_streams: false,
         keyless: false,
         undecodable: BTreeSet::new(),
+        retention: None,
     };
     // §20.5 asks for the configuration in force: a reader limit that differs
     // from the default changes what this run could check, so each one is
@@ -639,7 +651,10 @@ fn verify_with(
     dims.insert(Dimension::Durability, Status::Unknown);
     dims.insert(Dimension::KeyAvailability, key_availability);
     dims.insert(Dimension::Searchability, Status::Unsupported);
-    dims.insert(Dimension::RetentionCompliance, Status::Unsupported);
+    let retention = judge_retention(opts, &mut run, integrity, recoverability);
+    run.report
+        .dimensions
+        .insert(Dimension::RetentionCompliance, retention);
     if opts.level == VerificationLevel::Search {
         run.report.policy.required.insert(Dimension::Searchability);
     }
@@ -649,6 +664,104 @@ fn verify_with(
     Verification {
         report: run.report,
         head,
+    }
+}
+
+/// Retention compliance, local (Annex B.2.22): does the archive still hold,
+/// intact and restorable, every snapshot its own retention state says must be
+/// kept (the head, every unexpired commit, every held one)? No inventory is
+/// consulted, so this says nothing about recovery copies (spec §16).
+///
+/// * the level is unsupported → `UNSUPPORTED`;
+/// * the state cannot be rebuilt from the segment's manifests → `FAIL`
+///   with `deep` (`RETENTION_UNRESOLVED`: what must be kept is unknown, and
+///   GC refuses), `UNKNOWN` with a note otherwise (Q64: only `fsck` fails a
+///   segment whose baseline replay fails);
+/// * no state (the head was not opened, or no key) or a level below
+///   `restoration` (retained snapshots were not reassembled) → `UNKNOWN`;
+/// * integrity and recoverability `PASS` → `PASS`;
+/// * recoverability `FAIL` with nothing expired (every commit is a root, so
+///   the damage is in a retained snapshot; the recoverability findings name
+///   it) → `FAIL`; with expired commits, whether the damage touches a
+///   retained one is not determined → `UNKNOWN`;
+/// * recoverability `DEGRADED` (parity can rebuild it) → `DEGRADED`;
+/// * otherwise `UNKNOWN`.
+fn judge_retention(
+    opts: &VerifyOptions,
+    run: &mut Run,
+    integrity: Status,
+    recoverability: Status,
+) -> Status {
+    const ITEM: &str = "retention compliance";
+    if run.unsupported {
+        return Status::Unsupported;
+    }
+    let state = match run.retention.take() {
+        None => {
+            run.skip(
+                ITEM,
+                "the head was not opened (or no key was given), so its retention state was not \
+                 rebuilt",
+            );
+            return Status::Unknown;
+        }
+        // Rebuilding the state is a baseline replay of the head's segment
+        // (D10.10). Only `deep` (`fsck`) treats a failed baseline replay as
+        // a failure (Q64: plain `verify` reports nothing about reading as
+        // refused); plain `verify` names it and leaves the dimension open.
+        Some(Err(e)) if e.code == ErrorCode::RetentionUnresolved && opts.deep => {
+            run.finding(ErrorCode::RetentionUnresolved, Severity::Error, e.message);
+            return Status::Fail;
+        }
+        Some(Err(e)) if e.code == ErrorCode::RetentionUnresolved => {
+            run.skip(
+                ITEM,
+                format!(
+                    "{}: RETENTION_UNRESOLVED; run fsck (verify --deep) to check the segment's \
+                     baseline",
+                    e.message
+                ),
+            );
+            return Status::Unknown;
+        }
+        Some(Err(e)) => {
+            run.skip(
+                ITEM,
+                format!("the retention state could not be rebuilt: {}", e.message),
+            );
+            return Status::Unknown;
+        }
+        Some(Ok(state)) => state,
+    };
+    if depth(opts.level).is_none_or(|d| d < 5) {
+        run.skip(
+            ITEM,
+            "below the restoration level the retained snapshots are not reassembled",
+        );
+        return Status::Unknown;
+    }
+    match (integrity, recoverability) {
+        (Status::Pass, Status::Pass) => Status::Pass,
+        (_, Status::Fail) if state.expired.is_empty() => Status::Fail,
+        (_, Status::Fail) => {
+            run.skip(
+                ITEM,
+                format!(
+                    "damage was found, and {} snapshot(s) are expired; whether it touches a \
+                     retained one was not determined",
+                    state.expired.len()
+                ),
+            );
+            Status::Unknown
+        }
+        (_, Status::Degraded) => Status::Degraded,
+        _ => {
+            run.skip(
+                ITEM,
+                "not every retained snapshot was shown to be intact and restorable",
+            );
+            Status::Unknown
+        }
     }
 }
 
@@ -877,6 +990,8 @@ fn check(
     if let Err(e) = opened.catalog.verify() {
         run.error("checking the head catalog", &e);
     }
+    // Retention state at the head, as GC rebuilds it (D10.10).
+    run.retention = Some(crate::gc::resolve_retention(src, &opened, ro));
     // D20 item 10: every commit lists the envelopes its manifests replay to.
     if opened.descriptor.profile().encrypted {
         match check_history_key_states(src, &history, ro, &|| ctx.check_cancelled().is_err()) {
@@ -1533,6 +1648,7 @@ pub fn check_catalog_contents(
         tar_streams: false,
         keyless: false,
         undecodable: BTreeSet::new(),
+        retention: None,
     };
     let d = depth(level).unwrap_or(0);
     let mut finished = true;

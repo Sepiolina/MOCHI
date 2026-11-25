@@ -36,6 +36,12 @@ export const settings = {
   "settings.ntfsFlushTitle": "Count a folder flush as saved (NTFS)",
   "settings.ntfsFlushShort": "Off: new archives on Windows are reported as \"saved, folder entry unconfirmed\". On: on a local NTFS drive they are reported as saved.",
   "settings.ntfsFlushNote": "When MOCHI creates an archive, its data is always flushed to disk. Only the new file's name in its folder is in question if the power fails seconds later. MOCHI flushes the folder too; Microsoft does not document that this makes the name permanent, but MOCHI's crash tests found that it does on NTFS. Off (the default) reports only what Windows documents. Network locations, USB sticks formatted FAT32 or exFAT, and other filesystems stay unconfirmed either way.",
+  "settings.localHistoryTitle": "Remember archives on this computer",
+  "settings.localHistoryShort": "On: each test can tell if an archive is an older copy than one seen before, and the health summary keeps earlier results.",
+  "settings.localHistoryNote": "Saves each archive's latest version seen and the results of tests and changes in the same folder the mochi command line uses, so both see the same history. Nothing is written into any archive. Off: freshness is always UNKNOWN and the health summary covers only this window. On by default.",
+  "settings.waitForWriterTitle": "Wait if another MOCHI program is writing",
+  "settings.waitForWriterShort": "When you add to an archive that another MOCHI window or the mochi command line is writing to, wait up to two minutes for it to finish instead of stopping at once.",
+  "settings.waitForWriterNote": "Only one program writes to an archive at a time. With this on, the change waits its turn and is then added after the other program's. Off (the default): it stops at once, says another program is writing, and nothing is changed.",
   "settings.heading": "Settings",
   "settings.crashHeading": "Crash reports",
   "settings.crashPolicy":

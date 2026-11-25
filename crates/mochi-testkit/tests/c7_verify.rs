@@ -111,7 +111,18 @@ fn c7_healthy_archive_at_every_level() {
             assert_eq!(dim(r, Dimension::Durability), Status::Unknown);
             assert_eq!(dim(r, Dimension::KeyAvailability), Status::Pass);
             assert_eq!(dim(r, Dimension::Searchability), Status::Unsupported);
-            assert_eq!(dim(r, Dimension::RetentionCompliance), Status::Unsupported);
+            // Local retention compliance (Annex B.2.22) needs every retained
+            // snapshot reassembled.
+            let retention = if level == VerificationLevel::Restoration {
+                Status::Pass
+            } else {
+                Status::Unknown
+            };
+            assert_eq!(
+                dim(r, Dimension::RetentionCompliance),
+                retention,
+                "{level:?}"
+            );
             assert_eq!(r.overall_status, Status::Unsupported);
             assert_eq!(
                 r.exit_code,

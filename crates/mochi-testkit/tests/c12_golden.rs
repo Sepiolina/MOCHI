@@ -42,10 +42,7 @@ fn dir() -> PathBuf {
 }
 
 fn vectors() -> serde_json::Value {
-    serde_json::from_str(include_str!(
-        "../../../fixtures/R6-vectors/vectors.json"
-    ))
-    .unwrap()
+    serde_json::from_str(include_str!("../../../fixtures/R6-vectors/vectors.json")).unwrap()
 }
 
 fn hex(s: &serde_json::Value) -> Vec<u8> {

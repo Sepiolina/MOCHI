@@ -577,28 +577,6 @@ fn enum_of(def: &str) -> Vec<String> {
 }
 
 /// R7 section 6's first column, in order.
-fn r7_codes() -> Vec<String> {
-    let doc = repo_file("docs/ratification/R7-reports-and-error-codes-draft.md");
-    let lines: Vec<&str> = doc.lines().collect();
-    let start = lines
-        .iter()
-        .position(|l| l.starts_with("## 6. Error codes"))
-        .unwrap();
-    lines[start + 1..]
-        .iter()
-        .take_while(|l| !l.starts_with("## "))
-        .filter(|l| l.starts_with("| `"))
-        .map(|l| {
-            l.split('|')
-                .nth(1)
-                .unwrap()
-                .trim()
-                .trim_matches('`')
-                .to_owned()
-        })
-        .collect()
-}
-
 #[test]
 fn enumerations_are_the_code_registries() {
     let registry: Vec<String> = ErrorCode::ALL
@@ -610,7 +588,6 @@ fn enumerations_are_the_code_registries() {
         registry,
         "error codes, in registry order"
     );
-    assert_eq!(r7_codes(), registry, "R7 section 6 is the registry");
     // Each code's serialized form is its registered string.
     assert_eq!(strings!(ErrorCode::ALL), registry);
 

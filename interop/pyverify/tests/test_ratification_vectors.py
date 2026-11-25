@@ -1,4 +1,4 @@
-"""R5 and R6 vectors (docs/ratification/R5-vectors, R6-vectors) reproduce."""
+"""R5 and R6 vectors (fixtures/R5-vectors, R6-vectors) reproduce."""
 import unicodedata
 
 import pytest
